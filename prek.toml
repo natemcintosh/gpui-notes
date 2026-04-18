@@ -9,3 +9,9 @@ hooks = [
     { id = "check-toml" },
     { id = "check-yaml" },
 ]
+
+[[repos]]
+repo = "local"
+hooks = [
+    { id = "cargo-fmt", name = "cargo fmt", language = "system", entry = "cargo fmt", files = "\\.rs$", pass_filenames = false },
+]

@@ -18,3 +18,6 @@ test:
 
 check:
     cargo clippy -- -W clippy::pedantic
+
+pre:
+    prek run --all-files
