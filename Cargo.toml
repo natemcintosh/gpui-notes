@@ -10,6 +10,8 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3
 # components that can have children. uncomment this line or
 # use `cargo add smallvec` to add it to your project
 smallvec = "1.13.2"
+dirs = "5"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3", features = ["test-support"] }
+tempfile = "3"
