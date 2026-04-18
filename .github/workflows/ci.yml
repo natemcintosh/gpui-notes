@@ -34,7 +34,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: taiki-e/install-action@nextest
+
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build
-      - run: cargo test
+      - run: cargo nextest run

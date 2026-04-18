@@ -21,10 +21,27 @@ When starting work on an issue, create a new branch linked to that issue (`gh is
 - `cargo build` / `cargo build --release` — compile only.
 - `cargo check` — fast type-check (preferred for quick feedback given the heavy gpui dep).
 - `cargo fmt` / `cargo clippy` — formatting and lints.
+- `cargo nextest run` — run the test suite. CI uses [nextest](https://nexte.st/), so local runs should too. Install with `cargo install cargo-nextest --locked` if not already present.
 
-There are no tests yet; `cargo test` will run zero tests.
+Tests use GPUI's built-in test framework. `gpui` is added as a `[dev-dependencies]` entry with the `test-support` feature enabled (same git/rev pin as the main dep — keep them in sync when bumping).
+
+Write tests with the `#[gpui::test]` attribute macro (in place of `#[test]`). The macro injects a headless `TestAppContext` (or `TestVisualContext` for window-level tests), which drives a simulated platform — no real GPU/window is needed. Typical shape:
+
+```rust
+use gpui::{AppContext, TestAppContext};
+
+#[gpui::test]
+fn it_works(cx: &mut TestAppContext) {
+    let view = cx.new(|_| HelloWorld { text: "hi".into() });
+    cx.read_entity(&view, |v, _| assert_eq!(v.text.as_ref(), "hi"));
+}
+```
+
+`TestAppContext` exposes `new`, `update`, `read`, `executor()` / `foreground_executor()` for driving async tasks, and helpers for simulating keystrokes, mouse events, and modifiers. Use `cx.run_until_parked()` (via the executor) to flush pending effects. For multi-client scenarios, `cx.new_app()` spawns a second context sharing the same executor. Run with `cargo nextest run`.
 
 ## Architecture
+
+As much as possible, use rust's rich type system to encode state and make invalid states impossible.
 
 Single-binary GPUI app in `src/main.rs`:
 

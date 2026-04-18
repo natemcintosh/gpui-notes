@@ -34,3 +34,17 @@ fn main() {
         .unwrap();
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::HelloWorld;
+    use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn hello_world_holds_text(cx: &mut TestAppContext) {
+        let view = cx.new(|_| HelloWorld {
+            text: "World".into(),
+        });
+        cx.read_entity(&view, |v, _| assert_eq!(v.text.as_ref(), "World"));
+    }
+}
