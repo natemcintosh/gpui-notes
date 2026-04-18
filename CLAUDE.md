@@ -12,6 +12,8 @@ Both `gpui` and `gpui_platform` are pinned to a specific `rev` in `Cargo.toml` (
 
 Feature planning, tracking, and dependencies live in GitHub Issues on this repo's `origin`. Use the `gh` CLI for all project management: `gh issue list`, `gh issue view <n>`, `gh issue create`, `gh issue edit`, `gh issue close`, etc. Dependencies between issues are expressed in the issue body under a `## Dependencies` section with `Blocked by: #N` and `Blocks: #M` lines — this forms the feature DAG. When picking the next piece of work, prefer issues whose `Blocked by` list is empty or fully closed.
 
+When starting work on an issue, create a new branch linked to that issue (`gh issue develop <n> --checkout`) and, once the work is ready, open a PR against `main` with `gh pr create` — include `Closes #<n>` in the PR body so the issue auto-closes on merge.
+
 ## Commands
 
 - If a `justfile` command overlaps with a `cargo` command, use the `justfile` command instead. For instance if both have a `check` command, use `just check` instead of `cargo check`. Run `just --list` to see a list of commands.
