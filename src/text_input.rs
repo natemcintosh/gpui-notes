@@ -55,11 +55,21 @@ impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
+        Self::with_content(cx, placeholder, SharedString::default())
+    }
+
+    pub fn with_content(
+        cx: &mut Context<Self>,
+        placeholder: impl Into<SharedString>,
+        content: impl Into<SharedString>,
+    ) -> Self {
+        let content: SharedString = content.into();
+        let end = content.len();
         Self {
             focus_handle: cx.focus_handle(),
-            content: SharedString::default(),
+            content,
             placeholder: placeholder.into(),
-            selected_range: 0..0,
+            selected_range: end..end,
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
