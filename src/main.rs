@@ -1,15 +1,15 @@
 #![allow(clippy::unreadable_literal)]
 
 use gpui::{
-    App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window,
-    WindowOptions, div, rgb,
+    div, rgb, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Styled,
+    Window, WindowOptions,
 };
 use gpui_platform::application;
- 
+
 struct HelloWorld {
     text: SharedString,
 }
- 
+
 impl Render for HelloWorld {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
