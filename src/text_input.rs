@@ -176,6 +176,16 @@ impl TextInput {
         cx.emit(TextInputEvent::Submitted);
     }
 
+    /// Replaces the entire buffer in a headless test. Goes through the same
+    /// `apply_edit` path as real user edits, so subscribers receive a normal
+    /// `Changed` event.
+    #[cfg(test)]
+    pub fn test_replace_all(&mut self, new_content: impl Into<String>, cx: &mut Context<Self>) {
+        let content: String = new_content.into();
+        let end = content.len();
+        self.apply_edit(content, end..end, cx);
+    }
+
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.is_selecting = true;
         if event.modifiers.shift {

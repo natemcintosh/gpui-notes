@@ -107,6 +107,23 @@ impl CurrentPage {
     }
 }
 
+/// Picks the next page name to cycle to after `current`, wrapping at the end.
+/// Returns `None` for an empty `names` slice. If `current` isn't in `names`
+/// (or is `None`), returns the first entry.
+#[must_use]
+pub fn pick_next<'a>(
+    names: &'a [SharedString],
+    current: Option<&SharedString>,
+) -> Option<&'a SharedString> {
+    if names.is_empty() {
+        return None;
+    }
+    let idx = current
+        .and_then(|c| names.iter().position(|n| n == c))
+        .map_or(0, |i| (i + 1) % names.len());
+    Some(&names[idx])
+}
+
 /// Saves the outgoing current page if dirty, opens `name` (creating if missing),
 /// and sets it as the current page.
 ///
@@ -129,6 +146,7 @@ pub fn set_current_page(name: &str, cx: &mut App) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page::PageEvent;
     use gpui::TestAppContext;
     use tempfile::TempDir;
 
@@ -180,6 +198,44 @@ mod tests {
         });
     }
 
+    struct SavedRecorder {
+        count: usize,
+        _sub: gpui::Subscription,
+    }
+
+    impl SavedRecorder {
+        fn new(page: &Entity<crate::page::Page>, cx: &mut gpui::Context<Self>) -> Self {
+            let sub = cx.subscribe(page, |this: &mut Self, _, event: &PageEvent, _| {
+                if matches!(event, PageEvent::Saved) {
+                    this.count += 1;
+                }
+            });
+            Self {
+                count: 0,
+                _sub: sub,
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn save_emits_saved_event(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (recorder, page, mut reg) = cx.update(|cx| {
+            let mut reg = PageRegistry::new(make_store(&tmp));
+            let page = reg.open_or_create("foo", cx).unwrap();
+            let recorder = cx.new(|cx| SavedRecorder::new(&page, cx));
+            (recorder, page, reg)
+        });
+
+        cx.update(|cx| {
+            page.update(cx, |p, cx| p.set_body_for_test("x", cx));
+            reg.save(&page, cx).unwrap();
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| assert_eq!(recorder.read(cx).count, 1));
+    }
+
     #[gpui::test]
     fn save_is_noop_when_not_dirty(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
@@ -189,6 +245,41 @@ mod tests {
             reg.save(&page, cx).unwrap();
             assert!(!page.read(cx).dirty());
         });
+    }
+
+    fn names(items: &[&str]) -> Vec<SharedString> {
+        items
+            .iter()
+            .map(|s| SharedString::from(s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn pick_next_empty_returns_none() {
+        assert!(pick_next(&[], None).is_none());
+        let current = SharedString::from("foo");
+        assert!(pick_next(&[], Some(&current)).is_none());
+    }
+
+    #[test]
+    fn pick_next_wraps_after_last() {
+        let ns = names(&["a", "b", "c"]);
+        assert_eq!(pick_next(&ns, Some(&ns[2])).unwrap().as_ref(), "a");
+    }
+
+    #[test]
+    fn pick_next_advances_from_current() {
+        let ns = names(&["a", "b", "c"]);
+        assert_eq!(pick_next(&ns, Some(&ns[0])).unwrap().as_ref(), "b");
+        assert_eq!(pick_next(&ns, Some(&ns[1])).unwrap().as_ref(), "c");
+    }
+
+    #[test]
+    fn pick_next_falls_back_to_first_when_current_missing() {
+        let ns = names(&["a", "b"]);
+        let orphan = SharedString::from("zzz");
+        assert_eq!(pick_next(&ns, Some(&orphan)).unwrap().as_ref(), "a");
+        assert_eq!(pick_next(&ns, None).unwrap().as_ref(), "a");
     }
 
     #[gpui::test]

@@ -2,11 +2,11 @@
 
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, AppContext, Bounds, Context, Entity, FocusHandle,
-    Focusable, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled, Subscription,
-    Window, WindowBounds, WindowOptions,
+    Focusable, IntoElement, KeyBinding, ParentElement, Render, Styled, Subscription, Window,
+    WindowBounds, WindowOptions,
 };
 use gpui_notes::page::Page;
-use gpui_notes::registry::{set_current_page, CurrentPage, PageRegistry};
+use gpui_notes::registry::{pick_next, set_current_page, CurrentPage, PageRegistry};
 use gpui_notes::store::NotesStore;
 use gpui_notes::text_input;
 use gpui_platform::application;
@@ -49,25 +49,17 @@ impl RootView {
                 return;
             }
         };
-        if names.is_empty() {
-            return;
-        }
         let current = cx
             .global::<CurrentPage>()
             .get()
             .map(|p| p.read(cx).name().clone());
-        let next = pick_next(&names, current.as_ref());
+        let Some(next) = pick_next(&names, current.as_ref()) else {
+            return;
+        };
         if let Err(err) = set_current_page(next.as_ref(), cx) {
             eprintln!("open {next:?} failed: {err}");
         }
     }
-}
-
-fn pick_next<'a>(names: &'a [SharedString], current: Option<&SharedString>) -> &'a SharedString {
-    let idx = current
-        .and_then(|c| names.iter().position(|n| n == c))
-        .map_or(0, |i| (i + 1) % names.len());
-    &names[idx]
 }
 
 impl Focusable for RootView {

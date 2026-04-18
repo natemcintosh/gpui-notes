@@ -80,3 +80,37 @@ impl Page {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn input_edits_propagate_to_page(cx: &mut TestAppContext) {
+        let page = cx.new(|cx| Page::new("foo".into(), String::new(), cx));
+        let input = cx.read(|cx| page.read(cx).input().clone());
+
+        cx.update(|cx| {
+            input.update(cx, |i, cx| i.test_replace_all("hello", cx));
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let p = page.read(cx);
+            assert_eq!(p.body().as_ref(), "hello");
+            assert!(p.dirty());
+        });
+    }
+
+    #[gpui::test]
+    fn page_starts_clean_with_preloaded_body(cx: &mut TestAppContext) {
+        let page = cx.new(|cx| Page::new("foo".into(), "preloaded".into(), cx));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let p = page.read(cx);
+            assert_eq!(p.body().as_ref(), "preloaded");
+            assert!(!p.dirty(), "hydrating body must not mark the page dirty");
+        });
+    }
+}
