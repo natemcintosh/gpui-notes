@@ -21,3 +21,6 @@ check:
 
 pre:
     prek run --all-files
+
+unblocked:
+    ./scripts/unblocked-issues.sh
