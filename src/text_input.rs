@@ -768,67 +768,52 @@ mod tests {
         assert_eq!(next_char_boundary(s, 6), 6);
     }
 
-    #[test]
-    fn backspace_at_start_is_noop() {
-        let (out, sel) = apply_backspace("hello", 0..0);
-        assert_eq!(out, "hello");
-        assert_eq!(sel, 0..0);
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::at_start_is_noop("hello", 0..0, "hello", 0..0)]
+    #[case::removes_prev_char_when_selection_empty("hello", 3..3, "helo", 2..2)]
+    #[case::deletes_selection("hello world", 6..11, "hello ", 6..6)]
+    #[case::respects_utf8_boundary("a🦀b", 5..5, "ab", 1..1)]
+    fn backspace_cases(
+        #[case] content: &str,
+        #[case] selection: Range<usize>,
+        #[case] expected_content: &str,
+        #[case] expected_selection: Range<usize>,
+    ) {
+        let (out, sel) = apply_backspace(content, selection);
+        assert_eq!(out, expected_content);
+        assert_eq!(sel, expected_selection);
     }
 
-    #[test]
-    fn backspace_removes_prev_char_when_selection_empty() {
-        let (out, sel) = apply_backspace("hello", 3..3);
-        assert_eq!(out, "helo");
-        assert_eq!(sel, 2..2);
+    #[rstest]
+    #[case::at_end_is_noop("hello", 5..5, "hello", 5..5)]
+    #[case::removes_next_char_when_selection_empty("hello", 2..2, "helo", 2..2)]
+    #[case::respects_utf8_boundary("a🦀b", 1..1, "ab", 1..1)]
+    fn delete_cases(
+        #[case] content: &str,
+        #[case] selection: Range<usize>,
+        #[case] expected_content: &str,
+        #[case] expected_selection: Range<usize>,
+    ) {
+        let (out, sel) = apply_delete(content, selection);
+        assert_eq!(out, expected_content);
+        assert_eq!(sel, expected_selection);
     }
 
-    #[test]
-    fn backspace_deletes_selection() {
-        let (out, sel) = apply_backspace("hello world", 6..11);
-        assert_eq!(out, "hello ");
-        assert_eq!(sel, 6..6);
-    }
-
-    #[test]
-    fn backspace_respects_utf8_boundary() {
-        let (out, sel) = apply_backspace("a🦀b", 5..5);
-        assert_eq!(out, "ab");
-        assert_eq!(sel, 1..1);
-    }
-
-    #[test]
-    fn delete_at_end_is_noop() {
-        let (out, sel) = apply_delete("hello", 5..5);
-        assert_eq!(out, "hello");
-        assert_eq!(sel, 5..5);
-    }
-
-    #[test]
-    fn delete_removes_next_char_when_selection_empty() {
-        let (out, sel) = apply_delete("hello", 2..2);
-        assert_eq!(out, "helo");
-        assert_eq!(sel, 2..2);
-    }
-
-    #[test]
-    fn delete_respects_utf8_boundary() {
-        let (out, sel) = apply_delete("a🦀b", 1..1);
-        assert_eq!(out, "ab");
-        assert_eq!(sel, 1..1);
-    }
-
-    #[test]
-    fn replace_inserts_at_cursor() {
-        let (out, sel) = apply_replace("helo", 3..3, "l");
-        assert_eq!(out, "hello");
-        assert_eq!(sel, 4..4);
-    }
-
-    #[test]
-    fn replace_overwrites_selection() {
-        let (out, sel) = apply_replace("hello world", 6..11, "there");
-        assert_eq!(out, "hello there");
-        assert_eq!(sel, 11..11);
+    #[rstest]
+    #[case::inserts_at_cursor("helo", 3..3, "l", "hello", 4..4)]
+    #[case::overwrites_selection("hello world", 6..11, "there", "hello there", 11..11)]
+    fn replace_cases(
+        #[case] content: &str,
+        #[case] range: Range<usize>,
+        #[case] new_text: &str,
+        #[case] expected_content: &str,
+        #[case] expected_selection: Range<usize>,
+    ) {
+        let (out, sel) = apply_replace(content, range, new_text);
+        assert_eq!(out, expected_content);
+        assert_eq!(sel, expected_selection);
     }
 
     // Runtime smoke test: `TextInput::new` wires up a focus handle and starts
