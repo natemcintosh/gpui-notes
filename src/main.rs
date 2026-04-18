@@ -120,9 +120,14 @@ impl Render for RootView {
 fn main() {
     application().run(|cx: &mut App| {
         text_input::bind_keys(cx);
+        let cmd = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
         cx.bind_keys([
-            KeyBinding::new("cmd-s", SavePage, Some("RootView")),
-            KeyBinding::new("cmd-p", NextPage, Some("RootView")),
+            KeyBinding::new(&format!("{cmd}-s"), SavePage, Some("RootView")),
+            KeyBinding::new(&format!("{cmd}-p"), NextPage, Some("RootView")),
         ]);
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
