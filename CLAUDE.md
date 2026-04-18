@@ -8,6 +8,10 @@ A scaffolded GPUI application (from Create GPUI App). GPUI is the GUI framework 
 
 Both `gpui` and `gpui_platform` are pinned to a specific `rev` in `Cargo.toml` (currently `ec9be5c3`). Do **not** remove the pin casually: upstream moves fast and breaks this crate's API (e.g. `Application::new()` was removed in favor of `gpui_platform::application()`). See the README's "GPUI dependency" section for the bump process.
 
+## Project management
+
+Feature planning, tracking, and dependencies live in GitHub Issues on this repo's `origin`. Use the `gh` CLI for all project management: `gh issue list`, `gh issue view <n>`, `gh issue create`, `gh issue edit`, `gh issue close`, etc. Dependencies between issues are expressed in the issue body under a `## Dependencies` section with `Blocked by: #N` and `Blocks: #M` lines — this forms the feature DAG. When picking the next piece of work, prefer issues whose `Blocked by` list is empty or fully closed.
+
 ## Commands
 
 - If a `justfile` command overlaps with a `cargo` command, use the `justfile` command instead. For instance if both have a `check` command, use `just check` instead of `cargo check`. Run `just --list` to see a list of commands.
