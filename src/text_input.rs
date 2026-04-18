@@ -78,10 +78,12 @@ impl TextInput {
         }
     }
 
+    #[must_use]
     pub fn content(&self) -> &SharedString {
         &self.content
     }
 
+    #[must_use]
     pub fn selected_range(&self) -> Range<usize> {
         self.selected_range.clone()
     }
@@ -169,6 +171,7 @@ impl TextInput {
         }
     }
 
+    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextInputEvent::Submitted);
     }
@@ -362,14 +365,16 @@ impl EntityInputHandler for TextInput {
         );
         self.marked_range =
             (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .map(|nr| nr.start + range.start..nr.end + range.end)
-            .unwrap_or_else(|| {
+        self.selected_range = new_selected_range_utf16.as_ref().map_or_else(
+            || {
                 let end = range.start + new_text.len();
                 end..end
-            });
+            },
+            |r| {
+                let nr = self.range_from_utf16(r);
+                nr.start + range.start..nr.end + range.end
+            },
+        );
         self.set_content_and_emit(new_content, cx);
         cx.notify();
     }
@@ -455,7 +460,7 @@ impl Element for TextElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
+        (): &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
@@ -559,7 +564,7 @@ impl Element for TextElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
+        (): &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
@@ -643,6 +648,7 @@ impl Focusable for TextInput {
 
 /// Platform emoji fonts, ordered so the first installed one wins. GPUI
 /// silently skips any family name that isn't present on the system.
+#[must_use]
 pub fn emoji_font_fallbacks() -> FontFallbacks {
     FontFallbacks::from_fonts(vec![
         "Apple Color Emoji".into(),
