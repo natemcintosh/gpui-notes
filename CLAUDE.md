@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A scaffolded GPUI application (from Create GPUI App). GPUI is the GUI framework that powers the Zed editor; it is pulled directly from the `zed-industries/zed` Git repository rather than crates.io, so first builds download and compile the full Zed workspace's `gpui` crate and its transitive deps — expect a long initial `cargo build`.
 
+Both `gpui` and `gpui_platform` are pinned to a specific `rev` in `Cargo.toml` (currently `ec9be5c3`). Do **not** remove the pin casually: upstream moves fast and breaks this crate's API (e.g. `Application::new()` was removed in favor of `gpui_platform::application()`). See the README's "GPUI dependency" section for the bump process.
+
 ## Commands
 
 - `cargo run` — build and launch the app window.
@@ -19,7 +21,7 @@ There are no tests yet; `cargo test` will run zero tests.
 
 Single-binary GPUI app in `src/main.rs`:
 
-- `Application::new().run(...)` enters the GPUI runtime, giving a `&mut App` context.
+- `gpui_platform::application().run(...)` enters the GPUI runtime, giving a `&mut App` context. (The older `Application::new()` entry point no longer exists on current `gpui` HEAD.)
 - `cx.open_window(WindowOptions::default(), ...)` opens a window whose root view is constructed via `cx.new(|_cx| ...)` — the closure returns the root view struct (`HelloWorld`).
 - A view is any struct implementing `Render`. `Render::render` returns an `impl IntoElement` built from the `div()` element builder with chained style/layout methods (`.flex()`, `.bg()`, `.size_full()`, etc.) and `.child(...)` for content.
 - `SharedString` is GPUI's cheap-clone string type used for view-owned text.

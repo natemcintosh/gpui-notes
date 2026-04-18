@@ -1,4 +1,5 @@
 use gpui::*;
+use gpui_platform::application;
  
 struct HelloWorld {
     text: SharedString,
@@ -19,7 +20,7 @@ impl Render for HelloWorld {
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    application().run(|cx: &mut App| {
         cx.open_window(WindowOptions::default(), |_, cx| {
             cx.new(|_cx| HelloWorld {
                 text: "World".into(),
