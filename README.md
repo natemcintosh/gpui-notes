@@ -14,6 +14,16 @@ A Rust + [GPUI](https://www.gpui.rs/) note-taking app inspired by [Logseq](https
 
 Not currently planned (may be revisited later): graph view, query blocks, task states, flashcards, PDF annotation, whiteboards, and a plugin ecosystem.
 
+## Notes storage
+
+Pages are stored as plain `.md` files in a notes root directory:
+
+- Linux: `$XDG_DATA_HOME/gpui-notes` (falls back to `~/.local/share/gpui-notes`)
+- macOS: `~/Library/Application Support/gpui-notes`
+- Windows: `%APPDATA%\gpui-notes`
+
+Override the location with the `GPUI_NOTES_ROOT` environment variable (must be an absolute path).
+
 ## GPUI dependency
 
 GPUI is not published to crates.io. We depend on it (and `gpui_platform`) directly from the [`zed-industries/zed`](https://github.com/zed-industries/zed) repository. Because that repo is Zed's active development trunk, its API changes without warning — the scaffold emitted by `create-gpui-app` has already drifted from HEAD at least once (e.g. `Application::new()` was removed in favor of `gpui_platform::application()`).
