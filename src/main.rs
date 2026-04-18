@@ -1,4 +1,9 @@
-use gpui::*;
+#![allow(clippy::unreadable_literal)]
+
+use gpui::{
+    App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window,
+    WindowOptions, div, rgb,
+};
 use gpui_platform::application;
  
 struct HelloWorld {

@@ -10,6 +10,7 @@ Both `gpui` and `gpui_platform` are pinned to a specific `rev` in `Cargo.toml` (
 
 ## Commands
 
+- If a `justfile` command overlaps with a `cargo` command, use the `justfile` command instead. For instance if both have a `check` command, use `just check` instead of `cargo check`. Run `just --list` to see a list of commands.
 - `cargo run` — build and launch the app window.
 - `cargo build` / `cargo build --release` — compile only.
 - `cargo check` — fast type-check (preferred for quick feedback given the heavy gpui dep).
