@@ -1,15 +1,18 @@
 # gpui-notes
 
-Created with Create GPUI App.
+A Rust + [GPUI](https://www.gpui.rs/) note-taking app inspired by [Logseq](https://github.com/logseq/logseq). It is not aiming at full Logseq parity — the goal is a focused subset of the features that get used day-to-day. GPUI is the GUI framework that powers the [Zed](https://github.com/zed-industries/zed) editor.
 
-- [`gpui`](https://www.gpui.rs/)
-- [GPUI documentation](https://github.com/zed-industries/zed/tree/main/crates/gpui/docs)
-- [GPUI examples](https://github.com/zed-industries/zed/tree/main/crates/gpui/examples)
+## Planned features
 
-## Usage
+- **Daily journal pages** — an auto-created dated page as the default capture surface.
+- **Markdown editing with rendered preview** — blocks render as formatted markdown when not focused, and switch to raw markdown on edit.
+- **Outliner / block-based editing** — every line is a collapsible, nestable bullet block.
+- **Bidirectional page links & backlinks** — `[[Page Name]]` syntax auto-creates pages; each page shows references back to it.
+- **Block references** — `((block-id))` transcludes a specific block; edits sync everywhere it appears.
+- **`#tags`** for categorizing blocks and pages. (No plan to support Logseq's `key:: value` property syntax.)
+- **Local-first plain-markdown storage** — notes are saved as plain `.md` files on disk, syncable via Git, Dropbox, iCloud, or any other file sync.
 
-- Ensure Rust is installed - [Rustup](https://rustup.rs/)
-- Run your app with `cargo run`
+Not currently planned (may be revisited later): graph view, query blocks, task states, flashcards, PDF annotation, whiteboards, and a plugin ecosystem.
 
 ## GPUI dependency
 
