@@ -10,6 +10,7 @@ use gpui_notes::page::Page;
 use gpui_notes::registry::{pick_next, set_current_page, CurrentPage, PageRegistry};
 use gpui_notes::store::NotesStore;
 use gpui_notes::text_input;
+use gpui_notes::window_frame::WindowFrame;
 use gpui_platform::application;
 
 actions!(gpui_notes, [SavePage, NextPage, JumpToToday]);
@@ -152,21 +153,18 @@ fn main() {
         journal::open_today(cx).expect("open today's journal");
 
         let bounds = Bounds::centered(None, size(px(640.0), px(420.0)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |_, cx| cx.new(RootView::new),
-            )
-            .unwrap();
-
-        window
-            .update(cx, |view, window, cx| {
-                view.focus_current(window, cx);
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            |window, cx| {
+                let root = cx.new(RootView::new);
+                root.update(cx, |view, cx| view.focus_current(window, cx));
                 cx.activate(true);
-            })
-            .unwrap();
+                cx.new(|_| WindowFrame::new("GPUI Notes", root))
+            },
+        )
+        .unwrap();
     });
 }
