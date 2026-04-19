@@ -15,4 +15,5 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3", features = ["test-support"] }
+rstest = "0.26.1"
 tempfile = "3"

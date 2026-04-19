@@ -3,6 +3,7 @@ use std::io::ErrorKind;
 
 use chrono::NaiveDate;
 use gpui_notes::store::NotesStore;
+use rstest::rstest;
 use tempfile::TempDir;
 
 fn new_store() -> (TempDir, NotesStore) {
@@ -51,13 +52,16 @@ fn successful_write_leaves_no_tmp_file() {
     );
 }
 
-#[test]
-fn invalid_names_are_rejected() {
+#[rstest]
+#[case::contains_backslash("a\\b")]
+#[case::empty("")]
+#[case::parent_dir("..")]
+#[case::current_dir(".")]
+#[case::hidden_dotfile(".hidden")]
+fn invalid_names_are_rejected(#[case] bad: &str) {
     let (_tmp, store) = new_store();
-    for bad in ["a\\b", "", "..", ".", ".hidden"] {
-        let err = store.write(bad, "x").unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::InvalidInput, "name {bad:?}");
-    }
+    let err = store.write(bad, "x").unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput, "name {bad:?}");
 }
 
 #[test]

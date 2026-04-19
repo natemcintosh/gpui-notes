@@ -203,6 +203,8 @@ fn decode_page_name(encoded: &str) -> String {
 mod tests {
     use super::{decode_page_name, encode_page_name};
 
+    use rstest::rstest;
+
     #[test]
     fn encode_roundtrips_slash() {
         let name = "Projects/Alpha";
@@ -211,10 +213,12 @@ mod tests {
         assert_eq!(decode_page_name(&encoded), name);
     }
 
-    #[test]
-    fn encode_passes_through_unicode_and_percent() {
-        for name in ["日本語", "a%b", "plain", "a/b/c"] {
-            assert_eq!(decode_page_name(&encode_page_name(name)), name);
-        }
+    #[rstest]
+    #[case::japanese("日本語")]
+    #[case::literal_percent("a%b")]
+    #[case::plain_ascii("plain")]
+    #[case::multiple_slashes("a/b/c")]
+    fn encode_decode_is_identity(#[case] name: &str) {
+        assert_eq!(decode_page_name(&encode_page_name(name)), name);
     }
 }

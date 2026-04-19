@@ -55,11 +55,21 @@ impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
+        Self::with_content(cx, placeholder, SharedString::default())
+    }
+
+    pub fn with_content(
+        cx: &mut Context<Self>,
+        placeholder: impl Into<SharedString>,
+        content: impl Into<SharedString>,
+    ) -> Self {
+        let content: SharedString = content.into();
+        let end = content.len();
         Self {
             focus_handle: cx.focus_handle(),
-            content: SharedString::default(),
+            content,
             placeholder: placeholder.into(),
-            selected_range: 0..0,
+            selected_range: end..end,
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
@@ -68,10 +78,12 @@ impl TextInput {
         }
     }
 
+    #[must_use]
     pub fn content(&self) -> &SharedString {
         &self.content
     }
 
+    #[must_use]
     pub fn selected_range(&self) -> Range<usize> {
         self.selected_range.clone()
     }
@@ -159,8 +171,19 @@ impl TextInput {
         }
     }
 
+    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextInputEvent::Submitted);
+    }
+
+    /// Replaces the entire buffer in a headless test. Goes through the same
+    /// `apply_edit` path as real user edits, so subscribers receive a normal
+    /// `Changed` event.
+    #[cfg(test)]
+    pub fn test_replace_all(&mut self, new_content: impl Into<String>, cx: &mut Context<Self>) {
+        let content: String = new_content.into();
+        let end = content.len();
+        self.apply_edit(content, end..end, cx);
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -352,14 +375,16 @@ impl EntityInputHandler for TextInput {
         );
         self.marked_range =
             (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .map(|nr| nr.start + range.start..nr.end + range.end)
-            .unwrap_or_else(|| {
+        self.selected_range = new_selected_range_utf16.as_ref().map_or_else(
+            || {
                 let end = range.start + new_text.len();
                 end..end
-            });
+            },
+            |r| {
+                let nr = self.range_from_utf16(r);
+                nr.start + range.start..nr.end + range.end
+            },
+        );
         self.set_content_and_emit(new_content, cx);
         cx.notify();
     }
@@ -445,7 +470,7 @@ impl Element for TextElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
+        (): &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
@@ -549,7 +574,7 @@ impl Element for TextElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
+        (): &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
@@ -633,6 +658,7 @@ impl Focusable for TextInput {
 
 /// Platform emoji fonts, ordered so the first installed one wins. GPUI
 /// silently skips any family name that isn't present on the system.
+#[must_use]
 pub fn emoji_font_fallbacks() -> FontFallbacks {
     FontFallbacks::from_fonts(vec![
         "Apple Color Emoji".into(),
@@ -742,67 +768,52 @@ mod tests {
         assert_eq!(next_char_boundary(s, 6), 6);
     }
 
-    #[test]
-    fn backspace_at_start_is_noop() {
-        let (out, sel) = apply_backspace("hello", 0..0);
-        assert_eq!(out, "hello");
-        assert_eq!(sel, 0..0);
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::at_start_is_noop("hello", 0..0, "hello", 0..0)]
+    #[case::removes_prev_char_when_selection_empty("hello", 3..3, "helo", 2..2)]
+    #[case::deletes_selection("hello world", 6..11, "hello ", 6..6)]
+    #[case::respects_utf8_boundary("a🦀b", 5..5, "ab", 1..1)]
+    fn backspace_cases(
+        #[case] content: &str,
+        #[case] selection: Range<usize>,
+        #[case] expected_content: &str,
+        #[case] expected_selection: Range<usize>,
+    ) {
+        let (out, sel) = apply_backspace(content, selection);
+        assert_eq!(out, expected_content);
+        assert_eq!(sel, expected_selection);
     }
 
-    #[test]
-    fn backspace_removes_prev_char_when_selection_empty() {
-        let (out, sel) = apply_backspace("hello", 3..3);
-        assert_eq!(out, "helo");
-        assert_eq!(sel, 2..2);
+    #[rstest]
+    #[case::at_end_is_noop("hello", 5..5, "hello", 5..5)]
+    #[case::removes_next_char_when_selection_empty("hello", 2..2, "helo", 2..2)]
+    #[case::respects_utf8_boundary("a🦀b", 1..1, "ab", 1..1)]
+    fn delete_cases(
+        #[case] content: &str,
+        #[case] selection: Range<usize>,
+        #[case] expected_content: &str,
+        #[case] expected_selection: Range<usize>,
+    ) {
+        let (out, sel) = apply_delete(content, selection);
+        assert_eq!(out, expected_content);
+        assert_eq!(sel, expected_selection);
     }
 
-    #[test]
-    fn backspace_deletes_selection() {
-        let (out, sel) = apply_backspace("hello world", 6..11);
-        assert_eq!(out, "hello ");
-        assert_eq!(sel, 6..6);
-    }
-
-    #[test]
-    fn backspace_respects_utf8_boundary() {
-        let (out, sel) = apply_backspace("a🦀b", 5..5);
-        assert_eq!(out, "ab");
-        assert_eq!(sel, 1..1);
-    }
-
-    #[test]
-    fn delete_at_end_is_noop() {
-        let (out, sel) = apply_delete("hello", 5..5);
-        assert_eq!(out, "hello");
-        assert_eq!(sel, 5..5);
-    }
-
-    #[test]
-    fn delete_removes_next_char_when_selection_empty() {
-        let (out, sel) = apply_delete("hello", 2..2);
-        assert_eq!(out, "helo");
-        assert_eq!(sel, 2..2);
-    }
-
-    #[test]
-    fn delete_respects_utf8_boundary() {
-        let (out, sel) = apply_delete("a🦀b", 1..1);
-        assert_eq!(out, "ab");
-        assert_eq!(sel, 1..1);
-    }
-
-    #[test]
-    fn replace_inserts_at_cursor() {
-        let (out, sel) = apply_replace("helo", 3..3, "l");
-        assert_eq!(out, "hello");
-        assert_eq!(sel, 4..4);
-    }
-
-    #[test]
-    fn replace_overwrites_selection() {
-        let (out, sel) = apply_replace("hello world", 6..11, "there");
-        assert_eq!(out, "hello there");
-        assert_eq!(sel, 11..11);
+    #[rstest]
+    #[case::inserts_at_cursor("helo", 3..3, "l", "hello", 4..4)]
+    #[case::overwrites_selection("hello world", 6..11, "there", "hello there", 11..11)]
+    fn replace_cases(
+        #[case] content: &str,
+        #[case] range: Range<usize>,
+        #[case] new_text: &str,
+        #[case] expected_content: &str,
+        #[case] expected_selection: Range<usize>,
+    ) {
+        let (out, sel) = apply_replace(content, range, new_text);
+        assert_eq!(out, expected_content);
+        assert_eq!(sel, expected_selection);
     }
 
     // Runtime smoke test: `TextInput::new` wires up a focus handle and starts
