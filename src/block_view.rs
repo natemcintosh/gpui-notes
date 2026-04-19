@@ -23,7 +23,7 @@ pub struct BlockView {
     input: Option<Entity<TextInput>>,
     _on_focus: Subscription,
     /// Reset every edit cycle — subscribes to the *current* `TextInput`'s blur.
-    _on_input_blur: Option<Subscription>,
+    on_input_blur: Option<Subscription>,
     _page_sub: Subscription,
 }
 
@@ -48,7 +48,7 @@ impl BlockView {
             focus_handle,
             input: None,
             _on_focus: on_focus,
-            _on_input_blur: None,
+            on_input_blur: None,
             _page_sub: page_sub,
         }
     }
@@ -81,7 +81,7 @@ impl BlockView {
         });
         window.focus(&input_focus, cx);
         self.input = Some(input);
-        self._on_input_blur = Some(on_blur);
+        self.on_input_blur = Some(on_blur);
         cx.notify();
     }
 
@@ -93,7 +93,7 @@ impl BlockView {
         let block_id = self.block_id;
         self.page
             .update(cx, |p, cx| p.set_block_text(block_id, text, cx));
-        self._on_input_blur = None;
+        self.on_input_blur = None;
         cx.notify();
     }
 }
@@ -171,7 +171,7 @@ mod tests {
     ) {
         let body = body.to_string();
         let (bv, vcx) = cx.add_window_view(move |window, cx| {
-            let page = cx.new(|cx| Page::new("foo".into(), body, cx));
+            let page = cx.new(|cx| Page::new("foo".into(), &body, cx));
             let block_id = page.read(cx).outline().first_block_id().unwrap();
             cx.set_global(TestPage(page));
             BlockView::new(block_id, cx.global::<TestPage>().0.clone(), window, cx)

@@ -21,8 +21,8 @@ pub struct Page {
 impl EventEmitter<PageEvent> for Page {}
 
 impl Page {
-    pub fn new(name: SharedString, body: String, cx: &mut Context<Self>) -> Self {
-        let mut outline = Outline::parse(&body);
+    pub fn new(name: SharedString, body: &str, cx: &mut Context<Self>) -> Self {
+        let mut outline = Outline::parse(body);
         // A block-based view needs at least one block to be usable. Seeding
         // with an empty block on an empty file does not mark the page dirty:
         // the save path only writes when the user actually edits.
@@ -107,7 +107,7 @@ mod tests {
 
     #[gpui::test]
     fn empty_body_seeds_a_single_block(cx: &mut TestAppContext) {
-        let page = cx.new(|cx| Page::new("foo".into(), String::new(), cx));
+        let page = cx.new(|cx| Page::new("foo".into(), "", cx));
         cx.read(|cx| {
             let p = page.read(cx);
             assert_eq!(p.outline().roots.len(), 1);
@@ -118,7 +118,7 @@ mod tests {
 
     #[gpui::test]
     fn preloaded_body_parses_into_outline(cx: &mut TestAppContext) {
-        let page = cx.new(|cx| Page::new("foo".into(), "- hi\n- there\n".into(), cx));
+        let page = cx.new(|cx| Page::new("foo".into(), "- hi\n- there\n", cx));
         cx.read(|cx| {
             let p = page.read(cx);
             assert_eq!(p.outline().roots.len(), 2);
@@ -129,7 +129,7 @@ mod tests {
 
     #[gpui::test]
     fn set_block_text_marks_dirty_and_updates_body(cx: &mut TestAppContext) {
-        let page = cx.new(|cx| Page::new("foo".into(), "- hi\n".into(), cx));
+        let page = cx.new(|cx| Page::new("foo".into(), "- hi\n", cx));
         let first_id = cx.read(|cx| page.read(cx).outline().roots[0].id);
 
         cx.update(|cx| {

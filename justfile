@@ -6,6 +6,7 @@ alias b := build
 alias r := run
 alias t := test
 alias c := check
+alias u := unblocked
 
 build:
     cargo build --release

@@ -60,6 +60,7 @@ impl OutlineView {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn block_view(&self, id: BlockId) -> Option<&Entity<BlockView>> {
         self.blocks.get(&id)
     }
@@ -99,6 +100,7 @@ impl Render for OutlineView {
         let mut root = div().flex().flex_col().gap_1();
         for (depth, id) in flat {
             let bv = self.get_or_create(id, window, cx);
+            #[allow(clippy::cast_precision_loss)]
             let indent = px(16.0) * depth as f32;
             let row = div()
                 .flex()
