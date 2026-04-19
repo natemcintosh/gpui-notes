@@ -44,7 +44,7 @@ impl PageRegistry {
             return Ok(entry.entity.clone());
         }
         let body = self.store.read(name)?;
-        Ok(self.insert(key, body, PageKind::Page, cx))
+        Ok(self.insert(key, &body, PageKind::Page, cx))
     }
 
     /// Opens a page, creating it (empty) on disk if it does not yet exist.
@@ -65,7 +65,7 @@ impl PageRegistry {
             }
             Err(err) => return Err(err),
         };
-        Ok(self.insert(key, body, PageKind::Page, cx))
+        Ok(self.insert(key, &body, PageKind::Page, cx))
     }
 
     /// Opens the journal for `date`, creating it (empty) on disk if it does not
@@ -92,7 +92,7 @@ impl PageRegistry {
             }
             Err(err) => return Err(err),
         };
-        Ok(self.insert(key, body, PageKind::Journal(date), cx))
+        Ok(self.insert(key, &body, PageKind::Journal(date), cx))
     }
 
     /// Lists all page names available on disk.
@@ -135,7 +135,7 @@ impl PageRegistry {
     fn insert(
         &mut self,
         key: SharedString,
-        body: String,
+        body: &str,
         kind: PageKind,
         cx: &mut App,
     ) -> Entity<Page> {
@@ -243,7 +243,7 @@ mod tests {
         cx.update(|cx| {
             let mut reg = PageRegistry::new(NotesStore::new(&root).unwrap());
             let page = reg.open("foo", cx).unwrap();
-            assert_eq!(page.read(cx).body().as_ref(), "hello");
+            assert_eq!(page.read(cx).body().as_ref(), "- hello\n");
         });
     }
 
@@ -330,7 +330,7 @@ mod tests {
             .collect();
         let current = current.map(|s| SharedString::from(s.to_string()));
         let picked = pick_next(&ns, current.as_ref());
-        assert_eq!(picked.map(|s| s.as_ref()), expected);
+        assert_eq!(picked.map(AsRef::as_ref), expected);
     }
 
     #[gpui::test]
@@ -353,7 +353,7 @@ mod tests {
         cx.update(|cx| {
             let mut reg = PageRegistry::new(NotesStore::new(&root).unwrap());
             let page = reg.open_or_create_journal(date, cx).unwrap();
-            assert_eq!(page.read(cx).body().as_ref(), "hello");
+            assert_eq!(page.read(cx).body().as_ref(), "- hello\n");
         });
     }
 
@@ -376,7 +376,7 @@ mod tests {
         cx.update(|cx| {
             let mut reg = PageRegistry::new(NotesStore::new(&root).unwrap());
             let page = reg.open("a", cx).unwrap();
-            assert_eq!(page.read(cx).body().as_ref(), "from-a");
+            assert_eq!(page.read(cx).body().as_ref(), "- from-a\n");
         });
     }
 }
