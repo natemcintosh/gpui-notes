@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 const PAGES_DIR: &str = "pages";
 const JOURNALS_DIR: &str = "journals";
-const JOURNAL_DATE_FMT: &str = "%Y_%m_%d";
+const JOURNAL_DATE_FMT: &str = "%Y-%m-%d";
 
 pub struct NotesStore {
     root: PathBuf,

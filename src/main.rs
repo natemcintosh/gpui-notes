@@ -5,15 +5,14 @@ use gpui::{
     Focusable, IntoElement, KeyBinding, ParentElement, Render, Styled, Subscription, Window,
     WindowBounds, WindowOptions,
 };
+use gpui_notes::journal;
 use gpui_notes::page::Page;
 use gpui_notes::registry::{pick_next, set_current_page, CurrentPage, PageRegistry};
 use gpui_notes::store::NotesStore;
 use gpui_notes::text_input;
 use gpui_platform::application;
 
-const DEFAULT_PAGE: &str = "scratch";
-
-actions!(gpui_notes, [SavePage, NextPage]);
+actions!(gpui_notes, [SavePage, NextPage, JumpToToday]);
 
 struct RootView {
     focus_handle: FocusHandle,
@@ -29,6 +28,19 @@ impl RootView {
         }
     }
 
+    /// Focuses the current page's input, or the root view if no page is open.
+    /// Call after any action that swaps `CurrentPage`, otherwise the window is
+    /// left without a focused input and keystrokes fall through until the user
+    /// clicks back into the textbox.
+    fn focus_current(&self, window: &mut Window, cx: &mut App) {
+        if let Some(page) = cx.global::<CurrentPage>().get() {
+            let input = page.read(cx).input().clone();
+            window.focus(&input.focus_handle(cx), cx);
+        } else {
+            window.focus(&self.focus_handle.clone(), cx);
+        }
+    }
+
     #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     fn save_current(&mut self, _: &SavePage, _: &mut Window, cx: &mut Context<Self>) {
         let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
@@ -40,8 +52,15 @@ impl RootView {
         }
     }
 
-    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
-    fn next_page(&mut self, _: &NextPage, _: &mut Window, cx: &mut Context<Self>) {
+    fn jump_to_today(&mut self, _: &JumpToToday, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = journal::open_today(cx) {
+            eprintln!("open today's journal failed: {err}");
+            return;
+        }
+        self.focus_current(window, cx);
+    }
+
+    fn next_page(&mut self, _: &NextPage, window: &mut Window, cx: &mut Context<Self>) {
         let names = match cx.global::<PageRegistry>().list() {
             Ok(names) => names,
             Err(err) => {
@@ -58,7 +77,9 @@ impl RootView {
         };
         if let Err(err) = set_current_page(next.as_ref(), cx) {
             eprintln!("open {next:?} failed: {err}");
+            return;
         }
+        self.focus_current(window, cx);
     }
 }
 
@@ -77,6 +98,7 @@ impl Render for RootView {
             .key_context("RootView")
             .on_action(cx.listener(Self::save_current))
             .on_action(cx.listener(Self::next_page))
+            .on_action(cx.listener(Self::jump_to_today))
             .flex()
             .flex_col()
             .size_full()
@@ -120,13 +142,14 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new(&format!("{cmd}-s"), SavePage, Some("RootView")),
             KeyBinding::new(&format!("{cmd}-p"), NextPage, Some("RootView")),
+            KeyBinding::new(&format!("{cmd}-."), JumpToToday, Some("RootView")),
         ]);
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
         let store = NotesStore::new(root_dir).expect("init notes store");
         cx.set_global(PageRegistry::new(store));
         cx.set_global(CurrentPage::default());
-        set_current_page(DEFAULT_PAGE, cx).expect("open default page");
+        journal::open_today(cx).expect("open today's journal");
 
         let bounds = Bounds::centered(None, size(px(640.0), px(420.0)), cx);
         let window = cx
@@ -141,12 +164,7 @@ fn main() {
 
         window
             .update(cx, |view, window, cx| {
-                if let Some(page) = cx.global::<CurrentPage>().get() {
-                    let input = page.read(cx).input().clone();
-                    window.focus(&input.focus_handle(cx), cx);
-                } else {
-                    window.focus(&view.focus_handle(cx), cx);
-                }
+                view.focus_current(window, cx);
                 cx.activate(true);
             })
             .unwrap();

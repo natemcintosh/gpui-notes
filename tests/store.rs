@@ -122,7 +122,7 @@ fn journal_round_trip() {
     let date = NaiveDate::from_ymd_opt(2026, 4, 18).unwrap();
     store.write_journal(date, "today").unwrap();
 
-    assert!(tmp.path().join("journals/2026_04_18.md").is_file());
+    assert!(tmp.path().join("journals/2026-04-18.md").is_file());
     assert_eq!(store.read_journal(date).unwrap(), "today");
     assert!(store.journal_exists(date));
     assert_eq!(store.list_journals().unwrap(), vec![date]);
@@ -179,7 +179,7 @@ fn opens_existing_logseq_style_graph() {
     fs::create_dir_all(root.join("logseq")).unwrap();
     fs::write(root.join("pages/Welcome.md"), "hi").unwrap();
     fs::write(root.join("pages/Projects%2FAlpha.md"), "alpha body").unwrap();
-    fs::write(root.join("journals/2026_04_18.md"), "j").unwrap();
+    fs::write(root.join("journals/2026-04-18.md"), "j").unwrap();
     fs::write(root.join("assets/ignored.md"), "x").unwrap();
 
     let store = NotesStore::new(root).unwrap();
