@@ -247,39 +247,28 @@ mod tests {
         });
     }
 
-    fn names(items: &[&str]) -> Vec<SharedString> {
-        items
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::empty_no_current(&[], None, None)]
+    #[case::empty_with_current(&[], Some("foo"), None)]
+    #[case::wraps_after_last(&["a", "b", "c"], Some("c"), Some("a"))]
+    #[case::advances_from_first(&["a", "b", "c"], Some("a"), Some("b"))]
+    #[case::advances_from_middle(&["a", "b", "c"], Some("b"), Some("c"))]
+    #[case::orphan_current_falls_back_to_first(&["a", "b"], Some("zzz"), Some("a"))]
+    #[case::no_current_falls_back_to_first(&["a", "b"], None, Some("a"))]
+    fn pick_next_cases(
+        #[case] names: &[&str],
+        #[case] current: Option<&str>,
+        #[case] expected: Option<&str>,
+    ) {
+        let ns: Vec<SharedString> = names
             .iter()
             .map(|s| SharedString::from(s.to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn pick_next_empty_returns_none() {
-        assert!(pick_next(&[], None).is_none());
-        let current = SharedString::from("foo");
-        assert!(pick_next(&[], Some(&current)).is_none());
-    }
-
-    #[test]
-    fn pick_next_wraps_after_last() {
-        let ns = names(&["a", "b", "c"]);
-        assert_eq!(pick_next(&ns, Some(&ns[2])).unwrap().as_ref(), "a");
-    }
-
-    #[test]
-    fn pick_next_advances_from_current() {
-        let ns = names(&["a", "b", "c"]);
-        assert_eq!(pick_next(&ns, Some(&ns[0])).unwrap().as_ref(), "b");
-        assert_eq!(pick_next(&ns, Some(&ns[1])).unwrap().as_ref(), "c");
-    }
-
-    #[test]
-    fn pick_next_falls_back_to_first_when_current_missing() {
-        let ns = names(&["a", "b"]);
-        let orphan = SharedString::from("zzz");
-        assert_eq!(pick_next(&ns, Some(&orphan)).unwrap().as_ref(), "a");
-        assert_eq!(pick_next(&ns, None).unwrap().as_ref(), "a");
+            .collect();
+        let current = current.map(|s| SharedString::from(s.to_string()));
+        let picked = pick_next(&ns, current.as_ref());
+        assert_eq!(picked.map(|s| s.as_ref()), expected);
     }
 
     #[gpui::test]
