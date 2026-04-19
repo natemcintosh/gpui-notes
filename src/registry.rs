@@ -243,7 +243,7 @@ mod tests {
         cx.update(|cx| {
             let mut reg = PageRegistry::new(NotesStore::new(&root).unwrap());
             let page = reg.open("foo", cx).unwrap();
-            assert_eq!(page.read(cx).body().as_ref(), "hello");
+            assert_eq!(page.read(cx).body().as_ref(), "- hello\n");
         });
     }
 
@@ -353,7 +353,7 @@ mod tests {
         cx.update(|cx| {
             let mut reg = PageRegistry::new(NotesStore::new(&root).unwrap());
             let page = reg.open_or_create_journal(date, cx).unwrap();
-            assert_eq!(page.read(cx).body().as_ref(), "hello");
+            assert_eq!(page.read(cx).body().as_ref(), "- hello\n");
         });
     }
 
@@ -376,7 +376,7 @@ mod tests {
         cx.update(|cx| {
             let mut reg = PageRegistry::new(NotesStore::new(&root).unwrap());
             let page = reg.open("a", cx).unwrap();
-            assert_eq!(page.read(cx).body().as_ref(), "from-a");
+            assert_eq!(page.read(cx).body().as_ref(), "- from-a\n");
         });
     }
 }

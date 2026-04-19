@@ -236,6 +236,44 @@ impl Outline {
         let path = self.path_to(id)?;
         Some(self.take(&path))
     }
+
+    #[must_use]
+    pub fn get(&self, id: BlockId) -> Option<&str> {
+        fn find(blocks: &[Block], id: BlockId) -> Option<&str> {
+            for b in blocks {
+                if b.id == id {
+                    return Some(b.text.as_str());
+                }
+                if let Some(t) = find(&b.children, id) {
+                    return Some(t);
+                }
+            }
+            None
+        }
+        find(&self.roots, id)
+    }
+
+    pub fn set_text(&mut self, id: BlockId, text: impl Into<String>) -> bool {
+        fn walk(blocks: &mut [Block], id: BlockId, text: &mut Option<String>) -> bool {
+            for b in blocks {
+                if b.id == id {
+                    b.text = text.take().expect("set_text applied once");
+                    return true;
+                }
+                if walk(&mut b.children, id, text) {
+                    return true;
+                }
+            }
+            false
+        }
+        let mut text = Some(text.into());
+        walk(&mut self.roots, id, &mut text)
+    }
+
+    #[must_use]
+    pub fn first_block_id(&self) -> Option<BlockId> {
+        self.roots.first().map(|b| b.id)
+    }
 }
 
 #[cfg(test)]
@@ -417,6 +455,43 @@ mod tests {
         assert_eq!(removed.text, "a");
         assert_eq!(removed.children.len(), 1);
         assert_eq!(o.serialize(), "- c\n");
+    }
+
+    #[test]
+    fn get_returns_text_for_nested_block() {
+        let o = Outline::parse("- a\n  - b\n");
+        let b = by_text(&o, "b");
+        assert_eq!(o.get(b), Some("b"));
+    }
+
+    #[test]
+    fn get_unknown_id_is_none() {
+        let o = Outline::parse("- a\n");
+        assert!(o.get(BlockId::fresh()).is_none());
+    }
+
+    #[test]
+    fn set_text_updates_block_and_roundtrips() {
+        let mut o = Outline::parse("- a\n  - b\n");
+        let b = by_text(&o, "b");
+        assert!(o.set_text(b, "BEE"));
+        assert_eq!(o.get(b), Some("BEE"));
+        assert_eq!(o.serialize(), "- a\n  - BEE\n");
+    }
+
+    #[test]
+    fn set_text_unknown_id_is_noop() {
+        let mut o = Outline::parse("- a\n");
+        assert!(!o.set_text(BlockId::fresh(), "x"));
+        assert_eq!(o.serialize(), "- a\n");
+    }
+
+    #[test]
+    fn first_block_id_matches_first_root() {
+        let o = Outline::parse("- a\n- b\n");
+        assert_eq!(o.first_block_id(), Some(o.roots[0].id));
+        let empty = Outline::default();
+        assert!(empty.first_block_id().is_none());
     }
 
     #[test]
