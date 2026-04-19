@@ -1,14 +1,26 @@
 use std::collections::HashMap;
 use std::io;
 
+use chrono::NaiveDate;
 use gpui::{App, AppContext, BorrowAppContext, Entity, Global, SharedString};
 
 use crate::page::Page;
 use crate::store::NotesStore;
 
+#[derive(Clone, Copy, Debug)]
+enum PageKind {
+    Page,
+    Journal(NaiveDate),
+}
+
+struct OpenPage {
+    entity: Entity<Page>,
+    kind: PageKind,
+}
+
 pub struct PageRegistry {
     store: NotesStore,
-    open: HashMap<SharedString, Entity<Page>>,
+    open: HashMap<SharedString, OpenPage>,
 }
 
 impl Global for PageRegistry {}
@@ -28,11 +40,11 @@ impl PageRegistry {
     /// Returns `NotFound` if the page does not exist on disk, or a store I/O error.
     pub fn open(&mut self, name: &str, cx: &mut App) -> io::Result<Entity<Page>> {
         let key: SharedString = name.to_string().into();
-        if let Some(page) = self.open.get(&key) {
-            return Ok(page.clone());
+        if let Some(entry) = self.open.get(&key) {
+            return Ok(entry.entity.clone());
         }
         let body = self.store.read(name)?;
-        Ok(self.insert(key, body, cx))
+        Ok(self.insert(key, body, PageKind::Page, cx))
     }
 
     /// Opens a page, creating it (empty) on disk if it does not yet exist.
@@ -42,8 +54,8 @@ impl PageRegistry {
     /// (which triggers creation).
     pub fn open_or_create(&mut self, name: &str, cx: &mut App) -> io::Result<Entity<Page>> {
         let key: SharedString = name.to_string().into();
-        if let Some(page) = self.open.get(&key) {
-            return Ok(page.clone());
+        if let Some(entry) = self.open.get(&key) {
+            return Ok(entry.entity.clone());
         }
         let body = match self.store.read(name) {
             Ok(body) => body,
@@ -53,7 +65,34 @@ impl PageRegistry {
             }
             Err(err) => return Err(err),
         };
-        Ok(self.insert(key, body, cx))
+        Ok(self.insert(key, body, PageKind::Page, cx))
+    }
+
+    /// Opens the journal for `date`, creating it (empty) on disk if it does not
+    /// yet exist. The page's display name is the ISO-8601 date (`YYYY-MM-DD`),
+    /// and saves route to the store's journal directory.
+    ///
+    /// # Errors
+    /// Returns any I/O error from the underlying store other than `NotFound`
+    /// (which triggers creation).
+    pub fn open_or_create_journal(
+        &mut self,
+        date: NaiveDate,
+        cx: &mut App,
+    ) -> io::Result<Entity<Page>> {
+        let key: SharedString = date.format("%Y-%m-%d").to_string().into();
+        if let Some(entry) = self.open.get(&key) {
+            return Ok(entry.entity.clone());
+        }
+        let body = match self.store.read_journal(date) {
+            Ok(body) => body,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                self.store.write_journal(date, "")?;
+                String::new()
+            }
+            Err(err) => return Err(err),
+        };
+        Ok(self.insert(key, body, PageKind::Journal(date), cx))
     }
 
     /// Lists all page names available on disk.
@@ -81,14 +120,33 @@ impl PageRegistry {
         if !dirty {
             return Ok(());
         }
-        self.store.write(&name, &body)?;
+        let kind = self
+            .open
+            .get(&name)
+            .map_or(PageKind::Page, |entry| entry.kind);
+        match kind {
+            PageKind::Page => self.store.write(&name, &body)?,
+            PageKind::Journal(date) => self.store.write_journal(date, &body)?,
+        }
         page.update(cx, Page::mark_saved);
         Ok(())
     }
 
-    fn insert(&mut self, key: SharedString, body: String, cx: &mut App) -> Entity<Page> {
+    fn insert(
+        &mut self,
+        key: SharedString,
+        body: String,
+        kind: PageKind,
+        cx: &mut App,
+    ) -> Entity<Page> {
         let page = cx.new(|cx| Page::new(key.clone(), body, cx));
-        self.open.insert(key, page.clone());
+        self.open.insert(
+            key,
+            OpenPage {
+                entity: page.clone(),
+                kind,
+            },
+        );
         page
     }
 }
@@ -104,6 +162,10 @@ impl CurrentPage {
     #[must_use]
     pub fn get(&self) -> Option<&Entity<Page>> {
         self.current.as_ref()
+    }
+
+    pub fn set(&mut self, page: Option<Entity<Page>>) {
+        self.current = page;
     }
 }
 
@@ -269,6 +331,30 @@ mod tests {
         let current = current.map(|s| SharedString::from(s.to_string()));
         let picked = pick_next(&ns, current.as_ref());
         assert_eq!(picked.map(|s| s.as_ref()), expected);
+    }
+
+    #[gpui::test]
+    fn journal_save_routes_to_journals_dir(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let date = NaiveDate::from_ymd_opt(2026, 4, 18).unwrap();
+
+        cx.update(|cx| {
+            let mut reg = PageRegistry::new(NotesStore::new(&root).unwrap());
+            let page = reg.open_or_create_journal(date, cx).unwrap();
+            assert_eq!(page.read(cx).name().as_ref(), "2026-04-18");
+            page.update(cx, |p, cx| p.set_body_for_test("hello", cx));
+            reg.save(&page, cx).unwrap();
+        });
+
+        assert!(root.join("journals/2026-04-18.md").is_file());
+        assert!(!root.join("pages/2026-04-18.md").exists());
+
+        cx.update(|cx| {
+            let mut reg = PageRegistry::new(NotesStore::new(&root).unwrap());
+            let page = reg.open_or_create_journal(date, cx).unwrap();
+            assert_eq!(page.read(cx).body().as_ref(), "hello");
+        });
     }
 
     #[gpui::test]

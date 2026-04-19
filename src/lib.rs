@@ -1,5 +1,6 @@
 #![allow(clippy::unreadable_literal)]
 
+pub mod journal;
 pub mod outline;
 pub mod page;
 pub mod registry;

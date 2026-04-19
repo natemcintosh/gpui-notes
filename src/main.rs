@@ -5,15 +5,14 @@ use gpui::{
     Focusable, IntoElement, KeyBinding, ParentElement, Render, Styled, Subscription, Window,
     WindowBounds, WindowOptions,
 };
+use gpui_notes::journal;
 use gpui_notes::page::Page;
 use gpui_notes::registry::{pick_next, set_current_page, CurrentPage, PageRegistry};
 use gpui_notes::store::NotesStore;
 use gpui_notes::text_input;
 use gpui_platform::application;
 
-const DEFAULT_PAGE: &str = "scratch";
-
-actions!(gpui_notes, [SavePage, NextPage]);
+actions!(gpui_notes, [SavePage, NextPage, JumpToToday]);
 
 struct RootView {
     focus_handle: FocusHandle,
@@ -37,6 +36,13 @@ impl RootView {
         let result = cx.update_global::<PageRegistry, _>(|reg, cx| reg.save(&page, cx));
         if let Err(err) = result {
             eprintln!("save failed: {err}");
+        }
+    }
+
+    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
+    fn jump_to_today(&mut self, _: &JumpToToday, _: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = journal::open_today(cx) {
+            eprintln!("open today's journal failed: {err}");
         }
     }
 
@@ -77,6 +83,7 @@ impl Render for RootView {
             .key_context("RootView")
             .on_action(cx.listener(Self::save_current))
             .on_action(cx.listener(Self::next_page))
+            .on_action(cx.listener(Self::jump_to_today))
             .flex()
             .flex_col()
             .size_full()
@@ -120,13 +127,14 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new(&format!("{cmd}-s"), SavePage, Some("RootView")),
             KeyBinding::new(&format!("{cmd}-p"), NextPage, Some("RootView")),
+            KeyBinding::new(&format!("{cmd}-."), JumpToToday, Some("RootView")),
         ]);
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
         let store = NotesStore::new(root_dir).expect("init notes store");
         cx.set_global(PageRegistry::new(store));
         cx.set_global(CurrentPage::default());
-        set_current_page(DEFAULT_PAGE, cx).expect("open default page");
+        journal::open_today(cx).expect("open today's journal");
 
         let bounds = Bounds::centered(None, size(px(640.0), px(420.0)), cx);
         let window = cx
