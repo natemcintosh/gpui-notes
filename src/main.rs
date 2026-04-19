@@ -28,6 +28,19 @@ impl RootView {
         }
     }
 
+    /// Focuses the current page's input, or the root view if no page is open.
+    /// Call after any action that swaps `CurrentPage`, otherwise the window is
+    /// left without a focused input and keystrokes fall through until the user
+    /// clicks back into the textbox.
+    fn focus_current(&self, window: &mut Window, cx: &mut App) {
+        if let Some(page) = cx.global::<CurrentPage>().get() {
+            let input = page.read(cx).input().clone();
+            window.focus(&input.focus_handle(cx), cx);
+        } else {
+            window.focus(&self.focus_handle.clone(), cx);
+        }
+    }
+
     #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     fn save_current(&mut self, _: &SavePage, _: &mut Window, cx: &mut Context<Self>) {
         let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
@@ -39,15 +52,15 @@ impl RootView {
         }
     }
 
-    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
-    fn jump_to_today(&mut self, _: &JumpToToday, _: &mut Window, cx: &mut Context<Self>) {
+    fn jump_to_today(&mut self, _: &JumpToToday, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(err) = journal::open_today(cx) {
             eprintln!("open today's journal failed: {err}");
+            return;
         }
+        self.focus_current(window, cx);
     }
 
-    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
-    fn next_page(&mut self, _: &NextPage, _: &mut Window, cx: &mut Context<Self>) {
+    fn next_page(&mut self, _: &NextPage, window: &mut Window, cx: &mut Context<Self>) {
         let names = match cx.global::<PageRegistry>().list() {
             Ok(names) => names,
             Err(err) => {
@@ -64,7 +77,9 @@ impl RootView {
         };
         if let Err(err) = set_current_page(next.as_ref(), cx) {
             eprintln!("open {next:?} failed: {err}");
+            return;
         }
+        self.focus_current(window, cx);
     }
 }
 
@@ -149,12 +164,7 @@ fn main() {
 
         window
             .update(cx, |view, window, cx| {
-                if let Some(page) = cx.global::<CurrentPage>().get() {
-                    let input = page.read(cx).input().clone();
-                    window.focus(&input.focus_handle(cx), cx);
-                } else {
-                    window.focus(&view.focus_handle(cx), cx);
-                }
+                view.focus_current(window, cx);
                 cx.activate(true);
             })
             .unwrap();
