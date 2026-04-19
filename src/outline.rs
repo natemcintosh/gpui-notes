@@ -152,7 +152,9 @@ impl Outline {
         let Some(path) = self.path_to(id) else {
             return false;
         };
-        let (&last, parent_path) = path.split_last().unwrap();
+        let Some((&last, parent_path)) = path.split_last() else {
+            return false;
+        };
         if last == 0 {
             return false;
         }
@@ -170,7 +172,9 @@ impl Outline {
             return false;
         }
         let block = self.take(&path);
-        let (&parent_idx, grandparent_path) = path[..path.len() - 1].split_last().unwrap();
+        let Some((&parent_idx, grandparent_path)) = path[..path.len() - 1].split_last() else {
+            return false;
+        };
         let grandparent = children_mut(&mut self.roots, grandparent_path);
         grandparent.insert(parent_idx + 1, block);
         true
@@ -180,7 +184,9 @@ impl Outline {
         let Some(path) = self.path_to(id) else {
             return false;
         };
-        let (&last, parent_path) = path.split_last().unwrap();
+        let Some((&last, parent_path)) = path.split_last() else {
+            return false;
+        };
         if last == 0 {
             return false;
         }
@@ -193,7 +199,9 @@ impl Outline {
         let Some(path) = self.path_to(id) else {
             return false;
         };
-        let (&last, parent_path) = path.split_last().unwrap();
+        let Some((&last, parent_path)) = path.split_last() else {
+            return false;
+        };
         let siblings = children_mut(&mut self.roots, parent_path);
         if last + 1 >= siblings.len() {
             return false;
@@ -206,7 +214,9 @@ impl Outline {
         let Some(path) = self.path_to(id) else {
             return false;
         };
-        let (&last, parent_path) = path.split_last().unwrap();
+        let Some((&last, parent_path)) = path.split_last() else {
+            return false;
+        };
         let siblings = children_mut(&mut self.roots, parent_path);
         siblings[last].collapsed = !siblings[last].collapsed;
         true
@@ -214,7 +224,7 @@ impl Outline {
 
     pub fn insert_after(&mut self, id: BlockId, text: impl Into<String>) -> Option<BlockId> {
         let path = self.path_to(id)?;
-        let (&last, parent_path) = path.split_last().unwrap();
+        let (&last, parent_path) = path.split_last()?;
         let block = Block::new(text);
         let new_id = block.id;
         let siblings = children_mut(&mut self.roots, parent_path);

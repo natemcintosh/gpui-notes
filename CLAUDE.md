@@ -23,6 +23,7 @@ When starting work on an issue, create a new branch linked to that issue (`gh is
 - `cargo build` / `cargo build --release` — compile only.
 - `cargo check` — fast type-check (preferred for quick feedback given the heavy gpui dep).
 - `cargo fmt` / `cargo clippy` — formatting and lints.
+- `just check` runs clippy with `-W clippy::pedantic`. Always resolve pedantic warnings before committing — either fix the code (preferred: restructure to avoid the lint) or, if the lint is genuinely wrong for the case, suppress it locally with `#[allow(clippy::lint_name)]` and a one-line reason. Don't leave pedantic warnings in the tree.
 - `cargo nextest run` — run the test suite. CI uses [nextest](https://nexte.st/), so local runs should too. Install with `cargo install cargo-nextest --locked` if not already present.
 
 Tests use GPUI's built-in test framework. `gpui` is added as a `[dev-dependencies]` entry with the `test-support` feature enabled (same git/rev pin as the main dep — keep them in sync when bumping).
