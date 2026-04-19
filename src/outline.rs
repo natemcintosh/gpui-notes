@@ -254,7 +254,7 @@ mod tests {
         v
     }
 
-    fn by_text<'a>(outline: &'a Outline, text: &str) -> BlockId {
+    fn by_text(outline: &Outline, text: &str) -> BlockId {
         fn find(blocks: &[Block], text: &str) -> Option<BlockId> {
             for b in blocks {
                 if b.text == text {
