@@ -24,4 +24,4 @@ pre:
     prek run --all-files
 
 unblocked:
-    ./scripts/unblocked-issues.sh
+    nu ./scripts/unblocked-issues.nu
