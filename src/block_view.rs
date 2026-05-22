@@ -14,6 +14,7 @@ use gpui::{
 use crate::block_render::{render_block, theme};
 use crate::outline::BlockId;
 use crate::page::Page;
+use crate::tags::TagExt;
 use crate::text_input::{TextInput, TextInputEvent};
 
 pub struct BlockView {
@@ -139,7 +140,9 @@ impl Render for BlockView {
                     .child(SharedString::from("(empty — click to edit)"))
                     .into_any_element()
             } else {
-                render_block(&text, &[], window, cx)
+                let tag_ext = TagExt;
+                let extensions: [&dyn crate::block_render::InlineExtension; 1] = [&tag_ext];
+                render_block(&text, &extensions, window, cx)
             }
         };
 
@@ -316,6 +319,21 @@ mod tests {
             assert!(
                 input_focus.is_focused(window),
                 "TextInput must hold focus after the click",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_tag_chip_does_not_enter_editing(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = mount(cx, "- #tag tag tag\n");
+
+        cx.simulate_click(point(px(8.0), px(10.0)), Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                !bv.read(cx).is_editing(),
+                "tag mouse-down should not bubble into block editing",
             );
         });
     }

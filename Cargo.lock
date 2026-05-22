@@ -2171,6 +2171,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "pulldown-cmark",
+ "regex",
  "rstest",
  "smallvec",
  "tempfile",

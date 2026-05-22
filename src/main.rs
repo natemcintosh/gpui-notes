@@ -9,6 +9,7 @@ use gpui_notes::journal;
 use gpui_notes::page::Page;
 use gpui_notes::registry::{pick_next, set_current_page, CurrentPage, PageRegistry};
 use gpui_notes::store::NotesStore;
+use gpui_notes::tags::{self, OpenTag, TagIndex, TagSource};
 use gpui_notes::text_input;
 use gpui_notes::window_frame::WindowFrame;
 use gpui_platform::application;
@@ -17,15 +18,20 @@ actions!(gpui_notes, [SavePage, NextPage, JumpToToday]);
 
 struct RootView {
     focus_handle: FocusHandle,
-    _observer: Subscription,
+    active_tag: Option<gpui::SharedString>,
+    _current_observer: Subscription,
+    _tag_observer: Subscription,
 }
 
 impl RootView {
     fn new(cx: &mut Context<Self>) -> Self {
-        let observer = cx.observe_global::<CurrentPage>(|_, cx| cx.notify());
+        let current_observer = cx.observe_global::<CurrentPage>(|_, cx| cx.notify());
+        let tag_observer = cx.observe_global::<TagIndex>(|_, cx| cx.notify());
         Self {
             focus_handle: cx.focus_handle(),
-            _observer: observer,
+            active_tag: None,
+            _current_observer: current_observer,
+            _tag_observer: tag_observer,
         }
     }
 
@@ -58,6 +64,7 @@ impl RootView {
             eprintln!("open today's journal failed: {err}");
             return;
         }
+        self.active_tag = None;
         self.focus_current(window, cx);
     }
 
@@ -80,7 +87,78 @@ impl RootView {
             eprintln!("open {next:?} failed: {err}");
             return;
         }
+        self.active_tag = None;
         self.focus_current(window, cx);
+    }
+
+    fn open_tag(&mut self, action: &OpenTag, _: &mut Window, cx: &mut Context<Self>) {
+        self.reindex_current_page(cx);
+        self.active_tag = Some(action.name.clone());
+        cx.notify();
+    }
+
+    fn reindex_current_page(&self, cx: &mut Context<Self>) {
+        let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
+            return;
+        };
+        let source =
+            cx.update_global::<PageRegistry, TagSource>(|reg, cx| reg.source_for_page(&page, cx));
+        tags::reindex_global_for_page(&page, source, cx);
+    }
+
+    fn open_tag_hit(&mut self, source: &TagSource, window: &mut Window, cx: &mut Context<Self>) {
+        let result = match source {
+            TagSource::Page(name) => set_current_page(name.as_ref(), cx).map(|_| ()),
+            TagSource::Journal(date) => journal::open_for_date(*date, cx).map(|_| ()),
+        };
+        if let Err(err) = result {
+            eprintln!("open tag result failed: {err}");
+            return;
+        }
+        self.active_tag = None;
+        self.focus_current(window, cx);
+        cx.notify();
+    }
+
+    fn render_tag_results(
+        &mut self,
+        tag: &gpui::SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let hits = cx.global::<TagIndex>().blocks_for_tag(tag.as_ref());
+        if hits.is_empty() {
+            return div()
+                .flex_1()
+                .text_color(rgb(0x999999))
+                .child("No blocks found.")
+                .into_any_element();
+        }
+
+        let mut list = div().flex().flex_col().gap_1().flex_1();
+        for hit in hits {
+            let source = hit.source.clone();
+            let label = tags::source_label(&hit.source);
+            let preview = tags::truncated_preview(hit.preview.as_ref());
+            list = list.child(
+                div()
+                    .id(gpui::ElementId::Name(gpui::SharedString::from(format!(
+                        "tag-hit-{:?}",
+                        hit.block_id
+                    ))))
+                    .cursor_pointer()
+                    .rounded_sm()
+                    .px_2()
+                    .py_1()
+                    .min_h(px(28.0))
+                    .text_color(rgb(0xdddddd))
+                    .hover(|style| style.bg(rgb(0x2a2a2a)))
+                    .child(format!("{label}: {preview}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_tag_hit(&source, window, cx);
+                    })),
+            );
+        }
+        list.into_any_element()
     }
 }
 
@@ -100,6 +178,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::save_current))
             .on_action(cx.listener(Self::next_page))
             .on_action(cx.listener(Self::jump_to_today))
+            .on_action(cx.listener(Self::open_tag))
             .flex()
             .flex_col()
             .size_full()
@@ -116,19 +195,27 @@ impl Render for RootView {
             let p = page.read(cx);
             (p.name().clone(), p.dirty(), p.view().clone())
         };
-        let header = if dirty {
+        let active_tag = self.active_tag.clone();
+        let header = if let Some(tag) = active_tag.as_ref() {
+            format!("#{}", tag.as_ref())
+        } else if dirty {
             format!("{name} •")
         } else {
             name.to_string()
         };
 
-        root.child(
+        let root = root.child(
             div()
                 .text_color(rgb(0xcccccc))
                 .text_size(px(14.))
                 .child(header),
-        )
-        .child(view)
+        );
+
+        if let Some(tag) = active_tag {
+            root.child(self.render_tag_results(&tag, cx))
+        } else {
+            root.child(view)
+        }
     }
 }
 
@@ -148,6 +235,8 @@ fn main() {
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
         let store = NotesStore::new(root_dir).expect("init notes store");
+        let tag_index = TagIndex::rebuild_from(&store).expect("index tags");
+        cx.set_global(tag_index);
         cx.set_global(PageRegistry::new(store));
         cx.set_global(CurrentPage::default());
         journal::open_today(cx).expect("open today's journal");
@@ -167,4 +256,70 @@ fn main() {
         )
         .unwrap();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{point, Modifiers, TestAppContext, VisualTestContext};
+    use tempfile::TempDir;
+
+    fn mount_root<'a>(
+        cx: &'a mut TestAppContext,
+        tmp: &TempDir,
+    ) -> (Entity<RootView>, &'a mut VisualTestContext) {
+        let root_dir = tmp.path().to_path_buf();
+        let (root, vcx) = cx.add_window_view(move |_window, cx| {
+            text_input::bind_keys(cx);
+            let store = NotesStore::new(&root_dir).unwrap();
+            store.write("Home", "- home\n").unwrap();
+            store.write("Tagged", "- has #todo\n").unwrap();
+            cx.set_global(TagIndex::rebuild_from(&store).unwrap());
+            cx.set_global(PageRegistry::new(store));
+            cx.set_global(CurrentPage::default());
+            set_current_page("Home", cx).unwrap();
+            RootView::new(cx)
+        });
+        vcx.update(|window, cx| {
+            window.activate_window();
+            root.update(cx, |view, cx| view.focus_current(window, cx));
+        });
+        vcx.run_until_parked();
+        (root, vcx)
+    }
+
+    #[gpui::test]
+    fn tag_results_row_click_opens_page(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.open_tag(
+                    &OpenTag {
+                        name: "todo".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert_eq!(
+                root.read(cx).active_tag.as_ref().map(AsRef::as_ref),
+                Some("todo"),
+            );
+        });
+
+        cx.simulate_click(point(px(24.0), px(50.0)), Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            assert_eq!(current.read(cx).name().as_ref(), "Tagged");
+            assert!(root.read(cx).active_tag.is_none());
+        });
+    }
 }

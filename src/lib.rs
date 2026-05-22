@@ -8,5 +8,6 @@ pub mod outline_view;
 pub mod page;
 pub mod registry;
 pub mod store;
+pub mod tags;
 pub mod text_input;
 pub mod window_frame;
