@@ -676,3 +676,153 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod runtime_tests {
+    //! `#[gpui::test]` coverage for behavior the lowered IR can't express:
+    //! click dispatch on links and on extension-produced elements. See #24.
+    //!
+    //! The harness mounts a `HostView` whose `Render::render` calls
+    //! `render_block(...)`, then drives `simulate_click` through the real
+    //! event-dispatch path (same as `block_view::tests::click_focuses_text_input`).
+
+    use super::*;
+    use gpui::{
+        point, BorrowAppContext, Context, Entity, Global, Modifiers, Render, TestAppContext,
+        VisualTestContext,
+    };
+
+    struct HostView {
+        text: SharedString,
+        ext: Option<Box<dyn InlineExtension>>,
+    }
+
+    impl Render for HostView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            // size_full() gives the root a real hit area regardless of how
+            // the inner flex layout sizes its content.
+            let body: AnyElement = if let Some(ext) = self.ext.as_deref() {
+                let exts: [&dyn InlineExtension; 1] = [ext];
+                render_block(&self.text, &exts, window, cx)
+            } else {
+                render_block(&self.text, &[], window, cx)
+            };
+            div().size_full().child(body)
+        }
+    }
+
+    /// One-line mount helper mirroring `block_view::tests::mount`.
+    fn mount<'a>(
+        cx: &'a mut TestAppContext,
+        text: &str,
+        ext: Option<Box<dyn InlineExtension>>,
+    ) -> (Entity<HostView>, &'a mut VisualTestContext) {
+        let text = SharedString::from(text.to_string());
+        let (view, vcx) = cx.add_window_view(move |_window, cx| {
+            cx.set_global(ClickRecorder::default());
+            HostView { text, ext }
+        });
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        (view, vcx)
+    }
+
+    /// Capture target for the extension-click test. Stored as a global so the
+    /// click handler can mutate it without holding a reference into the view.
+    #[derive(Default)]
+    struct ClickRecorder {
+        clicks: usize,
+    }
+    impl Global for ClickRecorder {}
+
+    /// Always matches the literal string `"X"` as a one-byte extension token.
+    /// The rendered element is large enough to be clickable under
+    /// `NoopTextSystem` (the test platform's text shaper).
+    struct CountingExt;
+    impl InlineExtension for CountingExt {
+        fn extract(&self, text: &str) -> Vec<ExtensionMatch> {
+            text.match_indices('X')
+                .map(|(i, _)| ExtensionMatch {
+                    range: i..i + 1,
+                    kind: "x".into(),
+                })
+                .collect()
+        }
+
+        fn render(&self, _: &ExtensionNode, _window: &mut Window, _cx: &mut App) -> AnyElement {
+            div()
+                .id("ext-target")
+                .cursor_pointer()
+                .size_full()
+                .child("clickable extension")
+                .on_click(|_, _, cx| {
+                    cx.update_global::<ClickRecorder, _>(|r, _| r.clicks += 1);
+                })
+                .into_any_element()
+        }
+    }
+
+    #[gpui::test]
+    fn click_on_http_link_opens_url(cx: &mut TestAppContext) {
+        // A long-enough link text that the rendered hit area covers the click
+        // point even with NoopTextSystem's coarse glyph advances.
+        let (_view, cx) = mount(
+            cx,
+            "[click click click click click](https://example.com)",
+            None,
+        );
+
+        cx.simulate_click(point(px(8.0), px(10.0)), Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://example.com"),
+            "click on http link should call cx.open_url with the link target",
+        );
+    }
+
+    #[gpui::test]
+    fn click_on_non_http_link_does_not_open_url(cx: &mut TestAppContext) {
+        // mailto: and other custom schemes are not auto-opened — that wiring is
+        // the job of #8/#10/#11's extensions, not the built-in Link handler.
+        let (_view, cx) = mount(
+            cx,
+            "[email me email me email me email me](mailto:foo@bar.com)",
+            None,
+        );
+
+        cx.simulate_click(point(px(8.0), px(10.0)), Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.opened_url(),
+            None,
+            "non-http link click must not route through cx.open_url",
+        );
+    }
+
+    #[gpui::test]
+    fn click_on_extension_runs_handler(cx: &mut TestAppContext) {
+        let (_view, cx) = mount(cx, "X", Some(Box::new(CountingExt)));
+
+        cx.read(|cx| {
+            assert_eq!(
+                cx.global::<ClickRecorder>().clicks,
+                0,
+                "precondition: no clicks yet",
+            );
+        });
+
+        cx.simulate_click(point(px(8.0), px(10.0)), Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert_eq!(
+                cx.global::<ClickRecorder>().clicks,
+                1,
+                "extension's on_click should fire once per click",
+            );
+        });
+    }
+}
