@@ -24,6 +24,22 @@ Pages are stored as plain `.md` files in a notes root directory:
 
 Override the location with the `GPUI_NOTES_ROOT` environment variable (must be an absolute path).
 
+## macOS setup
+
+Building on macOS requires the **full Xcode** plus the **Metal Toolchain** — the Command Line Tools alone are not enough. `gpui_macos` invokes `xcrun metal` at build time to compile its shaders, and that compiler ships only inside Xcode.app, with the Metal Toolchain as an on-demand component.
+
+One-time setup:
+
+```sh
+# 1. Install Xcode from the App Store, then:
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+sudo xcodebuild -license accept
+sudo xcodebuild -runFirstLaunch
+xcodebuild -downloadComponent MetalToolchain
+```
+
+Verify with `xcrun metal --version` — you should see `Apple metal version ...`. If you instead see `unable to find utility "metal"` or `missing Metal Toolchain`, one of the steps above hasn't completed.
+
 ## GPUI dependency
 
 GPUI is not published to crates.io. We depend on it (and `gpui_platform`) directly from the [`zed-industries/zed`](https://github.com/zed-industries/zed) repository. Because that repo is Zed's active development trunk, its API changes without warning — the scaffold emitted by `create-gpui-app` has already drifted from HEAD at least once (e.g. `Application::new()` was removed in favor of `gpui_platform::application()`).
