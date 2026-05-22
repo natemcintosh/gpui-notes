@@ -14,7 +14,7 @@ use gpui::{
 use crate::block_render::{render_block, theme};
 use crate::outline::BlockId;
 use crate::page::Page;
-use crate::text_input::TextInput;
+use crate::text_input::{TextInput, TextInputEvent};
 
 pub struct BlockView {
     block_id: BlockId,
@@ -24,6 +24,10 @@ pub struct BlockView {
     _on_focus: Subscription,
     /// Reset every edit cycle — subscribes to the *current* `TextInput`'s blur.
     on_input_blur: Option<Subscription>,
+    /// Reset every edit cycle — subscribes to the current `TextInput`'s events
+    /// (used to exit editing on Escape, since the blur listener can lag a
+    /// frame and leave the input visually mounted until the next redraw).
+    on_input_event: Option<Subscription>,
     _page_sub: Subscription,
 }
 
@@ -49,6 +53,7 @@ impl BlockView {
             input: None,
             _on_focus: on_focus,
             on_input_blur: None,
+            on_input_event: None,
             _page_sub: page_sub,
         }
     }
@@ -79,13 +84,23 @@ impl BlockView {
         let on_blur = cx.on_blur(&input_focus, window, |this, window, cx| {
             this.end_editing(window, cx);
         });
+        let on_event = cx.subscribe(&input, |this, _input, event, cx| {
+            if matches!(event, TextInputEvent::Cancelled) {
+                this.end_editing_inner(cx);
+            }
+        });
         window.focus(&input_focus, cx);
         self.input = Some(input);
         self.on_input_blur = Some(on_blur);
+        self.on_input_event = Some(on_event);
         cx.notify();
     }
 
     fn end_editing(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.end_editing_inner(cx);
+    }
+
+    fn end_editing_inner(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.input.take() else {
             return;
         };
@@ -94,6 +109,7 @@ impl BlockView {
         self.page
             .update(cx, |p, cx| p.set_block_text(block_id, text, cx));
         self.on_input_blur = None;
+        self.on_input_event = None;
         cx.notify();
     }
 }
@@ -127,15 +143,28 @@ impl Render for BlockView {
             }
         };
 
-        let handle = self.focus_handle.clone();
+        // Drive the edit transition directly from the click. `begin_editing`
+        // is idempotent — when already editing, the click falls through to
+        // the TextInput's own mouse_down (which positions the caret).
+        //
+        // `window.prevent_default()` suppresses the auto-focus listener that
+        // `track_focus` installs on any focusable element (see gpui div.rs:
+        // `tracked_focus_handle` auto-focus on bubble). Without it, that
+        // listener fires *after* `begin_editing` and re-focuses the wrapper's
+        // own handle, stealing focus from the freshly mounted TextInput — the
+        // box turns white but the cursor never appears until a second click.
         div()
             .track_focus(&self.focus_handle)
             .flex_1()
             .min_h(px(20.0))
             .py_0p5()
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                window.focus(&handle, cx);
-            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.begin_editing(window, cx);
+                    window.prevent_default();
+                }),
+            )
             .child(content)
     }
 }
