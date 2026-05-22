@@ -32,5 +32,6 @@ To keep builds reproducible, we **pin both crates to a specific `rev`** in `Carg
 
 - Never depend on the floating `main` branch. Always use `rev = "..."`.
 - Both `gpui` and `gpui_platform` must share the same `rev`, or Cargo will pull two copies of the Zed workspace.
+- `gpui_platform` is declared per-target so each OS gets the right backend features: `runtime_shaders` + `font-kit` on macOS, `wayland` on Linux/FreeBSD. The `font-kit` feature is **required on macOS** — without it `gpui_macos` falls back to a `NoopTextSystem` and text shapes but never paints (cursor still renders, so it looks like a styling bug).
 - To bump: pick a new commit from `zed-industries/zed`, update both `rev` values, run `cargo update -p gpui -p gpui_platform`, then `cargo check`. Expect to fix API breakage; check the relevant example in `zed/crates/gpui/examples/` for the current idiomatic usage.
 - Commit the resulting `Cargo.lock` change alongside the `Cargo.toml` bump.
