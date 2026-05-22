@@ -180,7 +180,8 @@ impl BlockView {
 mod tests {
     use super::*;
     use crate::page::Page;
-    use gpui::TestAppContext;
+    use crate::text_input;
+    use gpui::{point, Modifiers, TestAppContext};
 
     /// Smuggles the `Page` back out of `add_window_view`, which only returns
     /// the root view.
@@ -200,6 +201,7 @@ mod tests {
     ) {
         let body = body.to_string();
         let (bv, vcx) = cx.add_window_view(move |window, cx| {
+            text_input::bind_keys(cx);
             let page = cx.new(|cx| Page::new("foo".into(), &body, cx));
             let block_id = page.read(cx).outline().first_block_id().unwrap();
             cx.set_global(TestPage(page));
@@ -287,5 +289,58 @@ mod tests {
                 .entity_id();
             assert_eq!(first_input_id, second_input_id, "no new input created");
         });
+    }
+
+    /// Regression test: a single click on a view-mode block must both mount
+    /// the `TextInput` *and* leave it focused. The framework's `track_focus`
+    /// auto-focus listener (see gpui `div.rs` `tracked_focus_handle` mouse
+    /// hook) used to fire after our handler and re-focus the wrapper handle,
+    /// leaving the input visibly mounted but cursorless until a second click.
+    #[gpui::test]
+    fn click_focuses_text_input(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = mount(cx, "- hi\n");
+
+        cx.read(|cx| assert!(!bv.read(cx).is_editing()));
+
+        cx.simulate_click(point(px(20.0), px(20.0)), Modifiers::default());
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            assert!(bv.read(cx).is_editing(), "click should enter edit mode");
+            let input_focus = bv
+                .read(cx)
+                .input
+                .as_ref()
+                .expect("input mounted after click")
+                .focus_handle(cx);
+            assert!(
+                input_focus.is_focused(window),
+                "TextInput must hold focus after the click",
+            );
+        });
+    }
+
+    /// Regression test: pressing Escape while a block is being edited exits
+    /// edit mode. Previously the `on_blur` subscription was the only path
+    /// out, and its dispatch lagged a draw cycle, so Escape on its own did
+    /// nothing.
+    #[gpui::test]
+    fn escape_exits_editing(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = mount(cx, "- hi\n");
+
+        cx.update(|window, cx| {
+            let handle = bv.read(cx).focus_handle.clone();
+            window.focus(&handle, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.read(|cx| bv.read(cx).is_editing()),
+            "precondition: editing",
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.read(|cx| assert!(!bv.read(cx).is_editing(), "Escape should exit edit mode"));
     }
 }
