@@ -29,14 +29,14 @@ impl RootView {
         }
     }
 
-    /// Focuses the current page's input, or the root view if no page is open.
-    /// Call after any action that swaps `CurrentPage`, otherwise the window is
-    /// left without a focused input and keystrokes fall through until the user
-    /// clicks back into the textbox.
+    /// Focuses the first block of the current page, or the root view if no
+    /// page is open. Call after any action that swaps `CurrentPage`, otherwise
+    /// the window is left without a focused block and keystrokes fall through
+    /// until the user clicks one.
     fn focus_current(&self, window: &mut Window, cx: &mut App) {
-        if let Some(page) = cx.global::<CurrentPage>().get() {
-            let input = page.read(cx).input().clone();
-            window.focus(&input.focus_handle(cx), cx);
+        if let Some(page) = cx.global::<CurrentPage>().get().cloned() {
+            let view = page.read(cx).view().clone();
+            view.update(cx, |v, cx| v.focus_first_block(window, cx));
         } else {
             window.focus(&self.focus_handle.clone(), cx);
         }
@@ -112,9 +112,9 @@ impl Render for RootView {
             return root.child(div().text_color(rgb(0xcccccc)).child("No page open."));
         };
 
-        let (name, dirty, input) = {
+        let (name, dirty, view) = {
             let p = page.read(cx);
-            (p.name().clone(), p.dirty(), p.input().clone())
+            (p.name().clone(), p.dirty(), p.view().clone())
         };
         let header = if dirty {
             format!("{name} •")
@@ -128,7 +128,7 @@ impl Render for RootView {
                 .text_size(px(14.))
                 .child(header),
         )
-        .child(input)
+        .child(view)
     }
 }
 

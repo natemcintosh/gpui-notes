@@ -1,6 +1,7 @@
-use gpui::{AppContext, Context, Entity, EventEmitter, SharedString, Subscription};
+use gpui::{AppContext, Context, Entity, EventEmitter, SharedString};
 
-use crate::text_input::{TextInput, TextInputEvent};
+use crate::outline::{Block, BlockId, Outline};
+use crate::outline_view::OutlineView;
 
 #[derive(Debug, Clone)]
 pub enum PageEvent {
@@ -9,36 +10,34 @@ pub enum PageEvent {
 
 pub struct Page {
     name: SharedString,
+    outline: Outline,
+    /// Serialized form of `outline`. Kept in sync with edits so the registry
+    /// save path stays cheap and `body()` can hand out a `&SharedString`.
     body: SharedString,
-    input: Entity<TextInput>,
+    view: Entity<OutlineView>,
     dirty: bool,
-    _input_sub: Subscription,
 }
 
 impl EventEmitter<PageEvent> for Page {}
 
 impl Page {
-    pub fn new(name: SharedString, body: String, cx: &mut Context<Self>) -> Self {
-        let body: SharedString = body.into();
-        let input = cx.new({
-            let body = body.clone();
-            |cx| TextInput::with_content(cx, "", body)
-        });
-        let input_sub = cx.subscribe(&input, |this, _, event: &TextInputEvent, cx| {
-            if let TextInputEvent::Changed(new_body) = event {
-                if new_body != &this.body {
-                    this.body = new_body.clone();
-                    this.dirty = true;
-                    cx.notify();
-                }
-            }
-        });
+    pub fn new(name: SharedString, body: &str, cx: &mut Context<Self>) -> Self {
+        let mut outline = Outline::parse(body);
+        // A block-based view needs at least one block to be usable. Seeding
+        // with an empty block on an empty file does not mark the page dirty:
+        // the save path only writes when the user actually edits.
+        if outline.roots.is_empty() {
+            outline.roots.push(Block::new(""));
+        }
+        let body: SharedString = outline.serialize().into();
+        let page = cx.entity();
+        let view = cx.new(|cx| OutlineView::new(page, cx));
         Self {
             name,
+            outline,
             body,
-            input,
+            view,
             dirty: false,
-            _input_sub: input_sub,
         }
     }
 
@@ -53,13 +52,27 @@ impl Page {
     }
 
     #[must_use]
-    pub fn input(&self) -> &Entity<TextInput> {
-        &self.input
+    pub fn outline(&self) -> &Outline {
+        &self.outline
+    }
+
+    #[must_use]
+    pub fn view(&self) -> &Entity<OutlineView> {
+        &self.view
     }
 
     #[must_use]
     pub fn dirty(&self) -> bool {
         self.dirty
+    }
+
+    pub fn set_block_text(&mut self, id: BlockId, text: impl Into<String>, cx: &mut Context<Self>) {
+        if !self.outline.set_text(id, text) {
+            return;
+        }
+        self.body = self.outline.serialize().into();
+        self.dirty = true;
+        cx.notify();
     }
 
     pub fn mark_saved(&mut self, cx: &mut Context<Self>) {
@@ -70,14 +83,20 @@ impl Page {
         cx.emit(PageEvent::Saved);
     }
 
+    /// Test helper that replaces the outline with a single root block whose
+    /// text is `text`. Marks the page dirty so save paths fire.
     #[cfg(test)]
-    pub fn set_body_for_test(&mut self, body: impl Into<SharedString>, cx: &mut Context<Self>) {
-        let body = body.into();
-        if body != self.body {
-            self.body = body;
-            self.dirty = true;
-            cx.notify();
+    pub fn set_body_for_test(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        let mut outline = Outline::default();
+        outline.roots.push(Block::new(text));
+        let serialized: SharedString = outline.serialize().into();
+        if serialized == self.body {
+            return;
         }
+        self.outline = outline;
+        self.body = serialized;
+        self.dirty = true;
+        cx.notify();
     }
 }
 
@@ -87,30 +106,41 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
-    fn input_edits_propagate_to_page(cx: &mut TestAppContext) {
-        let page = cx.new(|cx| Page::new("foo".into(), String::new(), cx));
-        let input = cx.read(|cx| page.read(cx).input().clone());
-
-        cx.update(|cx| {
-            input.update(cx, |i, cx| i.test_replace_all("hello", cx));
-        });
-        cx.run_until_parked();
-
+    fn empty_body_seeds_a_single_block(cx: &mut TestAppContext) {
+        let page = cx.new(|cx| Page::new("foo".into(), "", cx));
         cx.read(|cx| {
             let p = page.read(cx);
-            assert_eq!(p.body().as_ref(), "hello");
-            assert!(p.dirty());
+            assert_eq!(p.outline().roots.len(), 1);
+            assert_eq!(p.outline().roots[0].text, "");
+            assert!(!p.dirty(), "seeding must not mark the page dirty");
         });
     }
 
     #[gpui::test]
-    fn page_starts_clean_with_preloaded_body(cx: &mut TestAppContext) {
-        let page = cx.new(|cx| Page::new("foo".into(), "preloaded".into(), cx));
-        cx.run_until_parked();
+    fn preloaded_body_parses_into_outline(cx: &mut TestAppContext) {
+        let page = cx.new(|cx| Page::new("foo".into(), "- hi\n- there\n", cx));
         cx.read(|cx| {
             let p = page.read(cx);
-            assert_eq!(p.body().as_ref(), "preloaded");
-            assert!(!p.dirty(), "hydrating body must not mark the page dirty");
+            assert_eq!(p.outline().roots.len(), 2);
+            assert_eq!(p.body().as_ref(), "- hi\n- there\n");
+            assert!(!p.dirty());
+        });
+    }
+
+    #[gpui::test]
+    fn set_block_text_marks_dirty_and_updates_body(cx: &mut TestAppContext) {
+        let page = cx.new(|cx| Page::new("foo".into(), "- hi\n", cx));
+        let first_id = cx.read(|cx| page.read(cx).outline().roots[0].id);
+
+        cx.update(|cx| {
+            page.update(cx, |p, cx| p.set_block_text(first_id, "hello", cx));
+        });
+
+        cx.read(|cx| {
+            let p = page.read(cx);
+            assert_eq!(p.outline().get(first_id), Some("hello"));
+            assert_eq!(p.body().as_ref(), "- hello\n");
+            assert!(p.dirty());
         });
     }
 }

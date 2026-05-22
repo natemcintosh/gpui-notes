@@ -30,6 +30,7 @@ actions!(
         Cut,
         Copy,
         Submit,
+        Cancel,
     ]
 );
 
@@ -37,6 +38,7 @@ actions!(
 pub enum TextInputEvent {
     Changed(SharedString),
     Submitted,
+    Cancelled,
 }
 
 pub struct TextInput {
@@ -174,6 +176,11 @@ impl TextInput {
     #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextInputEvent::Submitted);
+    }
+
+    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Cancelled);
     }
 
     /// Replaces the entire buffer in a headless test. Goes through the same
@@ -632,6 +639,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::cancel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -685,6 +693,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", Home, Some("TextInput")),
         KeyBinding::new("end", End, Some("TextInput")),
         KeyBinding::new("enter", Submit, Some("TextInput")),
+        KeyBinding::new("escape", Cancel, Some("TextInput")),
         KeyBinding::new(&format!("{cmd}-a"), SelectAll, Some("TextInput")),
         KeyBinding::new(&format!("{cmd}-c"), Copy, Some("TextInput")),
         KeyBinding::new(&format!("{cmd}-v"), Paste, Some("TextInput")),
