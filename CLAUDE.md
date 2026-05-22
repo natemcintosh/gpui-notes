@@ -42,6 +42,14 @@ fn it_works(cx: &mut TestAppContext) {
 
 `TestAppContext` exposes `new`, `update`, `read`, `executor()` / `foreground_executor()` for driving async tasks, and helpers for simulating keystrokes, mouse events, and modifiers. Use `cx.run_until_parked()` (via the executor) to flush pending effects. For multi-client scenarios, `cx.new_app()` spawns a second context sharing the same executor. Run with `cargo nextest run`.
 
+### Testing UI interactions
+
+For any code path that responds to a click, keystroke, or focus event, prefer the simulation APIs over reaching directly into the view. `VisualTestContext` exposes `simulate_click(point, modifiers)`, `simulate_mouse_down/up`, `simulate_keystrokes("escape")`, and `simulate_input("hello")` — all of which drive the same event-dispatch path the real platform uses. Programmatic shortcuts like `window.focus(&handle)` or calling `view.update(...)` to invoke a handler directly skip large parts of that path (notably the mouse-event listeners that gpui auto-registers on focusable elements via `track_focus`), so a programmatic test can pass while the actual click is broken.
+
+Concrete rule of thumb: if the production trigger is a mouse click, the test should call `simulate_click`; if it's a keystroke, `simulate_keystrokes`. Use `window.focus` in tests only to set up an unrelated precondition (e.g. "start with block X focused, now test the keystroke behavior"). When a test needs key bindings to be active, call `text_input::bind_keys(cx)` (or any other module's `bind_keys`) inside the `add_window_view` closure — bindings registered in `main` don't exist in the headless runtime.
+
+This wasn't always followed: the per-block edit/view toggle landed with tests that called `window.focus(&bv_handle)` to enter editing, which silently bypassed the `track_focus` auto-focus that was actually breaking real clicks. The regression tests in `src/block_view.rs` (`click_focuses_text_input`, `escape_exits_editing`) show the pattern to follow.
+
 ## Architecture
 
 As much as possible, use rust's rich type system to encode state and make invalid states impossible.
