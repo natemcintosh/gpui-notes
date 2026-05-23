@@ -37,6 +37,6 @@ jobs:
       - uses: taiki-e/install-action@nextest
 
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings -W clippy::pedantic
       - run: cargo build
       - run: cargo nextest run

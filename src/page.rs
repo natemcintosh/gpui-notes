@@ -75,6 +75,21 @@ impl Page {
         cx.notify();
     }
 
+    /// Insert an empty sibling block immediately after `id`. Returns the new
+    /// block's id, or `None` if `id` is not in the outline.
+    pub fn insert_block_after(
+        &mut self,
+        id: BlockId,
+        text: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<BlockId> {
+        let new_id = self.outline.insert_after(id, text)?;
+        self.body = self.outline.serialize().into();
+        self.dirty = true;
+        cx.notify();
+        Some(new_id)
+    }
+
     pub fn mark_saved(&mut self, cx: &mut Context<Self>) {
         if self.dirty {
             self.dirty = false;
