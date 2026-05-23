@@ -6,11 +6,21 @@ use gpui::{App, AppContext, BorrowAppContext, Entity, Global, SharedString};
 
 use crate::page::Page;
 use crate::store::NotesStore;
+use crate::tags::{self, TagSource};
 
 #[derive(Clone, Copy, Debug)]
 enum PageKind {
     Page,
     Journal(NaiveDate),
+}
+
+impl PageKind {
+    fn source(self, key: &SharedString) -> TagSource {
+        match self {
+            Self::Page => TagSource::Page(key.clone()),
+            Self::Journal(date) => TagSource::Journal(date),
+        }
+    }
 }
 
 struct OpenPage {
@@ -129,7 +139,18 @@ impl PageRegistry {
             PageKind::Journal(date) => self.store.write_journal(date, &body)?,
         }
         page.update(cx, Page::mark_saved);
+        let source = kind.source(&name);
+        tags::reindex_global_for_page(page, &source, cx);
         Ok(())
+    }
+
+    #[must_use]
+    pub fn source_for_page(&self, page: &Entity<Page>, cx: &App) -> TagSource {
+        let name = page.read(cx).name().clone();
+        self.open.get(&name).map_or_else(
+            || TagSource::Page(name.clone()),
+            |entry| entry.kind.source(&name),
+        )
     }
 
     fn insert(
@@ -139,6 +160,7 @@ impl PageRegistry {
         kind: PageKind,
         cx: &mut App,
     ) -> Entity<Page> {
+        let source = kind.source(&key);
         let page = cx.new(|cx| Page::new(key.clone(), body, cx));
         self.open.insert(
             key,
@@ -147,6 +169,7 @@ impl PageRegistry {
                 kind,
             },
         );
+        tags::reindex_global_for_page(&page, &source, cx);
         page
     }
 }
@@ -209,6 +232,7 @@ pub fn set_current_page(name: &str, cx: &mut App) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::page::PageEvent;
+    use crate::tags::TagIndex;
     use gpui::TestAppContext;
     use tempfile::TempDir;
 
@@ -306,6 +330,30 @@ mod tests {
             let page = reg.open_or_create("foo", cx).unwrap();
             reg.save(&page, cx).unwrap();
             assert!(!page.read(cx).dirty());
+        });
+    }
+
+    #[gpui::test]
+    fn open_and_save_refresh_tag_index(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        cx.update(|cx| {
+            cx.set_global(TagIndex::default());
+            let store = NotesStore::new(&root).unwrap();
+            store.write("foo", "- old #stale\n").unwrap();
+            let mut reg = PageRegistry::new(store);
+
+            let page = reg.open("foo", cx).unwrap();
+            assert_eq!(cx.global::<TagIndex>().blocks_for_tag("stale").len(), 1);
+
+            let first = page.read(cx).outline().first_block_id().unwrap();
+            page.update(cx, |p, cx| p.set_block_text(first, "new #fresh", cx));
+            reg.save(&page, cx).unwrap();
+
+            let index = cx.global::<TagIndex>();
+            assert!(index.blocks_for_tag("stale").is_empty());
+            assert_eq!(index.blocks_for_tag("fresh").len(), 1);
         });
     }
 
