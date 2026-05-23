@@ -1,12 +1,13 @@
 #![allow(clippy::unreadable_literal)]
 
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, App, AppContext, Bounds, Context, Entity, FocusHandle,
-    Focusable, IntoElement, KeyBinding, ParentElement, Render, Styled, Subscription, Window,
-    WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, size, App, AppContext, Bounds, Context, ElementId, Entity,
+    FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
+    SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions,
 };
 use gpui_notes::journal;
 use gpui_notes::page::Page;
+use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
 use gpui_notes::registry::{pick_next, set_current_page, CurrentPage, PageRegistry};
 use gpui_notes::store::NotesStore;
 use gpui_notes::tags::{self, OpenTag, TagIndex, TagSource};
@@ -14,11 +15,36 @@ use gpui_notes::text_input;
 use gpui_notes::window_frame::WindowFrame;
 use gpui_platform::application;
 
-actions!(gpui_notes, [SavePage, NextPage, JumpToToday]);
+actions!(
+    gpui_notes,
+    [
+        SavePage,
+        NextPage,
+        JumpToToday,
+        CloseTagView,
+        OpenPagePicker,
+        ToggleShortcuts
+    ]
+);
+
+/// Static cheatsheet shown in the shortcuts overlay. The strings here are the
+/// only place the bindings are documented to the user — keep in sync with the
+/// `cx.bind_keys(...)` block in `main`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("ctrl-o", "Open page…"),
+    ("ctrl-p", "Cycle to next page"),
+    ("ctrl-.", "Jump to today's journal"),
+    ("ctrl-s", "Save current page"),
+    ("escape", "Close overlay / tag view"),
+    ("?", "Show this help"),
+];
 
 struct RootView {
     focus_handle: FocusHandle,
-    active_tag: Option<gpui::SharedString>,
+    active_tag: Option<SharedString>,
+    picker: Option<Entity<PagePicker>>,
+    picker_sub: Option<Subscription>,
+    shortcuts_visible: bool,
     _current_observer: Subscription,
     _tag_observer: Subscription,
 }
@@ -30,6 +56,9 @@ impl RootView {
         Self {
             focus_handle: cx.focus_handle(),
             active_tag: None,
+            picker: None,
+            picker_sub: None,
+            shortcuts_visible: false,
             _current_observer: current_observer,
             _tag_observer: tag_observer,
         }
@@ -91,9 +120,211 @@ impl RootView {
         self.focus_current(window, cx);
     }
 
-    fn open_tag(&mut self, action: &OpenTag, _: &mut Window, cx: &mut Context<Self>) {
+    fn open_tag(&mut self, action: &OpenTag, window: &mut Window, cx: &mut Context<Self>) {
         Self::reindex_current_page(cx);
         self.active_tag = Some(action.name.clone());
+        // Park focus on RootView so Escape dispatches `CloseTagView` instead of
+        // a stale TextInput::Cancel from the previously-edited block.
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// Escape handler. Dismisses the shortcuts overlay first if visible, then
+    /// falls back to closing the tag-results view. Picker dismissal goes
+    /// through `TextInputEvent::Cancelled` instead — its `TextInput` owns focus.
+    fn close_tag_view(&mut self, _: &CloseTagView, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shortcuts_visible {
+            self.shortcuts_visible = false;
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+            return;
+        }
+        if self.active_tag.take().is_some() {
+            self.focus_current(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn toggle_shortcuts(
+        &mut self,
+        _: &ToggleShortcuts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shortcuts_visible = !self.shortcuts_visible;
+        if self.shortcuts_visible {
+            // Park focus on the root so Escape lands on `CloseTagView` (which
+            // also dismisses the overlay) instead of a stale TextInput.
+            window.focus(&self.focus_handle, cx);
+        } else {
+            self.focus_current(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn render_header(
+        header_text: String,
+        has_active_tag: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .text_color(rgb(0xcccccc))
+            .text_size(px(14.))
+            .child(div().flex_1().child(header_text))
+            .child(
+                div()
+                    .id(ElementId::Name(SharedString::from("show-shortcuts")))
+                    .px_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_color(rgb(0x888888))
+                    .hover(|style| style.bg(rgb(0x2a2a2a)).text_color(rgb(0xdddddd)))
+                    .child("?")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_shortcuts(&ToggleShortcuts, window, cx);
+                        }),
+                    ),
+            );
+        if has_active_tag {
+            row = row.child(
+                div()
+                    .id(ElementId::Name(SharedString::from("close-tag-view")))
+                    .px_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_color(rgb(0x888888))
+                    .hover(|style| style.bg(rgb(0x2a2a2a)).text_color(rgb(0xdddddd)))
+                    .child("× close")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.close_tag_view(&CloseTagView, window, cx);
+                        }),
+                    ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    fn render_shortcuts_overlay() -> gpui::AnyElement {
+        let mut list = div().flex().flex_col().gap_1();
+        for (keys, label) in SHORTCUTS {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w(px(96.0))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(0x2a2a2a))
+                            .text_color(rgb(0xffffff))
+                            .child(SharedString::from(*keys)),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0xcccccc))
+                            .child(SharedString::from(*label)),
+                    ),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .bg(rgb(0x141414))
+            .border_1()
+            .border_color(rgb(0x3a3a3a))
+            .rounded_md()
+            .p_4()
+            .min_w(px(360.0))
+            .child(
+                div()
+                    .text_color(rgb(0xeeeeee))
+                    .text_size(px(14.))
+                    .child("Keyboard shortcuts"),
+            )
+            .child(list)
+            .into_any_element()
+    }
+
+    fn open_page_picker(
+        &mut self,
+        _: &OpenPagePicker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.picker.is_some() {
+            return;
+        }
+        let entries = match Self::collect_picker_entries(cx) {
+            Ok(entries) => entries,
+            Err(err) => {
+                eprintln!("page picker: list failed: {err}");
+                return;
+            }
+        };
+        let picker = cx.new(|cx| PagePicker::new(entries, window, cx));
+        let sub = cx.subscribe_in(
+            &picker,
+            window,
+            |this, _picker, event: &PagePickerEvent, window, cx| match event {
+                PagePickerEvent::Selected(entry) => {
+                    this.handle_picker_selection(entry, window, cx);
+                }
+                PagePickerEvent::Cancelled => {
+                    this.close_picker(window, cx);
+                }
+            },
+        );
+        self.picker = Some(picker);
+        self.picker_sub = Some(sub);
+        cx.notify();
+    }
+
+    fn collect_picker_entries(cx: &App) -> std::io::Result<Vec<PageEntry>> {
+        let registry = cx.global::<PageRegistry>();
+        let mut entries: Vec<PageEntry> =
+            registry.list()?.into_iter().map(PageEntry::Page).collect();
+        let mut journals = registry.list_journals()?;
+        journals.sort();
+        journals.reverse();
+        entries.extend(journals.into_iter().map(PageEntry::Journal));
+        Ok(entries)
+    }
+
+    fn handle_picker_selection(
+        &mut self,
+        entry: &PageEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = match entry {
+            PageEntry::Page(name) => set_current_page(name.as_ref(), cx),
+            PageEntry::Journal(date) => journal::open_for_date(*date, cx).map(|_| ()),
+        };
+        if let Err(err) = result {
+            eprintln!("page picker: open failed: {err}");
+        }
+        self.active_tag = None;
+        self.close_picker(window, cx);
+    }
+
+    fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = None;
+        self.picker_sub = None;
+        self.focus_current(window, cx);
         cx.notify();
     }
 
@@ -175,6 +406,10 @@ impl Render for RootView {
             .on_action(cx.listener(Self::next_page))
             .on_action(cx.listener(Self::jump_to_today))
             .on_action(cx.listener(Self::open_tag))
+            .on_action(cx.listener(Self::close_tag_view))
+            .on_action(cx.listener(Self::open_page_picker))
+            .on_action(cx.listener(Self::toggle_shortcuts))
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -192,7 +427,7 @@ impl Render for RootView {
             (p.name().clone(), p.dirty(), p.view().clone())
         };
         let active_tag = self.active_tag.clone();
-        let header = if let Some(tag) = active_tag.as_ref() {
+        let header_text = if let Some(tag) = active_tag.as_ref() {
             format!("#{}", tag.as_ref())
         } else if dirty {
             format!("{name} •")
@@ -200,17 +435,37 @@ impl Render for RootView {
             name.to_string()
         };
 
-        let root = root.child(
-            div()
-                .text_color(rgb(0xcccccc))
-                .text_size(px(14.))
-                .child(header),
-        );
+        let root = root.child(Self::render_header(header_text, active_tag.is_some(), cx));
 
-        if let Some(tag) = active_tag {
+        let body = if let Some(tag) = active_tag {
             root.child(Self::render_tag_results(&tag, cx))
         } else {
             root.child(view)
+        };
+
+        let overlay_child: Option<gpui::AnyElement> = if let Some(picker) = self.picker.clone() {
+            Some(picker.into_any_element())
+        } else if self.shortcuts_visible {
+            Some(Self::render_shortcuts_overlay())
+        } else {
+            None
+        };
+
+        if let Some(child) = overlay_child {
+            body.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .items_start()
+                    .justify_center()
+                    .pt_16()
+                    .child(child),
+            )
+        } else {
+            body
         }
     }
 }
@@ -218,6 +473,7 @@ impl Render for RootView {
 fn main() {
     application().run(|cx: &mut App| {
         text_input::bind_keys(cx);
+        page_picker::bind_keys(cx);
         let cmd = if cfg!(target_os = "macos") {
             "cmd"
         } else {
@@ -227,6 +483,9 @@ fn main() {
             KeyBinding::new(&format!("{cmd}-s"), SavePage, Some("RootView")),
             KeyBinding::new(&format!("{cmd}-p"), NextPage, Some("RootView")),
             KeyBinding::new(&format!("{cmd}-."), JumpToToday, Some("RootView")),
+            KeyBinding::new(&format!("{cmd}-o"), OpenPagePicker, Some("RootView")),
+            KeyBinding::new("escape", CloseTagView, Some("RootView")),
+            KeyBinding::new("shift-/", ToggleShortcuts, Some("RootView")),
         ]);
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
@@ -267,6 +526,12 @@ mod tests {
         let root_dir = tmp.path().to_path_buf();
         let (root, vcx) = cx.add_window_view(move |_window, cx| {
             text_input::bind_keys(cx);
+            page_picker::bind_keys(cx);
+            cx.bind_keys([
+                KeyBinding::new("escape", CloseTagView, Some("RootView")),
+                KeyBinding::new("ctrl-o", OpenPagePicker, Some("RootView")),
+                KeyBinding::new("shift-/", ToggleShortcuts, Some("RootView")),
+            ]);
             let store = NotesStore::new(&root_dir).unwrap();
             store.write("Home", "- home\n").unwrap();
             store.write("Tagged", "- has #todo\n").unwrap();
@@ -316,6 +581,86 @@ mod tests {
             let current = cx.global::<CurrentPage>().get().unwrap();
             assert_eq!(current.read(cx).name().as_ref(), "Tagged");
             assert!(root.read(cx).active_tag.is_none());
+        });
+    }
+
+    /// Escape on the tag-results view returns to the previous page. Regression
+    /// for issue #34: previously the only exits from the tag view were
+    /// clicking a result row or cycling pages.
+    #[gpui::test]
+    fn escape_closes_tag_view(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.open_tag(
+                    &OpenTag {
+                        name: "todo".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).active_tag.is_some()));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                root.read(cx).active_tag.is_none(),
+                "escape should close the tag-results view",
+            );
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            assert_eq!(current.read(cx).name().as_ref(), "Home");
+        });
+    }
+
+    /// `?` toggles the shortcuts overlay; Escape dismisses it without
+    /// affecting the active tag view.
+    #[gpui::test]
+    fn shortcuts_overlay_toggles(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("shift-/");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).shortcuts_visible));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!cx.read(|cx| root.read(cx).shortcuts_visible));
+    }
+
+    /// Opening the picker, typing a filter, and pressing Enter switches to the
+    /// matching page. Covers acceptance criterion 2 of issue #34.
+    #[gpui::test]
+    fn page_picker_filter_and_enter_switches_page(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("ctrl-o");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                root.read(cx).picker.is_some(),
+                "picker mounted after ctrl-o",
+            );
+        });
+
+        cx.simulate_input("Tagg");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            assert_eq!(current.read(cx).name().as_ref(), "Tagged");
+            assert!(root.read(cx).picker.is_none(), "picker dismissed on select");
         });
     }
 }
