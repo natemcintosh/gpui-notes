@@ -98,8 +98,8 @@ impl TagIndex {
         summaries
     }
 
-    pub fn reindex_page(&mut self, source: TagSource, outline: &Outline) {
-        self.remove_source(&source);
+    pub fn reindex_page(&mut self, source: &TagSource, outline: &Outline) {
+        self.remove_source(source);
 
         for block in all_blocks(&outline.roots) {
             let tags = tags_in_text(&block.text);
@@ -133,12 +133,12 @@ impl TagIndex {
         for name in store.list()? {
             let body = store.read(&name)?;
             let outline = Outline::parse(&body);
-            index.reindex_page(TagSource::Page(SharedString::from(name)), &outline);
+            index.reindex_page(&TagSource::Page(SharedString::from(name)), &outline);
         }
         for date in store.list_journals()? {
             let body = store.read_journal(date)?;
             let outline = Outline::parse(&body);
-            index.reindex_page(TagSource::Journal(date), &outline);
+            index.reindex_page(&TagSource::Journal(date), &outline);
         }
         Ok(index)
     }
@@ -208,7 +208,7 @@ impl InlineExtension for TagExt {
     }
 }
 
-pub fn reindex_global_for_page(page: &gpui::Entity<Page>, source: TagSource, cx: &mut App) {
+pub fn reindex_global_for_page(page: &gpui::Entity<Page>, source: &TagSource, cx: &mut App) {
     if !cx.has_global::<TagIndex>() {
         return;
     }
@@ -309,19 +309,20 @@ mod tests {
             .collect()
     }
 
+    fn count_inlines(nodes: &[InlineNode]) -> usize {
+        nodes
+            .iter()
+            .map(|node| match node {
+                InlineNode::Extension(_) => 1,
+                InlineNode::Link { children, .. } => count_inlines(children),
+                _ => 0,
+            })
+            .sum()
+    }
+
     fn extension_count(text: &str) -> usize {
         let ext = TagExt;
         let extensions: [&dyn InlineExtension; 1] = [&ext];
-        fn count_inlines(nodes: &[InlineNode]) -> usize {
-            nodes
-                .iter()
-                .map(|node| match node {
-                    InlineNode::Extension(_) => 1,
-                    InlineNode::Link { children, .. } => count_inlines(children),
-                    _ => 0,
-                })
-                .sum()
-        }
         lower(text, &extensions)
             .iter()
             .map(|block| match block {
@@ -398,11 +399,11 @@ mod tests {
         let mut index = TagIndex::default();
         let source = TagSource::Page("PageA".into());
         let old = Outline::parse("- old #gone\n- keep #stay\n");
-        index.reindex_page(source.clone(), &old);
+        index.reindex_page(&source, &old);
         assert_eq!(index.blocks_for_tag("gone").len(), 1);
 
         let new = Outline::parse("- keep #stay\n");
-        index.reindex_page(source, &new);
+        index.reindex_page(&source, &new);
         assert!(index.blocks_for_tag("gone").is_empty());
         assert_eq!(index.blocks_for_tag("stay").len(), 1);
     }

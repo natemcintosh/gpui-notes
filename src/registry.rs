@@ -140,7 +140,7 @@ impl PageRegistry {
         }
         page.update(cx, Page::mark_saved);
         let source = kind.source(&name);
-        tags::reindex_global_for_page(page, source, cx);
+        tags::reindex_global_for_page(page, &source, cx);
         Ok(())
     }
 
@@ -169,7 +169,7 @@ impl PageRegistry {
                 kind,
             },
         );
-        tags::reindex_global_for_page(&page, source, cx);
+        tags::reindex_global_for_page(&page, &source, cx);
         page
     }
 }

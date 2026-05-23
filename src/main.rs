@@ -92,23 +92,23 @@ impl RootView {
     }
 
     fn open_tag(&mut self, action: &OpenTag, _: &mut Window, cx: &mut Context<Self>) {
-        self.reindex_current_page(cx);
+        Self::reindex_current_page(cx);
         self.active_tag = Some(action.name.clone());
         cx.notify();
     }
 
-    fn reindex_current_page(&self, cx: &mut Context<Self>) {
+    fn reindex_current_page(cx: &mut Context<Self>) {
         let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
             return;
         };
         let source =
             cx.update_global::<PageRegistry, TagSource>(|reg, cx| reg.source_for_page(&page, cx));
-        tags::reindex_global_for_page(&page, source, cx);
+        tags::reindex_global_for_page(&page, &source, cx);
     }
 
     fn open_tag_hit(&mut self, source: &TagSource, window: &mut Window, cx: &mut Context<Self>) {
         let result = match source {
-            TagSource::Page(name) => set_current_page(name.as_ref(), cx).map(|_| ()),
+            TagSource::Page(name) => set_current_page(name.as_ref(), cx),
             TagSource::Journal(date) => journal::open_for_date(*date, cx).map(|_| ()),
         };
         if let Err(err) = result {
@@ -120,11 +120,7 @@ impl RootView {
         cx.notify();
     }
 
-    fn render_tag_results(
-        &mut self,
-        tag: &gpui::SharedString,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_tag_results(tag: &gpui::SharedString, cx: &mut Context<Self>) -> gpui::AnyElement {
         let hits = cx.global::<TagIndex>().blocks_for_tag(tag.as_ref());
         if hits.is_empty() {
             return div()
@@ -212,7 +208,7 @@ impl Render for RootView {
         );
 
         if let Some(tag) = active_tag {
-            root.child(self.render_tag_results(&tag, cx))
+            root.child(Self::render_tag_results(&tag, cx))
         } else {
             root.child(view)
         }
