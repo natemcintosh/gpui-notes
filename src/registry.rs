@@ -118,6 +118,14 @@ impl PageRegistry {
             .collect())
     }
 
+    /// Lists all journal dates available on disk, ascending.
+    ///
+    /// # Errors
+    /// Returns an I/O error if the journals directory cannot be read.
+    pub fn list_journals(&self) -> io::Result<Vec<NaiveDate>> {
+        self.store.list_journals()
+    }
+
     /// Writes the page's body to disk if dirty and clears the dirty flag.
     ///
     /// # Errors
