@@ -13,13 +13,17 @@ use gpui::{
 };
 
 use crate::block_render::theme;
-use crate::block_view::BlockView;
+use crate::block_view::{BlockView, BlockViewEvent};
 use crate::outline::{Block, BlockId};
 use crate::page::Page;
 
 pub struct OutlineView {
     page: Entity<Page>,
     blocks: HashMap<BlockId, Entity<BlockView>>,
+    /// One subscription per cached `BlockView` listening for
+    /// `BlockViewEvent::FocusRequested` so we can mount and focus the target.
+    /// Pruned alongside `blocks` when ids disappear from the outline.
+    block_subs: HashMap<BlockId, Subscription>,
     _page_sub: Subscription,
 }
 
@@ -29,6 +33,7 @@ impl OutlineView {
         Self {
             page,
             blocks: HashMap::new(),
+            block_subs: HashMap::new(),
             _page_sub: sub,
         }
     }
@@ -55,7 +60,16 @@ impl OutlineView {
         }
         let page = self.page.clone();
         let bv = cx.new(|block_cx| BlockView::new(id, page, window, block_cx));
+        let sub = cx.subscribe_in(&bv, window, |this, _bv, event, window, cx| match event {
+            BlockViewEvent::FocusRequested(target) => {
+                let target = *target;
+                let target_bv = this.get_or_create(target, window, cx);
+                let handle = target_bv.focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+        });
         self.blocks.insert(id, bv.clone());
+        self.block_subs.insert(id, sub);
         bv
     }
 
@@ -96,6 +110,7 @@ impl Render for OutlineView {
             (flatten_visible(&outline.roots), all)
         };
         self.blocks.retain(|id, _| all_ids.contains(id));
+        self.block_subs.retain(|id, _| all_ids.contains(id));
 
         let mut root = div().flex().flex_col().gap_1();
         for (depth, id) in flat {
@@ -125,6 +140,150 @@ impl Render for OutlineView {
 mod tests {
     use super::*;
     use crate::outline::Block;
+    use crate::text_input;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    struct TestPage(Entity<Page>);
+    impl gpui::Global for TestPage {}
+
+    /// Mount an `OutlineView` for `body` as the window root and activate the
+    /// window. Same shape as `block_view::tests::mount` — focus and event
+    /// dispatch only fire on active windows during `Window::draw`.
+    fn mount<'a>(
+        cx: &'a mut TestAppContext,
+        body: &str,
+    ) -> (Entity<Page>, Entity<OutlineView>, &'a mut VisualTestContext) {
+        let body = body.to_string();
+        let (ov, vcx) = cx.add_window_view(move |_window, cx| {
+            text_input::bind_keys(cx);
+            let page = cx.new(|cx| Page::new("foo".into(), &body, cx));
+            cx.set_global(TestPage(page));
+            OutlineView::new(cx.global::<TestPage>().0.clone(), cx)
+        });
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let page = vcx.read(|cx| cx.global::<TestPage>().0.clone());
+        (page, ov, vcx)
+    }
+
+    #[gpui::test]
+    fn enter_creates_sibling_at_same_depth(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n");
+
+        let first_id = cx.read(|cx| page.read(cx).outline().roots[0].id);
+
+        cx.update(|window, cx| {
+            let bv = ov
+                .read(cx)
+                .block_view(first_id)
+                .cloned()
+                .unwrap_or_else(|| ov.update(cx, |o, cx| o.get_or_create(first_id, window, cx)));
+            window.focus(&bv.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // Outline now has 3 roots in order: a, <new>, b.
+        let (roots, new_id) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            let roots: Vec<(BlockId, String)> = outline
+                .roots
+                .iter()
+                .map(|b| (b.id, b.text.clone()))
+                .collect();
+            let new_id = outline.roots[1].id;
+            (roots, new_id)
+        });
+        assert_eq!(roots.len(), 3, "expected new sibling inserted: {roots:?}");
+        assert_eq!(roots[0].1, "a");
+        assert_eq!(roots[1].1, "");
+        assert_eq!(roots[2].1, "b");
+
+        // The new block's BlockView should be mounted, editing, and focused.
+        cx.update(|window, cx| {
+            let new_bv = ov
+                .read(cx)
+                .block_view(new_id)
+                .expect("new block view mounted")
+                .clone();
+            assert!(new_bv.read(cx).is_editing(), "new block should be editing");
+            // Focus advanced to the mounted TextInput, not the wrapper handle.
+            let input_focus = new_bv
+                .read(cx)
+                .input_focus_handle_for_test(cx)
+                .expect("input mounted");
+            assert!(
+                input_focus.is_focused(window),
+                "new block's TextInput should hold focus",
+            );
+        });
+
+        assert!(cx.read(|cx| page.read(cx).dirty()));
+    }
+
+    #[gpui::test]
+    fn new_block_edits_flush_back_to_outline(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n");
+
+        let first_id = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        cx.update(|window, cx| {
+            let bv = ov.update(cx, |o, cx| o.get_or_create(first_id, window, cx));
+            window.focus(&bv.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // Write into the new block's TextInput directly, then drive the blur
+        // path that mounts back to the outline. simulate_input would route
+        // through the dispatch tree, which depends on draw timing this test
+        // doesn't want to assert.
+        let new_id = cx.read(|cx| page.read(cx).outline().roots[1].id);
+        cx.update(|window, cx| {
+            let new_bv = ov
+                .read(cx)
+                .block_view(new_id)
+                .expect("new block mounted")
+                .clone();
+            let input = new_bv
+                .read(cx)
+                .input_entity_for_test()
+                .expect("input mounted");
+            input.update(cx, |i, cx| i.test_replace_all("hello", cx));
+            new_bv.update(cx, |b, cx| b.test_end_editing(window, cx));
+        });
+
+        cx.read(|cx| {
+            assert_eq!(page.read(cx).outline().get(new_id), Some("hello"));
+        });
+    }
+
+    #[gpui::test]
+    fn enter_on_nested_block_creates_sibling_at_same_depth(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n  - child\n");
+
+        let child_id = cx.read(|cx| page.read(cx).outline().roots[0].children[0].id);
+        cx.update(|window, cx| {
+            let bv = ov.update(cx, |o, cx| o.get_or_create(child_id, window, cx));
+            window.focus(&bv.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            assert_eq!(outline.roots.len(), 1, "still one root");
+            let children = &outline.roots[0].children;
+            assert_eq!(children.len(), 2, "child got a sibling");
+            assert_eq!(children[0].text, "child");
+            assert_eq!(children[1].text, "");
+        });
+    }
 
     #[test]
     fn flatten_respects_collapsed() {

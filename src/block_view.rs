@@ -7,8 +7,9 @@
 //! and then dropped, so there is no hidden state to drift out of sync.
 
 use gpui::{
-    div, prelude::*, px, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable,
-    IntoElement, MouseButton, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    div, prelude::*, px, AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, MouseButton, ParentElement, Render, SharedString, Styled, Subscription,
+    Window,
 };
 
 use crate::block_render::{render_block, theme};
@@ -16,6 +17,17 @@ use crate::outline::BlockId;
 use crate::page::Page;
 use crate::tags::TagExt;
 use crate::text_input::{TextInput, TextInputEvent};
+
+/// Events emitted by `BlockView` to its parent (typically `OutlineView`).
+#[derive(Debug, Clone)]
+pub enum BlockViewEvent {
+    /// The user finished a block with Enter and a new sibling was inserted
+    /// after `self.block_id`. The parent should mount/focus the view for the
+    /// newly created block.
+    FocusRequested(BlockId),
+}
+
+impl EventEmitter<BlockViewEvent> for BlockView {}
 
 pub struct BlockView {
     block_id: BlockId,
@@ -85,10 +97,14 @@ impl BlockView {
         let on_blur = cx.on_blur(&input_focus, window, |this, window, cx| {
             this.end_editing(window, cx);
         });
-        let on_event = cx.subscribe(&input, |this, _input, event, cx| {
-            if matches!(event, TextInputEvent::Cancelled) {
+        let on_event = cx.subscribe(&input, |this, _input, event, cx| match event {
+            TextInputEvent::Cancelled => {
                 this.end_editing_inner(cx);
             }
+            TextInputEvent::Submitted => {
+                this.insert_sibling_below(cx);
+            }
+            TextInputEvent::Changed(_) => {}
         });
         window.focus(&input_focus, cx);
         self.input = Some(input);
@@ -99,6 +115,28 @@ impl BlockView {
 
     fn end_editing(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.end_editing_inner(cx);
+    }
+
+    /// Flush the in-progress edit, insert an empty sibling immediately after
+    /// this block, and ask the parent view to focus the new block. The new
+    /// block's text starts empty regardless of where the caret was — splitting
+    /// at the caret is a follow-up (see issue #31).
+    fn insert_sibling_below(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.input.take() else {
+            return;
+        };
+        let text = input.read(cx).content().to_string();
+        let block_id = self.block_id;
+        let new_id = self.page.update(cx, |p, cx| {
+            p.set_block_text(block_id, text, cx);
+            p.insert_block_after(block_id, "", cx)
+        });
+        self.on_input_blur = None;
+        self.on_input_event = None;
+        cx.notify();
+        if let Some(new_id) = new_id {
+            cx.emit(BlockViewEvent::FocusRequested(new_id));
+        }
     }
 
     fn end_editing_inner(&mut self, cx: &mut Context<Self>) {
@@ -176,6 +214,14 @@ impl Render for BlockView {
 impl BlockView {
     pub(crate) fn test_end_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.end_editing(window, cx);
+    }
+
+    pub(crate) fn input_focus_handle_for_test(&self, cx: &App) -> Option<FocusHandle> {
+        self.input.as_ref().map(|i| i.focus_handle(cx))
+    }
+
+    pub(crate) fn input_entity_for_test(&self) -> Option<Entity<TextInput>> {
+        self.input.clone()
     }
 }
 
