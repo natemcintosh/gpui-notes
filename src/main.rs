@@ -22,15 +22,29 @@ actions!(
         NextPage,
         JumpToToday,
         CloseTagView,
-        OpenPagePicker
+        OpenPagePicker,
+        ToggleShortcuts
     ]
 );
+
+/// Static cheatsheet shown in the shortcuts overlay. The strings here are the
+/// only place the bindings are documented to the user — keep in sync with the
+/// `cx.bind_keys(...)` block in `main`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("ctrl-o", "Open page…"),
+    ("ctrl-p", "Cycle to next page"),
+    ("ctrl-.", "Jump to today's journal"),
+    ("ctrl-s", "Save current page"),
+    ("escape", "Close overlay / tag view"),
+    ("?", "Show this help"),
+];
 
 struct RootView {
     focus_handle: FocusHandle,
     active_tag: Option<SharedString>,
     picker: Option<Entity<PagePicker>>,
     picker_sub: Option<Subscription>,
+    shortcuts_visible: bool,
     _current_observer: Subscription,
     _tag_observer: Subscription,
 }
@@ -44,6 +58,7 @@ impl RootView {
             active_tag: None,
             picker: None,
             picker_sub: None,
+            shortcuts_visible: false,
             _current_observer: current_observer,
             _tag_observer: tag_observer,
         }
@@ -114,11 +129,134 @@ impl RootView {
         cx.notify();
     }
 
+    /// Escape handler. Dismisses the shortcuts overlay first if visible, then
+    /// falls back to closing the tag-results view. Picker dismissal goes
+    /// through `TextInputEvent::Cancelled` instead — its `TextInput` owns focus.
     fn close_tag_view(&mut self, _: &CloseTagView, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shortcuts_visible {
+            self.shortcuts_visible = false;
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+            return;
+        }
         if self.active_tag.take().is_some() {
             self.focus_current(window, cx);
             cx.notify();
         }
+    }
+
+    fn toggle_shortcuts(
+        &mut self,
+        _: &ToggleShortcuts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shortcuts_visible = !self.shortcuts_visible;
+        if self.shortcuts_visible {
+            // Park focus on the root so Escape lands on `CloseTagView` (which
+            // also dismisses the overlay) instead of a stale TextInput.
+            window.focus(&self.focus_handle, cx);
+        } else {
+            self.focus_current(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn render_header(
+        header_text: String,
+        has_active_tag: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .text_color(rgb(0xcccccc))
+            .text_size(px(14.))
+            .child(div().flex_1().child(header_text))
+            .child(
+                div()
+                    .id(ElementId::Name(SharedString::from("show-shortcuts")))
+                    .px_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_color(rgb(0x888888))
+                    .hover(|style| style.bg(rgb(0x2a2a2a)).text_color(rgb(0xdddddd)))
+                    .child("?")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_shortcuts(&ToggleShortcuts, window, cx);
+                        }),
+                    ),
+            );
+        if has_active_tag {
+            row = row.child(
+                div()
+                    .id(ElementId::Name(SharedString::from("close-tag-view")))
+                    .px_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_color(rgb(0x888888))
+                    .hover(|style| style.bg(rgb(0x2a2a2a)).text_color(rgb(0xdddddd)))
+                    .child("× close")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.close_tag_view(&CloseTagView, window, cx);
+                        }),
+                    ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    fn render_shortcuts_overlay() -> gpui::AnyElement {
+        let mut list = div().flex().flex_col().gap_1();
+        for (keys, label) in SHORTCUTS {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w(px(96.0))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(rgb(0x2a2a2a))
+                            .text_color(rgb(0xffffff))
+                            .child(SharedString::from(*keys)),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0xcccccc))
+                            .child(SharedString::from(*label)),
+                    ),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .bg(rgb(0x141414))
+            .border_1()
+            .border_color(rgb(0x3a3a3a))
+            .rounded_md()
+            .p_4()
+            .min_w(px(360.0))
+            .child(
+                div()
+                    .text_color(rgb(0xeeeeee))
+                    .text_size(px(14.))
+                    .child("Keyboard shortcuts"),
+            )
+            .child(list)
+            .into_any_element()
     }
 
     fn open_page_picker(
@@ -270,6 +408,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::open_tag))
             .on_action(cx.listener(Self::close_tag_view))
             .on_action(cx.listener(Self::open_page_picker))
+            .on_action(cx.listener(Self::toggle_shortcuts))
             .relative()
             .flex()
             .flex_col()
@@ -296,34 +435,7 @@ impl Render for RootView {
             name.to_string()
         };
 
-        let mut header_row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .text_color(rgb(0xcccccc))
-            .text_size(px(14.))
-            .child(div().child(header_text));
-        if active_tag.is_some() {
-            header_row = header_row.child(
-                div()
-                    .id(ElementId::Name(SharedString::from("close-tag-view")))
-                    .px_2()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .text_color(rgb(0x888888))
-                    .hover(|style| style.bg(rgb(0x2a2a2a)).text_color(rgb(0xdddddd)))
-                    .child("× close")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.close_tag_view(&CloseTagView, window, cx);
-                        }),
-                    ),
-            );
-        }
-
-        let root = root.child(header_row);
+        let root = root.child(Self::render_header(header_text, active_tag.is_some(), cx));
 
         let body = if let Some(tag) = active_tag {
             root.child(Self::render_tag_results(&tag, cx))
@@ -331,7 +443,15 @@ impl Render for RootView {
             root.child(view)
         };
 
-        if let Some(picker) = self.picker.clone() {
+        let overlay_child: Option<gpui::AnyElement> = if let Some(picker) = self.picker.clone() {
+            Some(picker.into_any_element())
+        } else if self.shortcuts_visible {
+            Some(Self::render_shortcuts_overlay())
+        } else {
+            None
+        };
+
+        if let Some(child) = overlay_child {
             body.child(
                 div()
                     .absolute()
@@ -342,7 +462,7 @@ impl Render for RootView {
                     .items_start()
                     .justify_center()
                     .pt_16()
-                    .child(picker),
+                    .child(child),
             )
         } else {
             body
@@ -365,6 +485,7 @@ fn main() {
             KeyBinding::new(&format!("{cmd}-."), JumpToToday, Some("RootView")),
             KeyBinding::new(&format!("{cmd}-o"), OpenPagePicker, Some("RootView")),
             KeyBinding::new("escape", CloseTagView, Some("RootView")),
+            KeyBinding::new("shift-/", ToggleShortcuts, Some("RootView")),
         ]);
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
@@ -409,6 +530,7 @@ mod tests {
             cx.bind_keys([
                 KeyBinding::new("escape", CloseTagView, Some("RootView")),
                 KeyBinding::new("ctrl-o", OpenPagePicker, Some("RootView")),
+                KeyBinding::new("shift-/", ToggleShortcuts, Some("RootView")),
             ]);
             let store = NotesStore::new(&root_dir).unwrap();
             store.write("Home", "- home\n").unwrap();
@@ -495,6 +617,22 @@ mod tests {
             let current = cx.global::<CurrentPage>().get().unwrap();
             assert_eq!(current.read(cx).name().as_ref(), "Home");
         });
+    }
+
+    /// `?` toggles the shortcuts overlay; Escape dismisses it without
+    /// affecting the active tag view.
+    #[gpui::test]
+    fn shortcuts_overlay_toggles(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("shift-/");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).shortcuts_visible));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!cx.read(|cx| root.read(cx).shortcuts_visible));
     }
 
     /// Opening the picker, typing a filter, and pressing Enter switches to the
