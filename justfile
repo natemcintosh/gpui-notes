@@ -18,7 +18,7 @@ test:
     cargo nextest run --no-fail-fast
 
 check:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets -- -D warnings -W clippy::pedantic
 
 pre:
     prek run --all-files
