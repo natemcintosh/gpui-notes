@@ -285,6 +285,63 @@ mod tests {
         });
     }
 
+    /// Editing → Viewing via blur. Realized as "focus another block": when
+    /// block 2 takes focus, block 1's input loses focus, its `on_blur`
+    /// listener fires, and block 1 flushes back to view mode.
+    ///
+    /// Done through `OutlineView` rather than `BlockView` directly because
+    /// `BlockView` test setups have no second focusable element to receive
+    /// focus, and `Window::blur` alone does not drive `on_blur` reliably
+    /// in the headless dispatch.
+    #[gpui::test]
+    fn transition_editing_to_viewing_via_blur_across_blocks(cx: &mut TestAppContext) {
+        use crate::block_view::BlockMode;
+        let (page, ov, cx) = mount(cx, "- one\n- two\n");
+
+        let (first_id, second_id) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[1].id)
+        });
+
+        cx.update(|window, cx| {
+            let bv = ov.update(cx, |o, cx| o.get_or_create(first_id, window, cx));
+            window.focus(&bv.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            // Force a draw so the input's focus_id is captured in the
+            // rendered_frame focus path. Without this, the next focus
+            // change can't be detected as a blur — the focus listener
+            // compares against the rendered_frame's path.
+            window.draw(cx).clear();
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let bv = ov.read(cx).block_view(first_id).expect("first mounted");
+            assert!(bv.read(cx).is_editing(), "precondition: first is editing");
+        });
+
+        // Move focus to the second block; this naturally blurs the first
+        // block's TextInput.
+        cx.update(|window, cx| {
+            let other = ov.update(cx, |o, cx| o.get_or_create(second_id, window, cx));
+            window.focus(&other.focus_handle(cx), cx);
+            window.draw(cx).clear();
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let bv = ov
+                .read(cx)
+                .block_view(first_id)
+                .expect("first still cached");
+            assert!(
+                matches!(bv.read(cx).mode(), BlockMode::Viewing),
+                "blurring the first block should exit its edit mode",
+            );
+        });
+    }
+
     #[test]
     fn flatten_respects_collapsed() {
         let mut a = Block::new("a");

@@ -45,6 +45,28 @@ pub enum PagePickerEvent {
     Cancelled,
 }
 
+/// Discrete filter buckets for the picker. The continuous filter string is
+/// collapsed into these three categories so state-transition tests can assert
+/// "this keystroke moved us from X to Y" without depending on the exact
+/// substring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterCategory {
+    Empty,
+    NonEmptyMatches,
+    NonEmptyNoMatches,
+}
+
+/// Where the selection cursor sits within the filtered list. `NoSelection`
+/// means the filtered list is empty (so there is nothing to highlight); the
+/// three positional variants are used to verify arrow-key wrap-around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionPosition {
+    NoSelection,
+    First,
+    Middle,
+    Last,
+}
+
 impl EventEmitter<PagePickerEvent> for PagePicker {}
 
 pub struct PagePicker {
@@ -145,6 +167,37 @@ impl PagePicker {
     #[must_use]
     pub fn input(&self) -> Entity<TextInput> {
         self.input.clone()
+    }
+
+    /// Categorize the current filter state for state-machine tests. Reads the
+    /// `TextInput`'s content so it stays consistent with whatever the user has
+    /// typed, including IME composition.
+    #[must_use]
+    pub fn filter_category(&self, cx: &App) -> FilterCategory {
+        let query = self.input.read(cx).content();
+        if query.is_empty() {
+            FilterCategory::Empty
+        } else if self.filtered.is_empty() {
+            FilterCategory::NonEmptyNoMatches
+        } else {
+            FilterCategory::NonEmptyMatches
+        }
+    }
+
+    /// Categorize the highlighted row's position within the filtered list.
+    /// Returns `NoSelection` if the filtered list is empty.
+    #[must_use]
+    pub fn selection_position(&self) -> SelectionPosition {
+        let len = self.filtered.len();
+        if len == 0 {
+            SelectionPosition::NoSelection
+        } else if self.selected == 0 {
+            SelectionPosition::First
+        } else if self.selected == len - 1 {
+            SelectionPosition::Last
+        } else {
+            SelectionPosition::Middle
+        }
     }
 }
 
@@ -327,5 +380,281 @@ mod tests {
     struct SelectionRecorder {
         events: Vec<PagePickerEvent>,
         _sub: Subscription,
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Filter-state transitions. The 3-bucket category enum (Empty,
+    // NonEmptyMatches, NonEmptyNoMatches) collapses every filter string
+    // into one of three states, so the tests below cover every edge in
+    // the state graph.
+    // ────────────────────────────────────────────────────────────────────
+
+    fn mount_picker(cx: &mut TestAppContext) -> (Entity<PagePicker>, &mut gpui::VisualTestContext) {
+        let (picker, vcx) = cx.add_window_view(|window, cx| {
+            text_input::bind_keys(cx);
+            bind_keys(cx);
+            PagePicker::new(entries(), window, cx)
+        });
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        (picker, vcx)
+    }
+
+    fn replace_filter(picker: &Entity<PagePicker>, vcx: &mut gpui::VisualTestContext, text: &str) {
+        vcx.update(|_, cx| {
+            picker.update(cx, |p, cx| {
+                p.input.update(cx, |i, cx| i.test_replace_all(text, cx));
+            });
+        });
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn filter_transition_empty_to_matches(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        vcx.read(|cx| {
+            assert_eq!(picker.read(cx).filter_category(cx), FilterCategory::Empty);
+        });
+
+        replace_filter(&picker, vcx, "Beta");
+
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).filter_category(cx),
+                FilterCategory::NonEmptyMatches,
+            );
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::First,
+                "selection resets to first on filter change",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn filter_transition_empty_to_no_matches(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        replace_filter(&picker, vcx, "zzzzz");
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).filter_category(cx),
+                FilterCategory::NonEmptyNoMatches,
+            );
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::NoSelection,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn filter_transition_matches_to_empty(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        replace_filter(&picker, vcx, "Beta");
+        replace_filter(&picker, vcx, "");
+        vcx.read(|cx| {
+            assert_eq!(picker.read(cx).filter_category(cx), FilterCategory::Empty);
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::First,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn filter_transition_matches_to_matches(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        replace_filter(&picker, vcx, "a"); // matches Alpha, Beta, Gamma
+        replace_filter(&picker, vcx, "am"); // narrows to Gamma
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).filter_category(cx),
+                FilterCategory::NonEmptyMatches,
+            );
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::First,
+                "narrowed filter resets selection to first",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn filter_transition_matches_to_no_matches(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        replace_filter(&picker, vcx, "Beta");
+        replace_filter(&picker, vcx, "Betazz");
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).filter_category(cx),
+                FilterCategory::NonEmptyNoMatches,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn filter_transition_no_matches_to_matches(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        replace_filter(&picker, vcx, "Betazz");
+        replace_filter(&picker, vcx, "Beta");
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).filter_category(cx),
+                FilterCategory::NonEmptyMatches,
+            );
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::First,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn filter_transition_no_matches_to_empty(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        replace_filter(&picker, vcx, "zzz");
+        replace_filter(&picker, vcx, "");
+        vcx.read(|cx| {
+            assert_eq!(picker.read(cx).filter_category(cx), FilterCategory::Empty);
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::First,
+            );
+        });
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Selection-position transitions. `entries()` has 4 items, so under
+    // the empty filter the list has First (Alpha), two Middles (Beta,
+    // Gamma), Last (journal date). All arrow-key tests below use that
+    // empty-filter list and start from the natural selection position
+    // they want to transition out of.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Move the selection to position `target` (0-indexed) by dispatching
+    /// the requisite number of `down` keystrokes from the initial First.
+    fn move_selection_to(vcx: &mut gpui::VisualTestContext, steps: usize) {
+        for _ in 0..steps {
+            vcx.simulate_keystrokes("down");
+        }
+        vcx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn selection_first_to_middle_via_down(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::Middle,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn selection_middle_to_last_via_down(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        // 4 entries → indexes 0,1,2,3. Go 0→1 (Middle), then to 3 (Last)
+        // takes two more downs (1→2→3).
+        move_selection_to(vcx, 3);
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::Last,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn selection_last_to_first_via_down_wraps(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        // 0→3 = 3 downs to reach Last
+        move_selection_to(vcx, 3);
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::First,
+                "down at Last should wrap to First",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn selection_first_to_last_via_up_wraps(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        vcx.simulate_keystrokes("up");
+        vcx.run_until_parked();
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::Last,
+                "up at First should wrap to Last",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn selection_last_to_middle_via_up(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        move_selection_to(vcx, 3);
+        vcx.simulate_keystrokes("up");
+        vcx.run_until_parked();
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::Middle,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn selection_middle_to_first_via_up(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("up");
+        vcx.run_until_parked();
+        vcx.read(|cx| {
+            assert_eq!(
+                picker.read(cx).selection_position(),
+                SelectionPosition::First,
+            );
+        });
+    }
+
+    /// Escape emits `Cancelled` (complementing `enter_emits_selected`).
+    #[gpui::test]
+    fn escape_emits_cancelled(cx: &mut TestAppContext) {
+        let (picker, vcx) = mount_picker(cx);
+
+        let recorder = vcx.update(|_, cx| {
+            cx.new(|cx| {
+                let sub = cx.subscribe(
+                    &picker,
+                    |this: &mut SelectionRecorder, _, event: &PagePickerEvent, _| {
+                        this.events.push(event.clone());
+                    },
+                );
+                SelectionRecorder {
+                    events: Vec::new(),
+                    _sub: sub,
+                }
+            })
+        });
+
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+
+        recorder.read_with(vcx, |r, _| {
+            assert!(
+                matches!(r.events.as_slice(), [PagePickerEvent::Cancelled]),
+                "got {:?}",
+                r.events,
+            );
+        });
     }
 }

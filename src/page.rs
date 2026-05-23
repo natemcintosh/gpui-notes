@@ -158,4 +158,42 @@ mod tests {
             assert!(p.dirty());
         });
     }
+
+    /// clean → dirty via `insert_block_after`. Companion to the
+    /// `set_block_text` transition test above.
+    #[gpui::test]
+    fn transition_clean_to_dirty_via_insert_block_after(cx: &mut TestAppContext) {
+        let page = cx.new(|cx| Page::new("foo".into(), "- hi\n", cx));
+        let first_id = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        assert!(!cx.read(|cx| page.read(cx).dirty()));
+
+        let new_id = cx
+            .update(|cx| page.update(cx, |p, cx| p.insert_block_after(first_id, "new", cx)))
+            .expect("insert returned id");
+
+        cx.read(|cx| {
+            let p = page.read(cx);
+            assert!(p.dirty(), "insert_block_after marks the page dirty");
+            assert_eq!(p.outline().get(new_id), Some("new"));
+        });
+    }
+
+    /// dirty → clean via `mark_saved`. The registry calls this after a
+    /// successful write; the test exercises the page in isolation.
+    #[gpui::test]
+    fn transition_dirty_to_clean_via_mark_saved(cx: &mut TestAppContext) {
+        let page = cx.new(|cx| Page::new("foo".into(), "- hi\n", cx));
+        let first_id = cx.read(|cx| page.read(cx).outline().roots[0].id);
+
+        cx.update(|cx| {
+            page.update(cx, |p, cx| p.set_block_text(first_id, "edited", cx));
+        });
+        assert!(cx.read(|cx| page.read(cx).dirty()), "precondition: dirty");
+
+        cx.update(|cx| {
+            page.update(cx, Page::mark_saved);
+        });
+
+        assert!(!cx.read(|cx| page.read(cx).dirty()));
+    }
 }
