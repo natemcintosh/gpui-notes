@@ -8,8 +8,8 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    div, px, AppContext, Context, Entity, Focusable, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window,
+    div, px, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
 
 use crate::block_render::theme;
@@ -19,6 +19,10 @@ use crate::page::Page;
 
 pub struct OutlineView {
     page: Entity<Page>,
+    /// Receives focus when a block exits editing via blur/Escape, so the
+    /// `RootView` key context stays in the focus chain for window-level
+    /// bindings like ctrl-s.
+    focus_handle: FocusHandle,
     blocks: HashMap<BlockId, Entity<BlockView>>,
     /// One subscription per cached `BlockView` listening for
     /// `BlockViewEvent::FocusRequested` so we can mount and focus the target.
@@ -32,6 +36,7 @@ impl OutlineView {
         let sub = cx.observe(&page, |_, _, cx| cx.notify());
         Self {
             page,
+            focus_handle: cx.focus_handle(),
             blocks: HashMap::new(),
             block_subs: HashMap::new(),
             _page_sub: sub,
@@ -66,6 +71,9 @@ impl OutlineView {
                 let target_bv = this.get_or_create(target, window, cx);
                 let handle = target_bv.focus_handle(cx);
                 window.focus(&handle, cx);
+            }
+            BlockViewEvent::EditingEnded => {
+                window.focus(&this.focus_handle, cx);
             }
         });
         self.blocks.insert(id, bv.clone());
@@ -112,7 +120,11 @@ impl Render for OutlineView {
         self.blocks.retain(|id, _| all_ids.contains(id));
         self.block_subs.retain(|id, _| all_ids.contains(id));
 
-        let mut root = div().flex().flex_col().gap_1();
+        let mut root = div()
+            .track_focus(&self.focus_handle)
+            .flex()
+            .flex_col()
+            .gap_1();
         for (depth, id) in flat {
             let bv = self.get_or_create(id, window, cx);
             #[allow(clippy::cast_precision_loss)]

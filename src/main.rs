@@ -960,4 +960,36 @@ mod tests {
             assert!(!page.read(cx).dirty(), "ctrl-s clears the dirty flag");
         });
     }
+
+    /// After escaping out of a block edit, ctrl-s must still dispatch. The
+    /// `TextInput` entity is dropped on Cancel, which previously left focus
+    /// dead — no element matched the `RootView` key context, so the binding
+    /// silently dropped. `OutlineView` now parks focus on itself on
+    /// `BlockViewEvent::EditingEnded` to keep the chain alive.
+    #[gpui::test]
+    fn ctrl_s_works_after_escaping_block_edit(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let page = cx.global::<CurrentPage>().get().unwrap().clone();
+            let first = page.read(cx).outline().first_block_id().unwrap();
+            page.update(cx, |p, cx| p.set_block_text(first, "after-edit", cx));
+            assert!(page.read(cx).dirty());
+        });
+
+        cx.simulate_keystrokes("ctrl-s");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let page = cx.global::<CurrentPage>().get().unwrap();
+            assert!(
+                !page.read(cx).dirty(),
+                "ctrl-s should clear dirty even after escape parked focus",
+            );
+        });
+    }
 }

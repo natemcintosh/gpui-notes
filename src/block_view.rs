@@ -25,6 +25,10 @@ pub enum BlockViewEvent {
     /// after `self.block_id`. The parent should mount/focus the view for the
     /// newly created block.
     FocusRequested(BlockId),
+    /// Editing ended via blur/Escape (not via Enter, which uses
+    /// `FocusRequested`). The parent should park focus on a non-block
+    /// element so window-level key bindings (e.g. ctrl-s) keep dispatching.
+    EditingEnded,
 }
 
 impl EventEmitter<BlockViewEvent> for BlockView {}
@@ -113,6 +117,7 @@ impl BlockView {
         let on_event = cx.subscribe(&input, |this, _input, event, cx| match event {
             TextInputEvent::Cancelled => {
                 this.end_editing_inner(cx);
+                cx.emit(BlockViewEvent::EditingEnded);
             }
             TextInputEvent::Submitted => {
                 this.insert_sibling_below(cx);
