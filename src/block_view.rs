@@ -29,18 +29,28 @@ pub enum BlockViewEvent {
 
 impl EventEmitter<BlockViewEvent> for BlockView {}
 
+/// The two display modes for a single block. `Editing` carries the live
+/// `TextInput` and the two subscriptions that drive the exit transitions
+/// (blur and Escape), so every edit cycle replaces them as a unit — there is
+/// no way to have a dangling subscription without an input or vice versa.
+pub enum BlockMode {
+    Viewing,
+    Editing {
+        input: Entity<TextInput>,
+        /// Drops on edit exit. Fires `end_editing` when focus leaves the input.
+        _on_blur: Subscription,
+        /// Drops on edit exit. Fires on `TextInputEvent::Cancelled` (Escape)
+        /// because the blur listener can lag a frame.
+        _on_event: Subscription,
+    },
+}
+
 pub struct BlockView {
     block_id: BlockId,
     page: Entity<Page>,
     focus_handle: FocusHandle,
-    input: Option<Entity<TextInput>>,
+    mode: BlockMode,
     _on_focus: Subscription,
-    /// Reset every edit cycle — subscribes to the *current* `TextInput`'s blur.
-    on_input_blur: Option<Subscription>,
-    /// Reset every edit cycle — subscribes to the current `TextInput`'s events
-    /// (used to exit editing on Escape, since the blur listener can lag a
-    /// frame and leave the input visually mounted until the next redraw).
-    on_input_event: Option<Subscription>,
     _page_sub: Subscription,
 }
 
@@ -63,10 +73,8 @@ impl BlockView {
             block_id,
             page,
             focus_handle,
-            input: None,
+            mode: BlockMode::Viewing,
             _on_focus: on_focus,
-            on_input_blur: None,
-            on_input_event: None,
             _page_sub: page_sub,
         }
     }
@@ -77,12 +85,17 @@ impl BlockView {
     }
 
     #[must_use]
+    pub fn mode(&self) -> &BlockMode {
+        &self.mode
+    }
+
+    #[must_use]
     pub fn is_editing(&self) -> bool {
-        self.input.is_some()
+        matches!(self.mode, BlockMode::Editing { .. })
     }
 
     fn begin_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.input.is_some() {
+        if matches!(self.mode, BlockMode::Editing { .. }) {
             return;
         }
         let text = self
@@ -107,9 +120,11 @@ impl BlockView {
             TextInputEvent::Changed(_) => {}
         });
         window.focus(&input_focus, cx);
-        self.input = Some(input);
-        self.on_input_blur = Some(on_blur);
-        self.on_input_event = Some(on_event);
+        self.mode = BlockMode::Editing {
+            input,
+            _on_blur: on_blur,
+            _on_event: on_event,
+        };
         cx.notify();
     }
 
@@ -117,12 +132,21 @@ impl BlockView {
         self.end_editing_inner(cx);
     }
 
+    /// Take the live `TextInput` from `mode` (transitioning to `Viewing`) and
+    /// return it. Drops the blur/event subscriptions atomically.
+    fn take_input_on_exit(&mut self) -> Option<Entity<TextInput>> {
+        match std::mem::replace(&mut self.mode, BlockMode::Viewing) {
+            BlockMode::Editing { input, .. } => Some(input),
+            BlockMode::Viewing => None,
+        }
+    }
+
     /// Flush the in-progress edit, insert an empty sibling immediately after
     /// this block, and ask the parent view to focus the new block. The new
     /// block's text starts empty regardless of where the caret was — splitting
     /// at the caret is a follow-up (see issue #31).
     fn insert_sibling_below(&mut self, cx: &mut Context<Self>) {
-        let Some(input) = self.input.take() else {
+        let Some(input) = self.take_input_on_exit() else {
             return;
         };
         let text = input.read(cx).content().to_string();
@@ -131,8 +155,6 @@ impl BlockView {
             p.set_block_text(block_id, text, cx);
             p.insert_block_after(block_id, "", cx)
         });
-        self.on_input_blur = None;
-        self.on_input_event = None;
         cx.notify();
         if let Some(new_id) = new_id {
             cx.emit(BlockViewEvent::FocusRequested(new_id));
@@ -140,15 +162,13 @@ impl BlockView {
     }
 
     fn end_editing_inner(&mut self, cx: &mut Context<Self>) {
-        let Some(input) = self.input.take() else {
+        let Some(input) = self.take_input_on_exit() else {
             return;
         };
         let text = input.read(cx).content().to_string();
         let block_id = self.block_id;
         self.page
             .update(cx, |p, cx| p.set_block_text(block_id, text, cx));
-        self.on_input_blur = None;
-        self.on_input_event = None;
         cx.notify();
     }
 }
@@ -161,8 +181,8 @@ impl Focusable for BlockView {
 
 impl Render for BlockView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content: AnyElement = if let Some(input) = self.input.clone() {
-            input.into_any_element()
+        let content: AnyElement = if let BlockMode::Editing { input, .. } = &self.mode {
+            input.clone().into_any_element()
         } else {
             let text: String = self
                 .page
@@ -217,11 +237,17 @@ impl BlockView {
     }
 
     pub(crate) fn input_focus_handle_for_test(&self, cx: &App) -> Option<FocusHandle> {
-        self.input.as_ref().map(|i| i.focus_handle(cx))
+        match &self.mode {
+            BlockMode::Editing { input, .. } => Some(input.focus_handle(cx)),
+            BlockMode::Viewing => None,
+        }
     }
 
     pub(crate) fn input_entity_for_test(&self) -> Option<Entity<TextInput>> {
-        self.input.clone()
+        match &self.mode {
+            BlockMode::Editing { input, .. } => Some(input.clone()),
+            BlockMode::Viewing => None,
+        }
     }
 }
 
@@ -289,10 +315,8 @@ mod tests {
         cx.update(|window, cx| {
             let input = bv
                 .read(cx)
-                .input
-                .as_ref()
-                .expect("input mounted after focus")
-                .clone();
+                .input_entity_for_test()
+                .expect("input mounted after focus");
             input.update(cx, |i, cx| i.test_replace_all("HI", cx));
             bv.update(cx, |b, cx| b.test_end_editing(window, cx));
         });
@@ -317,8 +341,7 @@ mod tests {
 
         let first_input_id = cx.read(|cx| {
             bv.read(cx)
-                .input
-                .as_ref()
+                .input_entity_for_test()
                 .expect("input mounted")
                 .entity_id()
         });
@@ -332,8 +355,7 @@ mod tests {
         cx.read(|cx| {
             let second_input_id = bv
                 .read(cx)
-                .input
-                .as_ref()
+                .input_entity_for_test()
                 .expect("input still mounted")
                 .entity_id();
             assert_eq!(first_input_id, second_input_id, "no new input created");
@@ -358,10 +380,8 @@ mod tests {
             assert!(bv.read(cx).is_editing(), "click should enter edit mode");
             let input_focus = bv
                 .read(cx)
-                .input
-                .as_ref()
-                .expect("input mounted after click")
-                .focus_handle(cx);
+                .input_focus_handle_for_test(cx)
+                .expect("input mounted after click");
             assert!(
                 input_focus.is_focused(window),
                 "TextInput must hold focus after the click",
@@ -384,6 +404,10 @@ mod tests {
         });
     }
 
+    /// Editing → Viewing via blur. Focuses an unrelated handle so the
+    /// input's `on_blur` listener fires; complements `escape_exits_editing`
+    /// (which exercises the explicit Cancel action path) and the test
+    /// helper `test_end_editing`.
     /// Regression test: pressing Escape while a block is being edited exits
     /// edit mode. Previously the `on_blur` subscription was the only path
     /// out, and its dispatch lagged a draw cycle, so Escape on its own did

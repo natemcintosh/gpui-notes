@@ -39,12 +39,57 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("?", "Show this help"),
 ];
 
+/// The four mutually-exclusive top-level UI modes. Encoding them as a single
+/// enum keeps overlay invariants (only one open at a time) unrepresentable as
+/// invalid states, and gives transition tests a single field to assert on.
+///
+/// `TagResults` swaps out the page body; `PagePicker` and `ShortcutsHelp` are
+/// absolute-positioned overlays. The enum collapses both into the same axis
+/// so that opening any one always dismisses the others — see plan
+/// `/home/natemcintosh/.claude/plans/there-seem-to-be-abundant-peach.md`.
+pub enum OverlayMode {
+    None,
+    TagResults(SharedString),
+    PagePicker {
+        entity: Entity<PagePicker>,
+        _sub: Subscription,
+    },
+    ShortcutsHelp,
+}
+
+impl OverlayMode {
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    #[must_use]
+    pub fn tag_name(&self) -> Option<&SharedString> {
+        if let Self::TagResults(name) = self {
+            Some(name)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub fn picker(&self) -> Option<&Entity<PagePicker>> {
+        if let Self::PagePicker { entity, .. } = self {
+            Some(entity)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub fn is_shortcuts(&self) -> bool {
+        matches!(self, Self::ShortcutsHelp)
+    }
+}
+
 struct RootView {
     focus_handle: FocusHandle,
-    active_tag: Option<SharedString>,
-    picker: Option<Entity<PagePicker>>,
-    picker_sub: Option<Subscription>,
-    shortcuts_visible: bool,
+    overlay: OverlayMode,
     _current_observer: Subscription,
     _tag_observer: Subscription,
 }
@@ -55,13 +100,15 @@ impl RootView {
         let tag_observer = cx.observe_global::<TagIndex>(|_, cx| cx.notify());
         Self {
             focus_handle: cx.focus_handle(),
-            active_tag: None,
-            picker: None,
-            picker_sub: None,
-            shortcuts_visible: false,
+            overlay: OverlayMode::None,
             _current_observer: current_observer,
             _tag_observer: tag_observer,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn overlay(&self) -> &OverlayMode {
+        &self.overlay
     }
 
     /// Focuses the first block of the current page, or the root view if no
@@ -93,7 +140,7 @@ impl RootView {
             eprintln!("open today's journal failed: {err}");
             return;
         }
-        self.active_tag = None;
+        self.overlay = OverlayMode::None;
         self.focus_current(window, cx);
     }
 
@@ -116,33 +163,30 @@ impl RootView {
             eprintln!("open {next:?} failed: {err}");
             return;
         }
-        self.active_tag = None;
+        self.overlay = OverlayMode::None;
         self.focus_current(window, cx);
     }
 
     fn open_tag(&mut self, action: &OpenTag, window: &mut Window, cx: &mut Context<Self>) {
         Self::reindex_current_page(cx);
-        self.active_tag = Some(action.name.clone());
+        self.overlay = OverlayMode::TagResults(action.name.clone());
         // Park focus on RootView so Escape dispatches `CloseTagView` instead of
         // a stale TextInput::Cancel from the previously-edited block.
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
-    /// Escape handler. Dismisses the shortcuts overlay first if visible, then
-    /// falls back to closing the tag-results view. Picker dismissal goes
-    /// through `TextInputEvent::Cancelled` instead — its `TextInput` owns focus.
+    /// Escape handler. Closes whichever overlay is currently active and
+    /// returns to the underlying page. The page picker dismisses itself via
+    /// `TextInputEvent::Cancelled` (its `TextInput` owns focus), so we only
+    /// see `TagResults` / `ShortcutsHelp` here.
     fn close_tag_view(&mut self, _: &CloseTagView, window: &mut Window, cx: &mut Context<Self>) {
-        if self.shortcuts_visible {
-            self.shortcuts_visible = false;
-            window.focus(&self.focus_handle, cx);
-            cx.notify();
+        if matches!(self.overlay, OverlayMode::None) {
             return;
         }
-        if self.active_tag.take().is_some() {
-            self.focus_current(window, cx);
-            cx.notify();
-        }
+        self.overlay = OverlayMode::None;
+        self.focus_current(window, cx);
+        cx.notify();
     }
 
     fn toggle_shortcuts(
@@ -151,13 +195,14 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.shortcuts_visible = !self.shortcuts_visible;
-        if self.shortcuts_visible {
+        if matches!(self.overlay, OverlayMode::ShortcutsHelp) {
+            self.overlay = OverlayMode::None;
+            self.focus_current(window, cx);
+        } else {
+            self.overlay = OverlayMode::ShortcutsHelp;
             // Park focus on the root so Escape lands on `CloseTagView` (which
             // also dismisses the overlay) instead of a stale TextInput.
             window.focus(&self.focus_handle, cx);
-        } else {
-            self.focus_current(window, cx);
         }
         cx.notify();
     }
@@ -265,7 +310,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.picker.is_some() {
+        if matches!(self.overlay, OverlayMode::PagePicker { .. }) {
             return;
         }
         let entries = match Self::collect_picker_entries(cx) {
@@ -288,8 +333,10 @@ impl RootView {
                 }
             },
         );
-        self.picker = Some(picker);
-        self.picker_sub = Some(sub);
+        self.overlay = OverlayMode::PagePicker {
+            entity: picker,
+            _sub: sub,
+        };
         cx.notify();
     }
 
@@ -317,13 +364,11 @@ impl RootView {
         if let Err(err) = result {
             eprintln!("page picker: open failed: {err}");
         }
-        self.active_tag = None;
         self.close_picker(window, cx);
     }
 
     fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.picker = None;
-        self.picker_sub = None;
+        self.overlay = OverlayMode::None;
         self.focus_current(window, cx);
         cx.notify();
     }
@@ -346,7 +391,7 @@ impl RootView {
             eprintln!("open tag result failed: {err}");
             return;
         }
-        self.active_tag = None;
+        self.overlay = OverlayMode::None;
         self.focus_current(window, cx);
         cx.notify();
     }
@@ -426,7 +471,7 @@ impl Render for RootView {
             let p = page.read(cx);
             (p.name().clone(), p.dirty(), p.view().clone())
         };
-        let active_tag = self.active_tag.clone();
+        let active_tag = self.overlay.tag_name().cloned();
         let header_text = if let Some(tag) = active_tag.as_ref() {
             format!("#{}", tag.as_ref())
         } else if dirty {
@@ -443,12 +488,10 @@ impl Render for RootView {
             root.child(view)
         };
 
-        let overlay_child: Option<gpui::AnyElement> = if let Some(picker) = self.picker.clone() {
-            Some(picker.into_any_element())
-        } else if self.shortcuts_visible {
-            Some(Self::render_shortcuts_overlay())
-        } else {
-            None
+        let overlay_child: Option<gpui::AnyElement> = match &self.overlay {
+            OverlayMode::PagePicker { entity, .. } => Some(entity.clone().into_any_element()),
+            OverlayMode::ShortcutsHelp => Some(Self::render_shortcuts_overlay()),
+            OverlayMode::None | OverlayMode::TagResults(_) => None,
         };
 
         if let Some(child) = overlay_child {
@@ -530,6 +573,9 @@ mod tests {
             cx.bind_keys([
                 KeyBinding::new("escape", CloseTagView, Some("RootView")),
                 KeyBinding::new("ctrl-o", OpenPagePicker, Some("RootView")),
+                KeyBinding::new("ctrl-p", NextPage, Some("RootView")),
+                KeyBinding::new("ctrl-.", JumpToToday, Some("RootView")),
+                KeyBinding::new("ctrl-s", SavePage, Some("RootView")),
                 KeyBinding::new("shift-/", ToggleShortcuts, Some("RootView")),
             ]);
             let store = NotesStore::new(&root_dir).unwrap();
@@ -569,7 +615,7 @@ mod tests {
 
         cx.read(|cx| {
             assert_eq!(
-                root.read(cx).active_tag.as_ref().map(AsRef::as_ref),
+                root.read(cx).overlay().tag_name().map(AsRef::as_ref),
                 Some("todo"),
             );
         });
@@ -580,7 +626,7 @@ mod tests {
         cx.read(|cx| {
             let current = cx.global::<CurrentPage>().get().unwrap();
             assert_eq!(current.read(cx).name().as_ref(), "Tagged");
-            assert!(root.read(cx).active_tag.is_none());
+            assert!(root.read(cx).overlay().is_none());
         });
     }
 
@@ -604,14 +650,14 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        assert!(cx.read(|cx| root.read(cx).active_tag.is_some()));
+        assert!(cx.read(|cx| root.read(cx).overlay().tag_name().is_some()));
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
 
         cx.read(|cx| {
             assert!(
-                root.read(cx).active_tag.is_none(),
+                root.read(cx).overlay().is_none(),
                 "escape should close the tag-results view",
             );
             let current = cx.global::<CurrentPage>().get().unwrap();
@@ -628,11 +674,11 @@ mod tests {
 
         cx.simulate_keystrokes("shift-/");
         cx.run_until_parked();
-        assert!(cx.read(|cx| root.read(cx).shortcuts_visible));
+        assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
-        assert!(!cx.read(|cx| root.read(cx).shortcuts_visible));
+        assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
     }
 
     /// Opening the picker, typing a filter, and pressing Enter switches to the
@@ -647,7 +693,7 @@ mod tests {
 
         cx.read(|cx| {
             assert!(
-                root.read(cx).picker.is_some(),
+                root.read(cx).overlay().picker().is_some(),
                 "picker mounted after ctrl-o",
             );
         });
@@ -660,7 +706,258 @@ mod tests {
         cx.read(|cx| {
             let current = cx.global::<CurrentPage>().get().unwrap();
             assert_eq!(current.read(cx).name().as_ref(), "Tagged");
-            assert!(root.read(cx).picker.is_none(), "picker dismissed on select");
+            assert!(
+                root.read(cx).overlay().is_none(),
+                "picker dismissed on select",
+            );
+        });
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // OverlayMode state-transition tests. One test per discrete transition
+    // listed in the plan; see /home/natemcintosh/.claude/plans/there-
+    // seem-to-be-abundant-peach.md. The shape is always: set the
+    // precondition, fire a simulated input, assert the resulting variant.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// `None` → `PagePicker` via Ctrl-O.
+    #[gpui::test]
+    fn transition_none_to_picker(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+        assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+
+        cx.simulate_keystrokes("ctrl-o");
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| root.read(cx).overlay().picker().is_some()));
+    }
+
+    /// `PagePicker` → `None` via Escape (routed through the input's Cancel action).
+    #[gpui::test]
+    fn transition_picker_to_none_via_escape(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("ctrl-o");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().picker().is_some()));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+    }
+
+    /// `None` → `ShortcutsHelp` via `?`.
+    #[gpui::test]
+    fn transition_none_to_shortcuts(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("shift-/");
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
+    }
+
+    /// `ShortcutsHelp` → `None` via `?` (toggle). Separate from the Escape
+    /// path in `shortcuts_overlay_toggles` — the help cheatsheet calls out
+    /// `?` as the toggle, so the toggle path needs its own regression.
+    #[gpui::test]
+    fn transition_shortcuts_to_none_via_question(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("shift-/");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
+
+        cx.simulate_keystrokes("shift-/");
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+    }
+
+    /// `None` → `TagResults` via programmatic `open_tag` dispatch. The
+    /// click-through-tag-chip path is covered by `tags::tests::
+    /// clicking_rendered_tag_dispatches_open_tag`, which feeds `OpenTag`
+    /// here.
+    #[gpui::test]
+    fn transition_none_to_tag_results(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.open_tag(
+                    &OpenTag {
+                        name: "todo".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read(|cx| root.read(cx).overlay().tag_name().map(ToString::to_string)),
+            Some("todo".to_string()),
+        );
+    }
+
+    /// Ctrl-P advances the current page and clears any overlay. Starts from
+    /// `TagResults` to also exercise the "any → `None`" branch.
+    #[gpui::test]
+    fn transition_ctrl_p_clears_tag_overlay_and_advances_page(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.open_tag(
+                    &OpenTag {
+                        name: "todo".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().tag_name().is_some()));
+
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(root.read(cx).overlay().is_none(), "tag view cleared");
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            // mount_root started on Home; ctrl-p cycles to the next entry.
+            assert_ne!(current.read(cx).name().as_ref(), "Home");
+        });
+    }
+
+    /// Ctrl-. opens today's journal and clears any overlay.
+    #[gpui::test]
+    fn transition_ctrl_dot_jumps_to_today(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("shift-/");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
+
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(root.read(cx).overlay().is_none(), "shortcuts cleared");
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            // The journal name is the ISO date, not "Home".
+            assert_ne!(current.read(cx).name().as_ref(), "Home");
+        });
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Cross-cutting invariants. The state-transition tests above each
+    // verify a single edge in isolation; these glue several edges together
+    // to assert properties that span the whole RootView state machine.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Ctrl-P must auto-save the outgoing page if it is dirty. The unit
+    /// test `registry::tests::set_current_page_autosaves_outgoing` covers
+    /// the registry primitive; this end-to-end variant drives the
+    /// keystroke through the dispatch tree and reads the file back from
+    /// disk to confirm the full save path runs.
+    #[gpui::test]
+    fn invariant_ctrl_p_autosaves_outgoing_dirty_page(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_path = tmp.path().to_path_buf();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|_, cx| {
+            let page = cx.global::<CurrentPage>().get().unwrap().clone();
+            let first = page.read(cx).outline().first_block_id().unwrap();
+            page.update(cx, |p, cx| p.set_block_text(first, "ctrlp-edit", cx));
+            assert_eq!(page.read(cx).name().as_ref(), "Home");
+            assert!(page.read(cx).dirty(), "precondition: outgoing dirty");
+        });
+
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+
+        let on_disk = std::fs::read_to_string(root_path.join("pages").join("Home.md"))
+            .expect("Home.md written");
+        assert!(
+            on_disk.contains("ctrlp-edit"),
+            "page A should have been flushed; on disk: {on_disk:?}",
+        );
+    }
+
+    /// Page switch clears any active overlay. Verifies the broader
+    /// invariant by stacking it: tag view open → picker open → select
+    /// → overlay is None. The intermediate tag view exit and picker
+    /// dismissal both have to happen for the assertion to hold.
+    #[gpui::test]
+    fn invariant_picker_selection_clears_all_overlays(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.open_tag(
+                    &OpenTag {
+                        name: "todo".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().tag_name().is_some()));
+
+        // Opening the picker over the tag view replaces it — the new
+        // mutually-exclusive enum guarantees only one overlay at once.
+        cx.simulate_keystrokes("ctrl-o");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().picker().is_some()));
+
+        cx.simulate_input("Home");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                root.read(cx).overlay().is_none(),
+                "picker selection should leave no overlay active",
+            );
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            assert_eq!(current.read(cx).name().as_ref(), "Home");
+        });
+    }
+
+    /// Ctrl-S persists a dirty page and clears the dirty flag.
+    #[gpui::test]
+    fn transition_ctrl_s_saves_dirty_page(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|_, cx| {
+            let page = cx.global::<CurrentPage>().get().unwrap().clone();
+            let first = page.read(cx).outline().first_block_id().unwrap();
+            page.update(cx, |p, cx| p.set_block_text(first, "after-edit", cx));
+            assert!(page.read(cx).dirty());
+        });
+
+        cx.simulate_keystrokes("ctrl-s");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let page = cx.global::<CurrentPage>().get().unwrap();
+            assert!(!page.read(cx).dirty(), "ctrl-s clears the dirty flag");
         });
     }
 }
