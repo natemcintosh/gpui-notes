@@ -5,6 +5,7 @@ use gpui::{
     FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
     SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions,
 };
+use gpui_notes::cmd_key;
 use gpui_notes::journal;
 use gpui_notes::page::Page;
 use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
@@ -27,17 +28,21 @@ actions!(
     ]
 );
 
-/// Static cheatsheet shown in the shortcuts overlay. The strings here are the
-/// only place the bindings are documented to the user — keep in sync with the
-/// `cx.bind_keys(...)` block in `main`.
-const SHORTCUTS: &[(&str, &str)] = &[
-    ("ctrl-o", "Open page…"),
-    ("ctrl-p", "Cycle to next page"),
-    ("ctrl-.", "Jump to today's journal"),
-    ("ctrl-s", "Save current page"),
-    ("escape", "Close overlay / tag view"),
-    ("?", "Show this help"),
-];
+/// Cheatsheet shown in the shortcuts overlay. The strings here are the only
+/// place the bindings are documented to the user — keep in sync with the
+/// `cx.bind_keys(...)` block in `main`. Labels derive from the same platform
+/// modifier as the bindings, so macOS shows `cmd-*`.
+fn shortcuts() -> [(String, &'static str); 6] {
+    let cmd = cmd_key();
+    [
+        (format!("{cmd}-o"), "Open page…"),
+        (format!("{cmd}-p"), "Cycle to next page"),
+        (format!("{cmd}-."), "Jump to today's journal"),
+        (format!("{cmd}-s"), "Save current page"),
+        ("escape".to_string(), "Close overlay / tag view"),
+        (format!("{cmd}-/"), "Show this help"),
+    ]
+}
 
 /// The four mutually-exclusive top-level UI modes. Encoding them as a single
 /// enum keeps overlay invariants (only one open at a time) unrepresentable as
@@ -259,7 +264,7 @@ impl RootView {
 
     fn render_shortcuts_overlay() -> gpui::AnyElement {
         let mut list = div().flex().flex_col().gap_1();
-        for (keys, label) in SHORTCUTS {
+        for (keys, label) in shortcuts() {
             list = list.child(
                 div()
                     .flex()
@@ -274,12 +279,12 @@ impl RootView {
                             .rounded_sm()
                             .bg(rgb(0x2a2a2a))
                             .text_color(rgb(0xffffff))
-                            .child(SharedString::from(*keys)),
+                            .child(SharedString::from(keys)),
                     )
                     .child(
                         div()
                             .text_color(rgb(0xcccccc))
-                            .child(SharedString::from(*label)),
+                            .child(SharedString::from(label)),
                     ),
             );
         }
@@ -517,18 +522,18 @@ fn main() {
     application().run(|cx: &mut App| {
         text_input::bind_keys(cx);
         page_picker::bind_keys(cx);
-        let cmd = if cfg!(target_os = "macos") {
-            "cmd"
-        } else {
-            "ctrl"
-        };
+        let cmd = cmd_key();
         cx.bind_keys([
             KeyBinding::new(&format!("{cmd}-s"), SavePage, Some("RootView")),
             KeyBinding::new(&format!("{cmd}-p"), NextPage, Some("RootView")),
             KeyBinding::new(&format!("{cmd}-."), JumpToToday, Some("RootView")),
             KeyBinding::new(&format!("{cmd}-o"), OpenPagePicker, Some("RootView")),
             KeyBinding::new("escape", CloseTagView, Some("RootView")),
-            KeyBinding::new("shift-/", ToggleShortcuts, Some("RootView")),
+            // A bare `?` here would shadow typing `?` in every text input
+            // (#45) — gpui matches bindings along the whole focus path
+            // before falling through to input, so the trigger must be a
+            // modifier chord.
+            KeyBinding::new(&format!("{cmd}-/"), ToggleShortcuts, Some("RootView")),
         ]);
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
@@ -576,7 +581,7 @@ mod tests {
                 KeyBinding::new("ctrl-p", NextPage, Some("RootView")),
                 KeyBinding::new("ctrl-.", JumpToToday, Some("RootView")),
                 KeyBinding::new("ctrl-s", SavePage, Some("RootView")),
-                KeyBinding::new("shift-/", ToggleShortcuts, Some("RootView")),
+                KeyBinding::new("ctrl-/", ToggleShortcuts, Some("RootView")),
             ]);
             let store = NotesStore::new(&root_dir).unwrap();
             store.write("Home", "- home\n").unwrap();
@@ -665,20 +670,58 @@ mod tests {
         });
     }
 
-    /// `?` toggles the shortcuts overlay; Escape dismisses it without
+    /// `ctrl-/` toggles the shortcuts overlay; Escape dismisses it without
     /// affecting the active tag view.
     #[gpui::test]
     fn shortcuts_overlay_toggles(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let (root, cx) = mount_root(cx, &tmp);
 
-        cx.simulate_keystrokes("shift-/");
+        cx.simulate_keystrokes("ctrl-/");
         cx.run_until_parked();
         assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+    }
+
+    /// Regression test for #45: a bare `?` (shift-/) while a block is being
+    /// edited must reach the text input as a typed character. The old
+    /// `shift-/` → `ToggleShortcuts` binding on `RootView` shadowed it —
+    /// gpui matches bindings along the whole focus path before falling
+    /// through to input, and `RootView` is an ancestor of every input.
+    #[gpui::test]
+    fn question_mark_types_into_editing_block(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        // mount_root leaves the first block of Home focused in edit mode.
+        cx.simulate_keystrokes("shift-/");
+        cx.run_until_parked();
+
+        assert!(
+            cx.read(|cx| root.read(cx).overlay().is_none()),
+            "typing `?` must not open the shortcuts overlay",
+        );
+
+        // Escape ends the edit, flushing the input back into the outline.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let page = cx.global::<CurrentPage>().get().unwrap();
+            let first = page.read(cx).outline().first_block_id().unwrap();
+            let text = page.read(cx).outline().get(first).unwrap();
+            // The headless keymap delivers the raw key (`/`) rather than the
+            // shift-mapped `?` a real platform produces; what this asserts is
+            // that the keystroke fell through to the input at all instead of
+            // being swallowed by a binding.
+            assert!(
+                text.contains('/'),
+                "shift-/ should have been typed into the block; got {text:?}",
+            );
+        });
     }
 
     /// Opening the picker, typing a filter, and pressing Enter switches to the
@@ -749,31 +792,32 @@ mod tests {
         assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
     }
 
-    /// `None` → `ShortcutsHelp` via `?`.
+    /// `None` → `ShortcutsHelp` via `ctrl-/`.
     #[gpui::test]
     fn transition_none_to_shortcuts(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let (root, cx) = mount_root(cx, &tmp);
 
-        cx.simulate_keystrokes("shift-/");
+        cx.simulate_keystrokes("ctrl-/");
         cx.run_until_parked();
 
         assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
     }
 
-    /// `ShortcutsHelp` → `None` via `?` (toggle). Separate from the Escape
-    /// path in `shortcuts_overlay_toggles` — the help cheatsheet calls out
-    /// `?` as the toggle, so the toggle path needs its own regression.
+    /// `ShortcutsHelp` → `None` via `ctrl-/` (toggle). Separate from the
+    /// Escape path in `shortcuts_overlay_toggles` — the help cheatsheet calls
+    /// out `ctrl-/` as the toggle, so the toggle path needs its own
+    /// regression.
     #[gpui::test]
-    fn transition_shortcuts_to_none_via_question(cx: &mut TestAppContext) {
+    fn transition_shortcuts_to_none_via_toggle_key(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let (root, cx) = mount_root(cx, &tmp);
 
-        cx.simulate_keystrokes("shift-/");
+        cx.simulate_keystrokes("ctrl-/");
         cx.run_until_parked();
         assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
 
-        cx.simulate_keystrokes("shift-/");
+        cx.simulate_keystrokes("ctrl-/");
         cx.run_until_parked();
 
         assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
@@ -845,7 +889,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (root, cx) = mount_root(cx, &tmp);
 
-        cx.simulate_keystrokes("shift-/");
+        cx.simulate_keystrokes("ctrl-/");
         cx.run_until_parked();
         assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
 
