@@ -647,12 +647,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn ctrl_enter_toggles_collapse_without_dirtying(cx: &mut TestAppContext) {
+    fn primary_modifier_enter_toggles_collapse_without_dirtying(cx: &mut TestAppContext) {
         let (page, ov, cx) = mount(cx, "- a\n  - b\n");
         let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        let shortcut = format!("{}-enter", crate::cmd_key());
 
         focus_block(cx, &ov, a);
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes(&shortcut);
         cx.run_until_parked();
 
         cx.read(|cx| {
@@ -669,7 +670,7 @@ mod tests {
             );
         });
 
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes(&shortcut);
         cx.run_until_parked();
         cx.read(|cx| {
             assert!(!page.read(cx).outline().roots[0].collapsed, "re-expanded");
