@@ -252,7 +252,7 @@ impl Render for BlockView {
         let ring = if focused {
             theme::accent()
         } else {
-            gpui::rgba(0x0000_0000)
+            theme::transparent()
         };
 
         // Drive the edit transition directly from the click. `begin_editing`

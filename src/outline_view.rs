@@ -78,14 +78,38 @@ impl OutlineView {
     }
 
     /// Focus the first root block in the outline, creating its `BlockView` if
-    /// needed. No-op for an empty outline.
+    /// needed. An empty outline falls back to this view's own focus handle so
+    /// the enclosing `RootView` remains in the key dispatch path.
     pub fn focus_first_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(first_id) = self.page.read(cx).outline().first_block_id() else {
+            window.focus(&self.focus_handle, cx);
             return;
         };
         let bv = self.get_or_create(first_id, window, cx);
         let handle = bv.focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    /// Describes the active page-body focus target for the optional root debug
+    /// HUD. `contains_focused` follows the real GPUI focus path, so an active
+    /// text input is correctly reported as belonging to its block.
+    #[must_use]
+    pub fn debug_focus_status(&self, window: &Window, cx: &App) -> (&'static str, &'static str) {
+        for block in self.blocks.values() {
+            let block = block.read(cx);
+            if block.focus_handle(cx).contains_focused(window, cx) {
+                return if block.is_editing() {
+                    ("block input", "editing")
+                } else {
+                    ("block", "viewing")
+                };
+            }
+        }
+        if self.focus_handle.is_focused(window) {
+            ("outline", "no block")
+        } else {
+            ("none", "no block")
+        }
     }
 
     fn get_or_create(

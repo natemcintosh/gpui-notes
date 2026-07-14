@@ -17,31 +17,9 @@ use gpui::{
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-pub mod theme {
-    use gpui::rgb;
-    use gpui::Rgba;
-
-    #[must_use]
-    pub fn fg() -> Rgba {
-        rgb(0xe6e6e6)
-    }
-    #[must_use]
-    pub fn fg_muted() -> Rgba {
-        rgb(0x9a9a9a)
-    }
-    #[must_use]
-    pub fn bg_subtle() -> Rgba {
-        rgb(0x2a2a2a)
-    }
-    #[must_use]
-    pub fn accent() -> Rgba {
-        rgb(0x66b2ff)
-    }
-    #[must_use]
-    pub fn code_bg() -> Rgba {
-        rgb(0x1e1e1e)
-    }
-}
+/// Compatibility re-export for existing block-render callers. New code should
+/// import [`crate::theme`] directly.
+pub use crate::theme;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Style {

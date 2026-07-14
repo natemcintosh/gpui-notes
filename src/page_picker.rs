@@ -6,12 +6,13 @@
 
 use chrono::NaiveDate;
 use gpui::{
-    actions, div, prelude::*, px, rgb, App, AppContext, Context, ElementId, Entity, EventEmitter,
+    actions, div, prelude::*, px, App, AppContext, Context, ElementId, Entity, EventEmitter,
     FocusHandle, Focusable, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
     Subscription, Window,
 };
 
 use crate::text_input::{TextInput, TextInputEvent};
+use crate::theme;
 
 actions!(page_picker, [SelectUp, SelectDown]);
 
@@ -79,10 +80,8 @@ pub struct PagePicker {
 }
 
 impl PagePicker {
-    pub fn new(entries: Vec<PageEntry>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(entries: Vec<PageEntry>, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextInput::new(cx, "Type to filter…"));
-        let input_focus = input.focus_handle(cx);
-        window.focus(&input_focus, cx);
 
         let sub = cx.subscribe(&input, |this, _input, event, cx| match event {
             TextInputEvent::Changed(query) => {
@@ -108,6 +107,13 @@ impl PagePicker {
             focus_handle: cx.focus_handle(),
             _input_sub: sub,
         }
+    }
+
+    /// Give the filter input focus. The parent `RootView` owns when this is
+    /// called so overlay transitions have a single focus-parking policy.
+    pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
+        let input_focus = self.input.focus_handle(cx);
+        window.focus(&input_focus, cx);
     }
 
     fn recompute_filter(&mut self, query: &str) {
@@ -215,7 +221,7 @@ impl Render for PagePicker {
                 div()
                     .px_2()
                     .py_1()
-                    .text_color(rgb(0x888888))
+                    .text_color(theme::control_fg())
                     .child("No matches."),
             );
         } else {
@@ -227,9 +233,9 @@ impl Render for PagePicker {
                 let is_selected = row == self.selected;
                 let entry_for_click = entry.clone();
                 let (bg_color, fg_color) = if is_selected {
-                    (rgb(0x3a3a3a), rgb(0xffffff))
+                    (theme::row_selected(), theme::row_selected_fg())
                 } else {
-                    (rgb(0x222222), rgb(0xcccccc))
+                    (theme::row_bg(), theme::header_fg())
                 };
                 list = list.child(
                     div()
@@ -258,9 +264,9 @@ impl Render for PagePicker {
             .flex()
             .flex_col()
             .gap_2()
-            .bg(rgb(0x141414))
+            .bg(theme::overlay_bg())
             .border_1()
-            .border_color(rgb(0x3a3a3a))
+            .border_color(theme::overlay_border())
             .rounded_md()
             .p_3()
             .min_w(px(360.0))
@@ -288,10 +294,10 @@ mod tests {
 
     #[gpui::test]
     fn substring_filter_narrows_list(cx: &mut TestAppContext) {
-        let (picker, vcx) = cx.add_window_view(|window, cx| {
+        let (picker, vcx) = cx.add_window_view(|_window, cx| {
             text_input::bind_keys(cx);
             bind_keys(cx);
-            PagePicker::new(entries(), window, cx)
+            PagePicker::new(entries(), cx)
         });
         vcx.run_until_parked();
 
@@ -313,12 +319,16 @@ mod tests {
 
     #[gpui::test]
     fn enter_emits_selected(cx: &mut TestAppContext) {
-        let (picker, vcx) = cx.add_window_view(|window, cx| {
+        let (picker, vcx) = cx.add_window_view(|_window, cx| {
             text_input::bind_keys(cx);
             bind_keys(cx);
-            PagePicker::new(entries(), window, cx)
+            PagePicker::new(entries(), cx)
         });
-        vcx.update(|window, _| window.activate_window());
+        vcx.update(|window, cx| {
+            window.activate_window();
+            let input_focus = picker.read(cx).input().focus_handle(cx);
+            window.focus(&input_focus, cx);
+        });
         vcx.run_until_parked();
 
         let recorder = vcx.update(|_, cx| {
@@ -357,12 +367,16 @@ mod tests {
 
     #[gpui::test]
     fn down_arrow_moves_selection(cx: &mut TestAppContext) {
-        let (picker, vcx) = cx.add_window_view(|window, cx| {
+        let (picker, vcx) = cx.add_window_view(|_window, cx| {
             text_input::bind_keys(cx);
             bind_keys(cx);
-            PagePicker::new(entries(), window, cx)
+            PagePicker::new(entries(), cx)
         });
-        vcx.update(|window, _| window.activate_window());
+        vcx.update(|window, cx| {
+            window.activate_window();
+            let input_focus = picker.read(cx).input().focus_handle(cx);
+            window.focus(&input_focus, cx);
+        });
         vcx.run_until_parked();
 
         vcx.simulate_keystrokes("down");
@@ -390,12 +404,16 @@ mod tests {
     // ────────────────────────────────────────────────────────────────────
 
     fn mount_picker(cx: &mut TestAppContext) -> (Entity<PagePicker>, &mut gpui::VisualTestContext) {
-        let (picker, vcx) = cx.add_window_view(|window, cx| {
+        let (picker, vcx) = cx.add_window_view(|_window, cx| {
             text_input::bind_keys(cx);
             bind_keys(cx);
-            PagePicker::new(entries(), window, cx)
+            PagePicker::new(entries(), cx)
         });
-        vcx.update(|window, _| window.activate_window());
+        vcx.update(|window, cx| {
+            window.activate_window();
+            let input_focus = picker.read(cx).input().focus_handle(cx);
+            window.focus(&input_focus, cx);
+        });
         vcx.run_until_parked();
         (picker, vcx)
     }
