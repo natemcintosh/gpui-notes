@@ -67,6 +67,12 @@ impl Page {
     }
 
     pub fn set_block_text(&mut self, id: BlockId, text: impl Into<String>, cx: &mut Context<Self>) {
+        let text = text.into();
+        // Flushing identical text (e.g. a focus/blur cycle with no typing)
+        // must not dirty the page or rewrite the file (#39).
+        if self.outline.get(id) == Some(text.as_str()) {
+            return;
+        }
         if !self.outline.set_text(id, text) {
             return;
         }
@@ -156,6 +162,26 @@ mod tests {
             assert_eq!(p.outline().get(first_id), Some("hello"));
             assert_eq!(p.body().as_ref(), "- hello\n");
             assert!(p.dirty());
+        });
+    }
+
+    /// Regression test for #39: flushing text identical to the block's
+    /// current text (e.g. a focus/blur cycle with no typing) must not mark
+    /// the page dirty.
+    #[gpui::test]
+    fn set_block_text_with_unchanged_text_stays_clean(cx: &mut TestAppContext) {
+        let page = cx.new(|cx| Page::new("foo".into(), "- hi\n", cx));
+        let first_id = cx.read(|cx| page.read(cx).outline().roots[0].id);
+
+        cx.update(|cx| {
+            page.update(cx, |p, cx| p.set_block_text(first_id, "hi", cx));
+        });
+
+        cx.read(|cx| {
+            assert!(
+                !page.read(cx).dirty(),
+                "identical text must not dirty the page",
+            );
         });
     }
 
