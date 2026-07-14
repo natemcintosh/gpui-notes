@@ -19,9 +19,8 @@ use crate::page::Page;
 
 pub struct OutlineView {
     page: Entity<Page>,
-    /// Receives focus when a block exits editing via blur/Escape, so the
-    /// `RootView` key context stays in the focus chain for window-level
-    /// bindings like ctrl-s.
+    /// Fallback focus target (e.g. an empty outline); a block exiting edit
+    /// mode parks focus on the block itself (#42), not here.
     focus_handle: FocusHandle,
     blocks: HashMap<BlockId, Entity<BlockView>>,
     /// One subscription per cached `BlockView` listening for
@@ -69,11 +68,10 @@ impl OutlineView {
             BlockViewEvent::FocusRequested(target) => {
                 let target = *target;
                 let target_bv = this.get_or_create(target, window, cx);
-                let handle = target_bv.focus_handle(cx);
-                window.focus(&handle, cx);
-            }
-            BlockViewEvent::EditingEnded => {
-                window.focus(&this.focus_handle, cx);
+                // Focus no longer implies editing (#42), so the new sibling
+                // must be put into editing explicitly — the user pressed
+                // Enter to keep typing. `begin_editing` focuses the input.
+                target_bv.update(cx, |bv, cx| bv.begin_editing(window, cx));
             }
         });
         self.blocks.insert(id, bv.clone());
@@ -168,6 +166,7 @@ mod tests {
         let body = body.to_string();
         let (ov, vcx) = cx.add_window_view(move |_window, cx| {
             text_input::bind_keys(cx);
+            crate::block_view::bind_keys(cx);
             let page = cx.new(|cx| Page::new("foo".into(), &body, cx));
             cx.set_global(TestPage(page));
             OutlineView::new(cx.global::<TestPage>().0.clone(), cx)
@@ -194,7 +193,9 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("enter");
+        // First enter begins editing the focused block (#42); the second,
+        // now dispatched to the TextInput, submits and creates the sibling.
+        cx.simulate_keystrokes("enter enter");
         cx.run_until_parked();
 
         // Outline now has 3 roots in order: a, <new>, b.
@@ -246,7 +247,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("enter");
+        cx.simulate_keystrokes("enter enter");
         cx.run_until_parked();
 
         // Write into the new block's TextInput directly, then drive the blur
@@ -284,7 +285,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("enter");
+        cx.simulate_keystrokes("enter enter");
         cx.run_until_parked();
 
         cx.read(|cx| {
@@ -320,6 +321,9 @@ mod tests {
             window.focus(&bv.focus_handle(cx), cx);
         });
         cx.run_until_parked();
+        // Focus no longer implies editing (#42) — enter starts the edit.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
         cx.update(|window, cx| {
             // Force a draw so the input's focus_id is captured in the
             // rendered_frame focus path. Without this, the next focus
@@ -350,6 +354,36 @@ mod tests {
             assert!(
                 matches!(bv.read(cx).mode(), BlockMode::Viewing),
                 "blurring the first block should exit its edit mode",
+            );
+        });
+    }
+
+    /// The page-switch mechanism for #42: `RootView::focus_current` lands on
+    /// `focus_first_block`, which must leave the block focused-but-viewing —
+    /// no `TextInput` mounts and the page cannot be touched by the switch.
+    #[gpui::test]
+    fn focus_first_block_does_not_mount_editor(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n");
+
+        cx.update(|window, cx| {
+            ov.update(cx, |o, cx| o.focus_first_block(window, cx));
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            let first_id = page.read(cx).outline().roots[0].id;
+            let bv = ov
+                .read(cx)
+                .block_view(first_id)
+                .expect("first block view cached")
+                .clone();
+            assert!(
+                !bv.read(cx).is_editing(),
+                "focus_first_block must not mount an editor (#42)",
+            );
+            assert!(
+                bv.read(cx).focus_handle(cx).is_focused(window),
+                "first block holds focus in viewing mode",
             );
         });
     }
