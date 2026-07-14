@@ -9,7 +9,9 @@ use gpui_notes::cmd_key;
 use gpui_notes::journal;
 use gpui_notes::page::Page;
 use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
-use gpui_notes::registry::{pick_next, set_current_page, CurrentPage, PageRegistry};
+use gpui_notes::registry::{
+    pick_next, save_all_on_quit, set_current_page, CurrentPage, PageRegistry,
+};
 use gpui_notes::store::NotesStore;
 use gpui_notes::tags::{self, OpenTag, TagIndex, TagSource};
 use gpui_notes::text_input;
@@ -542,6 +544,7 @@ fn main() {
         cx.set_global(tag_index);
         cx.set_global(PageRegistry::new(store));
         cx.set_global(CurrentPage::default());
+        save_all_on_quit(cx);
         journal::open_today(cx).expect("open today's journal");
 
         let bounds = Bounds::centered(None, size(px(640.0), px(420.0)), cx);
@@ -589,6 +592,7 @@ mod tests {
             cx.set_global(TagIndex::rebuild_from(&store).unwrap());
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
+            save_all_on_quit(cx);
             set_current_page("Home", cx).unwrap();
             RootView::new(cx)
         });
@@ -1034,6 +1038,45 @@ mod tests {
                 "outgoing page must be persisted, not left dirty",
             );
         });
+    }
+
+    /// Regression test for #43: quitting must flush every dirty open page.
+    /// `App::shutdown` is exactly what the platform's quit callback invokes;
+    /// the test platform's `quit()` is a no-op, so the test calls it
+    /// directly. Covers both a mid-edit page (Home, flushed per keystroke
+    /// since #38) and a page dirtied off-screen (Tagged).
+    #[gpui::test]
+    fn invariant_quit_saves_all_dirty_pages(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_path = tmp.path().to_path_buf();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        // mount_root leaves the first block of Home focused in edit mode.
+        cx.simulate_input("-typed");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let tagged = cx
+                .update_global::<PageRegistry, _>(|reg, cx| reg.open("Tagged", cx))
+                .unwrap();
+            let first = tagged.read(cx).outline().first_block_id().unwrap();
+            tagged.update(cx, |p, cx| p.set_block_text(first, "tagged-edit", cx));
+            assert!(tagged.read(cx).dirty(), "precondition: Tagged dirty");
+        });
+
+        // Shutdown must run outside a window update — it tears the windows
+        // down — so go through the underlying TestAppContext.
+        cx.cx.update(App::shutdown);
+
+        let home = std::fs::read_to_string(root_path.join("pages/Home.md")).unwrap();
+        let tagged = std::fs::read_to_string(root_path.join("pages/Tagged.md")).unwrap();
+        assert!(
+            home.contains("home-typed"),
+            "quit must save the mid-edit page; on disk: {home:?}",
+        );
+        assert!(
+            tagged.contains("tagged-edit"),
+            "quit must save every dirty page, not just the current one; on disk: {tagged:?}",
+        );
     }
 
     /// Page switch clears any active overlay. Verifies the broader
