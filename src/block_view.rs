@@ -1,5 +1,10 @@
-//! Per-block view that swaps between rendered markdown and a raw-text editor
-//! based on focus. See issue #6.
+//! Per-block view that swaps between rendered markdown and a raw-text editor.
+//! See issues #6 and #42.
+//!
+//! Focus and edit mode are decoupled (#42): a focused block merely shows a
+//! focus ring and stays in `Viewing`. Editing starts only on an explicit
+//! trigger — a click on the block body or `enter` on the focused block — and
+//! Escape returns to focused-`Viewing`, parking focus on the block itself.
 //!
 //! Only one block can be in `Editing` at a time — GPUI's focus system enforces
 //! this naturally (a single focused leaf). The outline stored on `Page` is the
@@ -8,9 +13,9 @@
 //! state to drift out of sync and every save path sees in-flight edits (#38).
 
 use gpui::{
-    div, prelude::*, px, AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, IntoElement, MouseButton, ParentElement, Render, SharedString, Styled, Subscription,
-    Window,
+    actions, div, prelude::*, px, AnyElement, App, AppContext, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
+    SharedString, Styled, Subscription, Window,
 };
 
 use crate::block_render::{render_block, theme};
@@ -19,17 +24,22 @@ use crate::page::Page;
 use crate::tags::TagExt;
 use crate::text_input::{TextInput, TextInputEvent};
 
+actions!(block_view, [BeginEditing]);
+
+/// Registers the block-level key bindings. The `BlockView` key context only
+/// receives keystrokes while a block wrapper (not its `TextInput`) holds
+/// focus, so `enter` here cannot shadow the input's own enter-to-submit.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("enter", BeginEditing, Some("BlockView"))]);
+}
+
 /// Events emitted by `BlockView` to its parent (typically `OutlineView`).
 #[derive(Debug, Clone)]
 pub enum BlockViewEvent {
     /// The user finished a block with Enter and a new sibling was inserted
-    /// after `self.block_id`. The parent should mount/focus the view for the
-    /// newly created block.
+    /// after `self.block_id`. The parent should mount the view for the newly
+    /// created block and put it into editing.
     FocusRequested(BlockId),
-    /// Editing ended via blur/Escape (not via Enter, which uses
-    /// `FocusRequested`). The parent should park focus on a non-block
-    /// element so window-level key bindings (e.g. ctrl-s) keep dispatching.
-    EditingEnded,
 }
 
 impl EventEmitter<BlockViewEvent> for BlockView {}
@@ -56,6 +66,8 @@ pub struct BlockView {
     focus_handle: FocusHandle,
     mode: BlockMode,
     _on_focus: Subscription,
+    /// Re-render on wrapper blur so the focus ring clears (#42).
+    _on_self_blur: Subscription,
     _page_sub: Subscription,
 }
 
@@ -67,9 +79,10 @@ impl BlockView {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        let on_focus = cx.on_focus(&focus_handle, window, |this, window, cx| {
-            this.begin_editing(window, cx);
-        });
+        // Focus only draws the ring (#42) — editing is an explicit
+        // transition via click or `enter`, never a focus side effect.
+        let on_focus = cx.on_focus(&focus_handle, window, |_, _, cx| cx.notify());
+        let on_self_blur = cx.on_blur(&focus_handle, window, |_, _, cx| cx.notify());
         // Re-render when the page outline changes (e.g., another block was
         // edited) so our rendered markdown stays current.
         let page_sub = cx.observe(&page, |_, _, cx| cx.notify());
@@ -80,6 +93,7 @@ impl BlockView {
             focus_handle,
             mode: BlockMode::Viewing,
             _on_focus: on_focus,
+            _on_self_blur: on_self_blur,
             _page_sub: page_sub,
         }
     }
@@ -99,7 +113,7 @@ impl BlockView {
         matches!(self.mode, BlockMode::Editing { .. })
     }
 
-    fn begin_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn begin_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.mode, BlockMode::Editing { .. }) {
             return;
         }
@@ -115,23 +129,29 @@ impl BlockView {
         let on_blur = cx.on_blur(&input_focus, window, |this, window, cx| {
             this.end_editing(window, cx);
         });
-        let on_event = cx.subscribe(&input, |this, _input, event, cx| match event {
-            TextInputEvent::Cancelled => {
-                this.end_editing_inner(cx);
-                cx.emit(BlockViewEvent::EditingEnded);
-            }
-            TextInputEvent::Submitted => {
-                this.insert_sibling_below(cx);
-            }
-            // Flush every keystroke to the page so all save paths (ctrl-s,
-            // page-switch autosave, quit-save) see the in-flight text (#38).
-            // `set_block_text` is a no-op on identical text, so this cannot
-            // spuriously dirty the page (#39).
-            TextInputEvent::Changed(text) => {
-                let block_id = this.block_id;
-                let text = text.to_string();
-                this.page
-                    .update(cx, |p, cx| p.set_block_text(block_id, text, cx));
+        let on_event = cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
+            match event {
+                // Escape returns to focused-Viewing on this block (#42), so
+                // the block stays visibly selected and window-level bindings
+                // (ctrl-s etc.) keep dispatching through the focus chain.
+                TextInputEvent::Cancelled => {
+                    this.end_editing_inner(cx);
+                    window.focus(&this.focus_handle, cx);
+                }
+                TextInputEvent::Submitted => {
+                    this.insert_sibling_below(cx);
+                }
+                // Flush every keystroke to the page so all save paths
+                // (ctrl-s, page-switch autosave, quit-save) see the
+                // in-flight text (#38). `set_block_text` is a no-op on
+                // identical text, so this cannot spuriously dirty the
+                // page (#39).
+                TextInputEvent::Changed(text) => {
+                    let block_id = this.block_id;
+                    let text = text.to_string();
+                    this.page
+                        .update(cx, |p, cx| p.set_block_text(block_id, text, cx));
+                }
             }
         });
         window.focus(&input_focus, cx);
@@ -219,6 +239,18 @@ impl Render for BlockView {
             }
         };
 
+        // Focus ring (#42): a focused-but-viewing block is outlined so the
+        // selection is visible without mounting an editor. While editing the
+        // TextInput holds focus, so the ring drops out on its own. The border
+        // is always present (transparent when unfocused) to avoid a 1px
+        // layout shift on focus.
+        let focused = self.focus_handle.is_focused(window) && !self.is_editing();
+        let ring = if focused {
+            theme::accent()
+        } else {
+            gpui::rgba(0x0000_0000)
+        };
+
         // Drive the edit transition directly from the click. `begin_editing`
         // is idempotent — when already editing, the click falls through to
         // the TextInput's own mouse_down (which positions the caret).
@@ -231,9 +263,17 @@ impl Render for BlockView {
         // box turns white but the cursor never appears until a second click.
         div()
             .track_focus(&self.focus_handle)
+            .key_context("BlockView")
+            .on_action(cx.listener(|this, _: &BeginEditing, window, cx| {
+                this.begin_editing(window, cx);
+            }))
             .flex_1()
             .min_h(px(20.0))
             .py_0p5()
+            .px_0p5()
+            .border_1()
+            .border_color(ring)
+            .rounded_sm()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -292,6 +332,7 @@ mod tests {
         let body = body.to_string();
         let (bv, vcx) = cx.add_window_view(move |window, cx| {
             text_input::bind_keys(cx);
+            super::bind_keys(cx);
             let page = cx.new(|cx| Page::new("foo".into(), &body, cx));
             let block_id = page.read(cx).outline().first_block_id().unwrap();
             cx.set_global(TestPage(page));
@@ -303,28 +344,58 @@ mod tests {
         (page, bv, vcx)
     }
 
-    #[gpui::test]
-    fn focus_enters_editing(cx: &mut TestAppContext) {
-        let (_page, bv, cx) = mount(cx, "- hi\n");
-
-        cx.read(|cx| assert!(!bv.read(cx).is_editing()));
-
+    /// Focuses the block wrapper and settles — the "focused, viewing"
+    /// starting state for the keyboard tests below.
+    fn focus_block(cx: &mut gpui::VisualTestContext, bv: &Entity<BlockView>) {
         cx.update(|window, cx| {
             let handle = bv.read(cx).focus_handle.clone();
             window.focus(&handle, cx);
         });
         cx.run_until_parked();
-        cx.read(|cx| assert!(bv.read(cx).is_editing(), "focus should begin editing"));
+    }
+
+    /// The core of #42: focus alone must not mount an editor. The block is
+    /// focused-but-viewing (the state the focus ring renders in), and only
+    /// an explicit `enter` begins editing.
+    #[gpui::test]
+    fn focus_alone_does_not_enter_editing(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = mount(cx, "- hi\n");
+
+        focus_block(cx, &bv);
+
+        cx.update(|window, cx| {
+            assert!(
+                !bv.read(cx).is_editing(),
+                "focus must highlight, not edit (#42)",
+            );
+            assert!(
+                bv.read(cx).focus_handle.is_focused(window),
+                "wrapper keeps focus in the viewing state",
+            );
+        });
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            assert!(bv.read(cx).is_editing(), "enter begins editing");
+            let input_focus = bv
+                .read(cx)
+                .input_focus_handle_for_test(cx)
+                .expect("input mounted after enter");
+            assert!(
+                input_focus.is_focused(window),
+                "TextInput takes focus once editing starts",
+            );
+        });
     }
 
     #[gpui::test]
     fn end_editing_flushes_to_outline(cx: &mut TestAppContext) {
         let (page, bv, cx) = mount(cx, "- hi\n");
 
-        cx.update(|window, cx| {
-            let handle = bv.read(cx).focus_handle.clone();
-            window.focus(&handle, cx);
-        });
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
         cx.update(|window, cx| {
@@ -344,14 +415,13 @@ mod tests {
         });
     }
 
+    /// `begin_editing` is idempotent: clicking a block that is already being
+    /// edited must not remount the `TextInput` (that would drop the caret).
     #[gpui::test]
-    fn refocusing_same_block_is_noop(cx: &mut TestAppContext) {
+    fn clicking_editing_block_keeps_same_input(cx: &mut TestAppContext) {
         let (_page, bv, cx) = mount(cx, "- hi\n");
 
-        cx.update(|window, cx| {
-            let handle = bv.read(cx).focus_handle.clone();
-            window.focus(&handle, cx);
-        });
+        cx.simulate_click(point(px(20.0), px(20.0)), Modifiers::default());
         cx.run_until_parked();
 
         let first_input_id = cx.read(|cx| {
@@ -361,10 +431,7 @@ mod tests {
                 .entity_id()
         });
 
-        cx.update(|window, cx| {
-            let handle = bv.read(cx).focus_handle.clone();
-            window.focus(&handle, cx);
-        });
+        cx.simulate_click(point(px(20.0), px(20.0)), Modifiers::default());
         cx.run_until_parked();
 
         cx.read(|cx| {
@@ -419,22 +486,16 @@ mod tests {
         });
     }
 
-    /// Editing → Viewing via blur. Focuses an unrelated handle so the
-    /// input's `on_blur` listener fires; complements `escape_exits_editing`
-    /// (which exercises the explicit Cancel action path) and the test
-    /// helper `test_end_editing`.
-    /// Regression test: pressing Escape while a block is being edited exits
-    /// edit mode. Previously the `on_blur` subscription was the only path
-    /// out, and its dispatch lagged a draw cycle, so Escape on its own did
-    /// nothing.
+    /// Escape exits editing back to focused-Viewing (#42): the input is
+    /// dropped and focus parks on the block's own wrapper handle, so the
+    /// block stays visibly selected and window-level bindings keep
+    /// dispatching. Enter must then be able to re-enter editing.
     #[gpui::test]
-    fn escape_exits_editing(cx: &mut TestAppContext) {
+    fn escape_returns_to_focused_viewing(cx: &mut TestAppContext) {
         let (_page, bv, cx) = mount(cx, "- hi\n");
 
-        cx.update(|window, cx| {
-            let handle = bv.read(cx).focus_handle.clone();
-            window.focus(&handle, cx);
-        });
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert!(
             cx.read(|cx| bv.read(cx).is_editing()),
@@ -444,7 +505,22 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
 
-        cx.read(|cx| assert!(!bv.read(cx).is_editing(), "Escape should exit edit mode"));
+        cx.update(|window, cx| {
+            assert!(!bv.read(cx).is_editing(), "Escape should exit edit mode");
+            assert!(
+                bv.read(cx).focus_handle.is_focused(window),
+                "Escape must park focus back on the block wrapper",
+            );
+        });
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                bv.read(cx).is_editing(),
+                "enter re-enters editing from focused-Viewing",
+            );
+        });
     }
 
     /// Regression test for #38: typing must flush to the page's outline on
@@ -454,10 +530,8 @@ mod tests {
     fn typing_flushes_to_outline_immediately(cx: &mut TestAppContext) {
         let (page, bv, cx) = mount(cx, "- hi\n");
 
-        cx.update(|window, cx| {
-            let handle = bv.read(cx).focus_handle.clone();
-            window.focus(&handle, cx);
-        });
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
         cx.simulate_input("!!");
@@ -479,13 +553,11 @@ mod tests {
     /// typing flushes identical text back to the page, which must not mark
     /// the page dirty (and thus must not trigger a file rewrite).
     #[gpui::test]
-    fn focus_and_blur_without_typing_keeps_page_clean(cx: &mut TestAppContext) {
+    fn edit_and_escape_without_typing_keeps_page_clean(cx: &mut TestAppContext) {
         let (page, bv, cx) = mount(cx, "- hi\n");
 
-        cx.update(|window, cx| {
-            let handle = bv.read(cx).focus_handle.clone();
-            window.focus(&handle, cx);
-        });
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert!(
             cx.read(|cx| bv.read(cx).is_editing()),
@@ -499,7 +571,7 @@ mod tests {
             assert!(!bv.read(cx).is_editing(), "escape exits edit mode");
             assert!(
                 !page.read(cx).dirty(),
-                "untouched focus/blur cycle must not dirty the page",
+                "untouched edit/escape cycle must not dirty the page",
             );
         });
     }

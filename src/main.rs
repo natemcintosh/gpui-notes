@@ -5,6 +5,7 @@ use gpui::{
     FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
     SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions,
 };
+use gpui_notes::block_view;
 use gpui_notes::cmd_key;
 use gpui_notes::journal;
 use gpui_notes::page::Page;
@@ -523,6 +524,7 @@ impl Render for RootView {
 fn main() {
     application().run(|cx: &mut App| {
         text_input::bind_keys(cx);
+        block_view::bind_keys(cx);
         page_picker::bind_keys(cx);
         let cmd = cmd_key();
         cx.bind_keys([
@@ -577,6 +579,7 @@ mod tests {
         let root_dir = tmp.path().to_path_buf();
         let (root, vcx) = cx.add_window_view(move |_window, cx| {
             text_input::bind_keys(cx);
+            block_view::bind_keys(cx);
             page_picker::bind_keys(cx);
             cx.bind_keys([
                 KeyBinding::new("escape", CloseTagView, Some("RootView")),
@@ -700,7 +703,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (root, cx) = mount_root(cx, &tmp);
 
-        // mount_root leaves the first block of Home focused in edit mode.
+        // mount_root leaves the first block of Home focused-but-viewing
+        // (#42); enter begins the edit.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
         cx.simulate_keystrokes("shift-/");
         cx.run_until_parked();
 
@@ -994,8 +1000,10 @@ mod tests {
         let root_path = tmp.path().to_path_buf();
         let (_root, cx) = mount_root(cx, &tmp);
 
-        // mount_root leaves the first block of Home focused in edit mode,
+        // Enter begins editing the focused first block of Home (#42),
         // caret at the end of "home".
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
         cx.simulate_input("-typed");
         cx.run_until_parked();
         cx.simulate_keystrokes("ctrl-s");
@@ -1021,6 +1029,8 @@ mod tests {
 
         let home = cx.read(|cx| cx.global::<CurrentPage>().get().unwrap().clone());
 
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
         cx.simulate_input("-typed");
         cx.run_until_parked();
         cx.simulate_keystrokes("ctrl-p");
@@ -1040,6 +1050,51 @@ mod tests {
         });
     }
 
+    /// End-to-end #42: after mount and after every page switch the first
+    /// block is focused but NOT editing. Stray typing must change nothing;
+    /// only an explicit `enter` begins an edit. (Asserted through behavior
+    /// because the bin test crate can't reach the lib's cfg(test) helpers.)
+    #[gpui::test]
+    fn page_switch_lands_focused_not_editing(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        let home = cx.read(|cx| cx.global::<CurrentPage>().get().unwrap().clone());
+        cx.simulate_input("zzz");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                !home.read(cx).body().contains("zzz"),
+                "typing after mount must not land anywhere — no editor is open",
+            );
+            assert!(!home.read(cx).dirty(), "page untouched by stray typing");
+        });
+
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+        let incoming = cx.read(|cx| cx.global::<CurrentPage>().get().unwrap().clone());
+        cx.simulate_input("zzz");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                !incoming.read(cx).body().contains("zzz"),
+                "page switch must land focused-but-viewing (#42)",
+            );
+            assert!(!incoming.read(cx).dirty());
+        });
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_input("zzz");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                incoming.read(cx).body().contains("zzz"),
+                "explicit enter begins editing and typing lands",
+            );
+        });
+    }
+
     /// Regression test for #43: quitting must flush every dirty open page.
     /// `App::shutdown` is exactly what the platform's quit callback invokes;
     /// the test platform's `quit()` is a no-op, so the test calls it
@@ -1051,7 +1106,9 @@ mod tests {
         let root_path = tmp.path().to_path_buf();
         let (_root, cx) = mount_root(cx, &tmp);
 
-        // mount_root leaves the first block of Home focused in edit mode.
+        // Enter begins editing the focused first block of Home (#42).
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
         cx.simulate_input("-typed");
         cx.run_until_parked();
         cx.update(|_, cx| {
@@ -1147,8 +1204,8 @@ mod tests {
     /// After escaping out of a block edit, ctrl-s must still dispatch. The
     /// `TextInput` entity is dropped on Cancel, which previously left focus
     /// dead — no element matched the `RootView` key context, so the binding
-    /// silently dropped. `OutlineView` now parks focus on itself on
-    /// `BlockViewEvent::EditingEnded` to keep the chain alive.
+    /// silently dropped. Escape now parks focus on the block's own wrapper
+    /// (#42), which sits under `RootView`, keeping the chain alive.
     #[gpui::test]
     fn ctrl_s_works_after_escaping_block_edit(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
