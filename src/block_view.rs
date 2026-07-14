@@ -3,8 +3,9 @@
 //!
 //! Only one block can be in `Editing` at a time — GPUI's focus system enforces
 //! this naturally (a single focused leaf). The outline stored on `Page` is the
-//! source of truth; the `TextInput`'s buffer is flushed to the outline on blur
-//! and then dropped, so there is no hidden state to drift out of sync.
+//! source of truth; the `TextInput`'s buffer is flushed to the outline on every
+//! change (and again on blur, when the input is dropped), so there is no hidden
+//! state to drift out of sync and every save path sees in-flight edits (#38).
 
 use gpui::{
     div, prelude::*, px, AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
@@ -122,7 +123,16 @@ impl BlockView {
             TextInputEvent::Submitted => {
                 this.insert_sibling_below(cx);
             }
-            TextInputEvent::Changed(_) => {}
+            // Flush every keystroke to the page so all save paths (ctrl-s,
+            // page-switch autosave, quit-save) see the in-flight text (#38).
+            // `set_block_text` is a no-op on identical text, so this cannot
+            // spuriously dirty the page (#39).
+            TextInputEvent::Changed(text) => {
+                let block_id = this.block_id;
+                let text = text.to_string();
+                this.page
+                    .update(cx, |p, cx| p.set_block_text(block_id, text, cx));
+            }
         });
         window.focus(&input_focus, cx);
         self.mode = BlockMode::Editing {
@@ -435,6 +445,34 @@ mod tests {
         cx.run_until_parked();
 
         cx.read(|cx| assert!(!bv.read(cx).is_editing(), "Escape should exit edit mode"));
+    }
+
+    /// Regression test for #38: typing must flush to the page's outline on
+    /// every `Changed` event, not just on blur/Escape — otherwise ctrl-s and
+    /// page-switch autosave persist stale text while the input is focused.
+    #[gpui::test]
+    fn typing_flushes_to_outline_immediately(cx: &mut TestAppContext) {
+        let (page, bv, cx) = mount(cx, "- hi\n");
+
+        cx.update(|window, cx| {
+            let handle = bv.read(cx).focus_handle.clone();
+            window.focus(&handle, cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_input("!!");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(bv.read(cx).is_editing(), "still mid-edit — no blur yet");
+            let block_id = bv.read(cx).block_id;
+            assert_eq!(
+                page.read(cx).outline().get(block_id),
+                Some("hi!!"),
+                "outline must reflect the in-flight edit",
+            );
+            assert!(page.read(cx).dirty(), "typing dirties the page");
+        });
     }
 
     /// Regression test for #39: entering edit mode and leaving it without

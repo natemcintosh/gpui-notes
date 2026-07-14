@@ -980,6 +980,62 @@ mod tests {
         );
     }
 
+    /// Regression test for #38: ctrl-s while a block edit is still in
+    /// progress must persist the typed text. Previously the typed text lived
+    /// only in the `TextInput` until blur, so ctrl-s saved the pre-edit body
+    /// (or skipped the write entirely if the page wasn't already dirty).
+    #[gpui::test]
+    fn invariant_ctrl_s_mid_edit_saves_typed_text(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_path = tmp.path().to_path_buf();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        // mount_root leaves the first block of Home focused in edit mode,
+        // caret at the end of "home".
+        cx.simulate_input("-typed");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-s");
+        cx.run_until_parked();
+
+        let on_disk = std::fs::read_to_string(root_path.join("pages").join("Home.md"))
+            .expect("Home.md written");
+        assert!(
+            on_disk.contains("home-typed"),
+            "ctrl-s mid-edit must save the typed text; on disk: {on_disk:?}",
+        );
+    }
+
+    /// Regression test for #38, page-switch flavor: `set_current_page` saves
+    /// the outgoing page *before* the focus change blurs the input, so the
+    /// in-flight edit must already be in the outline for the autosave to
+    /// persist it.
+    #[gpui::test]
+    fn invariant_ctrl_p_mid_edit_persists_typed_text(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_path = tmp.path().to_path_buf();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        let home = cx.read(|cx| cx.global::<CurrentPage>().get().unwrap().clone());
+
+        cx.simulate_input("-typed");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+
+        let on_disk = std::fs::read_to_string(root_path.join("pages").join("Home.md"))
+            .expect("Home.md written");
+        assert!(
+            on_disk.contains("home-typed"),
+            "outgoing page must be saved with the typed text; on disk: {on_disk:?}",
+        );
+        cx.read(|cx| {
+            assert!(
+                !home.read(cx).dirty(),
+                "outgoing page must be persisted, not left dirty",
+            );
+        });
+    }
+
     /// Page switch clears any active overlay. Verifies the broader
     /// invariant by stacking it: tag view open → picker open → select
     /// → overlay is None. The intermediate tag view exit and picker
