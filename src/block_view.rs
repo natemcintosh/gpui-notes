@@ -30,7 +30,11 @@ actions!(block_view, [BeginEditing]);
 /// receives keystrokes while a block wrapper (not its `TextInput`) holds
 /// focus, so `enter` here cannot shadow the input's own enter-to-submit.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("enter", BeginEditing, Some("BlockView"))]);
+    cx.bind_keys([KeyBinding::new(
+        "enter",
+        BeginEditing,
+        Some("BlockView && !editing"),
+    )]);
 }
 
 /// Events emitted by `BlockView` to its parent (typically `OutlineView`).
@@ -261,9 +265,19 @@ impl Render for BlockView {
         // listener fires *after* `begin_editing` and re-focuses the wrapper's
         // own handle, stealing focus from the freshly mounted TextInput — the
         // box turns white but the cursor never appears until a second click.
+        // The `editing` flag lets outline-op bindings scope themselves to
+        // "BlockView && !editing" (#44): the wrapper is an ancestor of the
+        // TextInput, so without the flag, keys the input doesn't bind
+        // (up/down/tab…) would trigger outline ops mid-edit.
+        let key_context = if self.is_editing() {
+            "BlockView editing"
+        } else {
+            "BlockView"
+        };
+
         div()
             .track_focus(&self.focus_handle)
-            .key_context("BlockView")
+            .key_context(key_context)
             .on_action(cx.listener(|this, _: &BeginEditing, window, cx| {
                 this.begin_editing(window, cx);
             }))

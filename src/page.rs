@@ -96,6 +96,55 @@ impl Page {
         Some(new_id)
     }
 
+    /// Applies a structural outline edit. If `op` reports a change, the body
+    /// is reserialized, the page marked dirty, and observers notified.
+    /// Returns whether anything changed.
+    fn apply_outline_edit(
+        &mut self,
+        cx: &mut Context<Self>,
+        op: impl FnOnce(&mut Outline) -> bool,
+    ) -> bool {
+        if !op(&mut self.outline) {
+            return false;
+        }
+        self.body = self.outline.serialize().into();
+        self.dirty = true;
+        cx.notify();
+        true
+    }
+
+    pub fn indent_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
+        self.apply_outline_edit(cx, |o| o.indent(id))
+    }
+
+    pub fn outdent_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
+        self.apply_outline_edit(cx, |o| o.outdent(id))
+    }
+
+    pub fn move_block_up(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
+        self.apply_outline_edit(cx, |o| o.move_up(id))
+    }
+
+    pub fn move_block_down(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
+        self.apply_outline_edit(cx, |o| o.move_down(id))
+    }
+
+    /// Deletes the block (and its subtree) from the outline.
+    pub fn delete_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
+        self.apply_outline_edit(cx, |o| o.delete(id).is_some())
+    }
+
+    /// Collapse state is view-only — it is not serialized into the body —
+    /// so toggling must re-render but must not dirty the page.
+    pub fn toggle_collapse(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
+        if self.outline.toggle_collapse(id) {
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn mark_saved(&mut self, cx: &mut Context<Self>) {
         if self.dirty {
             self.dirty = false;

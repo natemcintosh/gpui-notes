@@ -9,6 +9,7 @@ use gpui_notes::block_view;
 use gpui_notes::cmd_key;
 use gpui_notes::errors::{self, LastError};
 use gpui_notes::journal;
+use gpui_notes::outline_view;
 use gpui_notes::page::Page;
 use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
 use gpui_notes::registry::{
@@ -34,17 +35,24 @@ actions!(
 
 /// Cheatsheet shown in the shortcuts overlay. The strings here are the only
 /// place the bindings are documented to the user — keep in sync with the
-/// `cx.bind_keys(...)` block in `main`. Labels derive from the same platform
+/// `cx.bind_keys(...)` block in `main` and the `bind_keys` fns of
+/// `block_view`/`outline_view`. Labels derive from the same platform
 /// modifier as the bindings, so macOS shows `cmd-*`.
-fn shortcuts() -> [(String, &'static str); 6] {
+fn shortcuts() -> Vec<(String, &'static str)> {
     let cmd = cmd_key();
-    [
+    vec![
         (format!("{cmd}-o"), "Open page…"),
         (format!("{cmd}-p"), "Cycle to next page"),
         (format!("{cmd}-."), "Jump to today's journal"),
         (format!("{cmd}-s"), "Save current page"),
-        ("escape".to_string(), "Close overlay / tag view"),
+        ("escape".to_string(), "Close overlay / stop editing"),
         (format!("{cmd}-/"), "Show this help"),
+        ("enter".to_string(), "Edit focused block"),
+        ("up / down".to_string(), "Move focus between blocks"),
+        ("tab / shift-tab".to_string(), "Indent / outdent block"),
+        ("alt-up / alt-down".to_string(), "Move block up / down"),
+        (format!("{cmd}-enter"), "Collapse / expand block"),
+        ("backspace".to_string(), "Delete empty block"),
     ]
 }
 
@@ -563,6 +571,7 @@ fn main() {
     application().run(|cx: &mut App| {
         text_input::bind_keys(cx);
         block_view::bind_keys(cx);
+        outline_view::bind_keys(cx);
         page_picker::bind_keys(cx);
         let cmd = cmd_key();
         cx.bind_keys([
@@ -619,6 +628,7 @@ mod tests {
         let (root, vcx) = cx.add_window_view(move |_window, cx| {
             text_input::bind_keys(cx);
             block_view::bind_keys(cx);
+            outline_view::bind_keys(cx);
             page_picker::bind_keys(cx);
             cx.bind_keys([
                 KeyBinding::new("escape", CloseTagView, Some("RootView")),
