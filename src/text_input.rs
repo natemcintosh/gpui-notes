@@ -678,11 +678,7 @@ pub fn emoji_font_fallbacks() -> FontFallbacks {
 /// Register the default keybindings on the `TextInput` context. Call once at
 /// startup (see `main.rs`).
 pub fn bind_keys(cx: &mut App) {
-    let cmd = if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    };
+    let cmd = crate::cmd_key();
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
         KeyBinding::new("delete", Delete, Some("TextInput")),
