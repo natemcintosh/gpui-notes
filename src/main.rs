@@ -7,6 +7,7 @@ use gpui::{
 };
 use gpui_notes::block_view;
 use gpui_notes::cmd_key;
+use gpui_notes::errors::{self, LastError};
 use gpui_notes::journal;
 use gpui_notes::page::Page;
 use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
@@ -100,17 +101,20 @@ struct RootView {
     overlay: OverlayMode,
     _current_observer: Subscription,
     _tag_observer: Subscription,
+    _error_observer: Subscription,
 }
 
 impl RootView {
     fn new(cx: &mut Context<Self>) -> Self {
         let current_observer = cx.observe_global::<CurrentPage>(|_, cx| cx.notify());
         let tag_observer = cx.observe_global::<TagIndex>(|_, cx| cx.notify());
+        let error_observer = cx.observe_global::<LastError>(|_, cx| cx.notify());
         Self {
             focus_handle: cx.focus_handle(),
             overlay: OverlayMode::None,
             _current_observer: current_observer,
             _tag_observer: tag_observer,
+            _error_observer: error_observer,
         }
     }
 
@@ -139,13 +143,13 @@ impl RootView {
         };
         let result = cx.update_global::<PageRegistry, _>(|reg, cx| reg.save(&page, cx));
         if let Err(err) = result {
-            eprintln!("save failed: {err}");
+            errors::report(format!("save failed: {err}"), cx);
         }
     }
 
     fn jump_to_today(&mut self, _: &JumpToToday, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(err) = journal::open_today(cx) {
-            eprintln!("open today's journal failed: {err}");
+            errors::report(format!("open today's journal failed: {err}"), cx);
             return;
         }
         self.overlay = OverlayMode::None;
@@ -156,7 +160,7 @@ impl RootView {
         let names = match cx.global::<PageRegistry>().list() {
             Ok(names) => names,
             Err(err) => {
-                eprintln!("list failed: {err}");
+                errors::report(format!("list failed: {err}"), cx);
                 return;
             }
         };
@@ -168,7 +172,7 @@ impl RootView {
             return;
         };
         if let Err(err) = set_current_page(next.as_ref(), cx) {
-            eprintln!("open {next:?} failed: {err}");
+            errors::report(format!("open {next:?} failed: {err}"), cx);
             return;
         }
         self.overlay = OverlayMode::None;
@@ -265,6 +269,32 @@ impl RootView {
         row.into_any_element()
     }
 
+    /// The dismissible error line shown under the header while a `LastError`
+    /// is set (#47). Clicking anywhere on the line dismisses it.
+    fn render_error_line(message: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id(ElementId::Name(SharedString::from("last-error")))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .bg(rgb(0x3a2222))
+            .text_color(rgb(0xff9999))
+            .text_size(px(13.))
+            .hover(|style| style.bg(rgb(0x4a2a2a)))
+            .child(div().flex_1().child(SharedString::from(message)))
+            .child(div().text_color(rgb(0x888888)).child("× dismiss"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| errors::dismiss(cx)),
+            )
+            .into_any_element()
+    }
+
     fn render_shortcuts_overlay() -> gpui::AnyElement {
         let mut list = div().flex().flex_col().gap_1();
         for (keys, label) in shortcuts() {
@@ -324,7 +354,7 @@ impl RootView {
         let entries = match Self::collect_picker_entries(cx) {
             Ok(entries) => entries,
             Err(err) => {
-                eprintln!("page picker: list failed: {err}");
+                errors::report(format!("page picker: list failed: {err}"), cx);
                 return;
             }
         };
@@ -370,7 +400,7 @@ impl RootView {
             PageEntry::Journal(date) => journal::open_for_date(*date, cx).map(|_| ()),
         };
         if let Err(err) = result {
-            eprintln!("page picker: open failed: {err}");
+            errors::report(format!("page picker: open failed: {err}"), cx);
         }
         self.close_picker(window, cx);
     }
@@ -396,7 +426,7 @@ impl RootView {
             TagSource::Journal(date) => journal::open_for_date(*date, cx).map(|_| ()),
         };
         if let Err(err) = result {
-            eprintln!("open tag result failed: {err}");
+            errors::report(format!("open tag result failed: {err}"), cx);
             return;
         }
         self.overlay = OverlayMode::None;
@@ -488,7 +518,15 @@ impl Render for RootView {
             name.to_string()
         };
 
-        let root = root.child(Self::render_header(header_text, active_tag.is_some(), cx));
+        let mut root = root.child(Self::render_header(header_text, active_tag.is_some(), cx));
+
+        let error_message = cx
+            .global::<LastError>()
+            .get()
+            .map(|e| format!("{} — {}", e.message, e.at.format("%H:%M:%S")));
+        if let Some(message) = error_message {
+            root = root.child(Self::render_error_line(message, cx));
+        }
 
         let body = if let Some(tag) = active_tag {
             root.child(Self::render_tag_results(&tag, cx))
@@ -546,6 +584,7 @@ fn main() {
         cx.set_global(tag_index);
         cx.set_global(PageRegistry::new(store));
         cx.set_global(CurrentPage::default());
+        cx.set_global(LastError::default());
         save_all_on_quit(cx);
         journal::open_today(cx).expect("open today's journal");
 
@@ -595,6 +634,7 @@ mod tests {
             cx.set_global(TagIndex::rebuild_from(&store).unwrap());
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
+            cx.set_global(LastError::default());
             save_all_on_quit(cx);
             set_current_page("Home", cx).unwrap();
             RootView::new(cx)
@@ -1231,5 +1271,52 @@ mod tests {
                 "ctrl-s should clear dirty even after escape parked focus",
             );
         });
+    }
+
+    /// End-to-end #47: a failed ctrl-s must surface an error line in the UI
+    /// instead of only stderr, and clicking the line dismisses it. The pages
+    /// directory is made read-only to force the write failure; the dismissal
+    /// click doubles as the render assertion — it only lands if the line is
+    /// actually laid out under the header.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn save_failure_shows_dismissible_error_line(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+        let pages = tmp.path().join("pages");
+        std::fs::set_permissions(&pages, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Enter begins editing the focused first block of Home (#42); the
+        // per-keystroke flush (#38) dirties the page so ctrl-s attempts a
+        // write.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_input("-typed");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-s");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let entry = cx.global::<LastError>().get().expect("save error recorded");
+            assert!(
+                entry.message.contains("save failed"),
+                "unexpected message: {:?}",
+                entry.message,
+            );
+        });
+
+        cx.simulate_click(point(px(24.0), px(50.0)), Modifiers::default());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert!(
+                cx.global::<LastError>().get().is_none(),
+                "clicking the error line dismisses it",
+            );
+        });
+
+        // Restore permissions so TempDir cleanup can remove the files.
+        std::fs::set_permissions(&pages, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
