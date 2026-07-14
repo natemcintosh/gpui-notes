@@ -1,7 +1,7 @@
 #![allow(clippy::unreadable_literal)]
 
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, App, AppContext, Bounds, Context, ElementId, Entity,
+    actions, div, prelude::*, px, size, App, AppContext, Bounds, Context, ElementId, Entity,
     FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
     SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions,
 };
@@ -18,6 +18,7 @@ use gpui_notes::registry::{
 use gpui_notes::store::NotesStore;
 use gpui_notes::tags::{self, OpenTag, TagIndex, TagSource};
 use gpui_notes::text_input;
+use gpui_notes::theme;
 use gpui_notes::window_frame::WindowFrame;
 use gpui_platform::application;
 
@@ -110,6 +111,7 @@ struct RootView {
     _current_observer: Subscription,
     _tag_observer: Subscription,
     _error_observer: Subscription,
+    debug_hud: bool,
 }
 
 impl RootView {
@@ -123,6 +125,7 @@ impl RootView {
             _current_observer: current_observer,
             _tag_observer: tag_observer,
             _error_observer: error_observer,
+            debug_hud: std::env::var("GPUI_NOTES_DEBUG_HUD").is_ok_and(|value| value == "1"),
         }
     }
 
@@ -131,16 +134,26 @@ impl RootView {
         &self.overlay
     }
 
-    /// Focuses the first block of the current page, or the root view if no
-    /// page is open. Call after any action that swaps `CurrentPage`, otherwise
-    /// the window is left without a focused block and keystrokes fall through
-    /// until the user clicks one.
-    fn focus_current(&self, window: &mut Window, cx: &mut App) {
-        if let Some(page) = cx.global::<CurrentPage>().get().cloned() {
-            let view = page.read(cx).view().clone();
-            view.update(cx, |v, cx| v.focus_first_block(window, cx));
-        } else {
-            window.focus(&self.focus_handle.clone(), cx);
+    /// Parks focus after a root-level state transition. This is the single
+    /// owner of the policy: the target is derived only from the active overlay
+    /// and current page, so an action cannot accidentally leave the `RootView`
+    /// key context without a focused descendant.
+    fn park_focus(&self, window: &mut Window, cx: &mut App) {
+        match &self.overlay {
+            OverlayMode::PagePicker { entity, .. } => {
+                entity.update(cx, |picker, cx| picker.focus_input(window, cx));
+            }
+            OverlayMode::TagResults(_) | OverlayMode::ShortcutsHelp => {
+                window.focus(&self.focus_handle, cx);
+            }
+            OverlayMode::None => {
+                if let Some(page) = cx.global::<CurrentPage>().get().cloned() {
+                    let view = page.read(cx).view().clone();
+                    view.update(cx, |view, cx| view.focus_first_block(window, cx));
+                } else {
+                    window.focus(&self.focus_handle, cx);
+                }
+            }
         }
     }
 
@@ -161,7 +174,7 @@ impl RootView {
             return;
         }
         self.overlay = OverlayMode::None;
-        self.focus_current(window, cx);
+        self.park_focus(window, cx);
     }
 
     fn next_page(&mut self, _: &NextPage, window: &mut Window, cx: &mut Context<Self>) {
@@ -184,15 +197,13 @@ impl RootView {
             return;
         }
         self.overlay = OverlayMode::None;
-        self.focus_current(window, cx);
+        self.park_focus(window, cx);
     }
 
     fn open_tag(&mut self, action: &OpenTag, window: &mut Window, cx: &mut Context<Self>) {
         Self::reindex_current_page(cx);
         self.overlay = OverlayMode::TagResults(action.name.clone());
-        // Park focus on RootView so Escape dispatches `CloseTagView` instead of
-        // a stale TextInput::Cancel from the previously-edited block.
-        window.focus(&self.focus_handle, cx);
+        self.park_focus(window, cx);
         cx.notify();
     }
 
@@ -205,7 +216,7 @@ impl RootView {
             return;
         }
         self.overlay = OverlayMode::None;
-        self.focus_current(window, cx);
+        self.park_focus(window, cx);
         cx.notify();
     }
 
@@ -217,12 +228,10 @@ impl RootView {
     ) {
         if matches!(self.overlay, OverlayMode::ShortcutsHelp) {
             self.overlay = OverlayMode::None;
-            self.focus_current(window, cx);
+            self.park_focus(window, cx);
         } else {
             self.overlay = OverlayMode::ShortcutsHelp;
-            // Park focus on the root so Escape lands on `CloseTagView` (which
-            // also dismisses the overlay) instead of a stale TextInput.
-            window.focus(&self.focus_handle, cx);
+            self.park_focus(window, cx);
         }
         cx.notify();
     }
@@ -237,7 +246,7 @@ impl RootView {
             .flex_row()
             .items_center()
             .gap_2()
-            .text_color(rgb(0xcccccc))
+            .text_color(theme::header_fg())
             .text_size(px(14.))
             .child(div().flex_1().child(header_text))
             .child(
@@ -246,8 +255,12 @@ impl RootView {
                     .px_2()
                     .rounded_sm()
                     .cursor_pointer()
-                    .text_color(rgb(0x888888))
-                    .hover(|style| style.bg(rgb(0x2a2a2a)).text_color(rgb(0xdddddd)))
+                    .text_color(theme::control_fg())
+                    .hover(|style| {
+                        style
+                            .bg(theme::row_hover())
+                            .text_color(theme::control_hover_fg())
+                    })
                     .child("?")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -263,8 +276,12 @@ impl RootView {
                     .px_2()
                     .rounded_sm()
                     .cursor_pointer()
-                    .text_color(rgb(0x888888))
-                    .hover(|style| style.bg(rgb(0x2a2a2a)).text_color(rgb(0xdddddd)))
+                    .text_color(theme::control_fg())
+                    .hover(|style| {
+                        style
+                            .bg(theme::row_hover())
+                            .text_color(theme::control_hover_fg())
+                    })
                     .child("× close")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -290,12 +307,12 @@ impl RootView {
             .py_1()
             .rounded_sm()
             .cursor_pointer()
-            .bg(rgb(0x3a2222))
-            .text_color(rgb(0xff9999))
+            .bg(theme::error_bg())
+            .text_color(theme::error_fg())
             .text_size(px(13.))
-            .hover(|style| style.bg(rgb(0x4a2a2a)))
+            .hover(|style| style.bg(theme::error_hover_bg()))
             .child(div().flex_1().child(SharedString::from(message)))
-            .child(div().text_color(rgb(0x888888)).child("× dismiss"))
+            .child(div().text_color(theme::control_fg()).child("× dismiss"))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| errors::dismiss(cx)),
@@ -318,13 +335,13 @@ impl RootView {
                             .px_2()
                             .py_0p5()
                             .rounded_sm()
-                            .bg(rgb(0x2a2a2a))
-                            .text_color(rgb(0xffffff))
+                            .bg(theme::bg_subtle())
+                            .text_color(theme::row_selected_fg())
                             .child(SharedString::from(keys)),
                     )
                     .child(
                         div()
-                            .text_color(rgb(0xcccccc))
+                            .text_color(theme::header_fg())
                             .child(SharedString::from(label)),
                     ),
             );
@@ -334,15 +351,15 @@ impl RootView {
             .flex()
             .flex_col()
             .gap_2()
-            .bg(rgb(0x141414))
+            .bg(theme::overlay_bg())
             .border_1()
-            .border_color(rgb(0x3a3a3a))
+            .border_color(theme::overlay_border())
             .rounded_md()
             .p_4()
             .min_w(px(360.0))
             .child(
                 div()
-                    .text_color(rgb(0xeeeeee))
+                    .text_color(theme::overlay_title_fg())
                     .text_size(px(14.))
                     .child("Keyboard shortcuts"),
             )
@@ -366,7 +383,7 @@ impl RootView {
                 return;
             }
         };
-        let picker = cx.new(|cx| PagePicker::new(entries, window, cx));
+        let picker = cx.new(|cx| PagePicker::new(entries, cx));
         let sub = cx.subscribe_in(
             &picker,
             window,
@@ -383,6 +400,7 @@ impl RootView {
             entity: picker,
             _sub: sub,
         };
+        self.park_focus(window, cx);
         cx.notify();
     }
 
@@ -415,7 +433,7 @@ impl RootView {
 
     fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.overlay = OverlayMode::None;
-        self.focus_current(window, cx);
+        self.park_focus(window, cx);
         cx.notify();
     }
 
@@ -438,7 +456,7 @@ impl RootView {
             return;
         }
         self.overlay = OverlayMode::None;
-        self.focus_current(window, cx);
+        self.park_focus(window, cx);
         cx.notify();
     }
 
@@ -447,7 +465,7 @@ impl RootView {
         if hits.is_empty() {
             return div()
                 .flex_1()
-                .text_color(rgb(0x999999))
+                .text_color(theme::empty_state_fg())
                 .child("No blocks found.")
                 .into_any_element();
         }
@@ -468,8 +486,8 @@ impl RootView {
                     .px_2()
                     .py_1()
                     .min_h(px(28.0))
-                    .text_color(rgb(0xdddddd))
-                    .hover(|style| style.bg(rgb(0x2a2a2a)))
+                    .text_color(theme::control_hover_fg())
+                    .hover(|style| style.bg(theme::row_hover()))
                     .child(format!("{label}: {preview}"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_tag_hit(&source, window, cx);
@@ -477,6 +495,36 @@ impl RootView {
             );
         }
         list.into_any_element()
+    }
+
+    fn debug_hud_text(&self, window: &Window, cx: &App) -> String {
+        let (focus_target, block_mode) = match &self.overlay {
+            OverlayMode::PagePicker { .. } => ("page picker input", "not applicable"),
+            OverlayMode::TagResults(_) | OverlayMode::ShortcutsHelp => ("root", "not applicable"),
+            OverlayMode::None => {
+                let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
+                    return "focus: root · block: no page".to_string();
+                };
+                let view = page.read(cx).view().clone();
+                view.read(cx).debug_focus_status(window, cx)
+            }
+        };
+        format!("focus: {focus_target} · block: {block_mode}")
+    }
+
+    fn render_debug_hud(text: String) -> gpui::AnyElement {
+        div()
+            .id(ElementId::Name(SharedString::from("debug-focus-hud")))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(theme::overlay_bg())
+            .border_1()
+            .border_color(theme::overlay_border())
+            .text_color(theme::fg_muted())
+            .text_size(px(12.))
+            .child(text)
+            .into_any_element()
     }
 }
 
@@ -487,7 +535,7 @@ impl Focusable for RootView {
 }
 
 impl Render for RootView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current: Option<Entity<Page>> = cx.global::<CurrentPage>().get().cloned();
 
         let mut root = div()
@@ -504,13 +552,13 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x1e1e1e))
+            .bg(theme::window_bg())
             .p_4()
             .gap_2();
         root.text_style().font_fallbacks = Some(text_input::emoji_font_fallbacks());
 
         let Some(page) = current else {
-            return root.child(div().text_color(rgb(0xcccccc)).child("No page open."));
+            return root.child(div().text_color(theme::header_fg()).child("No page open."));
         };
 
         let (name, dirty, view) = {
@@ -527,6 +575,10 @@ impl Render for RootView {
         };
 
         let mut root = root.child(Self::render_header(header_text, active_tag.is_some(), cx));
+
+        if self.debug_hud {
+            root = root.child(Self::render_debug_hud(self.debug_hud_text(window, cx)));
+        }
 
         let error_message = cx
             .global::<LastError>()
@@ -605,7 +657,7 @@ fn main() {
             },
             |window, cx| {
                 let root = cx.new(RootView::new);
-                root.update(cx, |view, cx| view.focus_current(window, cx));
+                root.update(cx, |view, cx| view.park_focus(window, cx));
                 cx.activate(true);
                 cx.new(|_| WindowFrame::new("GPUI Notes", root))
             },
@@ -651,10 +703,23 @@ mod tests {
         });
         vcx.update(|window, cx| {
             window.activate_window();
-            root.update(cx, |view, cx| view.focus_current(window, cx));
+            root.update(cx, |view, cx| view.park_focus(window, cx));
         });
         vcx.run_until_parked();
         (root, vcx)
+    }
+
+    /// Assert the actual GPUI focus path still includes the element that
+    /// provides the `RootView` key context. This catches dead-keymap
+    /// regressions even when the immediately preceding action looked correct.
+    fn assert_root_in_focus_path(cx: &mut VisualTestContext, root: &Entity<RootView>) {
+        cx.update(|window, cx| {
+            let root_focus = root.read(cx).focus_handle(cx);
+            assert!(
+                root_focus.contains_focused(window, cx),
+                "focused element must remain beneath RootView",
+            );
+        });
     }
 
     #[gpui::test]
@@ -793,6 +858,7 @@ mod tests {
 
         cx.simulate_keystrokes("ctrl-o");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
 
         cx.read(|cx| {
             assert!(
@@ -832,6 +898,7 @@ mod tests {
 
         cx.simulate_keystrokes("ctrl-o");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
 
         assert!(cx.read(|cx| root.read(cx).overlay().picker().is_some()));
     }
@@ -844,10 +911,12 @@ mod tests {
 
         cx.simulate_keystrokes("ctrl-o");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
         assert!(cx.read(|cx| root.read(cx).overlay().picker().is_some()));
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
 
         assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
     }
@@ -860,6 +929,7 @@ mod tests {
 
         cx.simulate_keystrokes("ctrl-/");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
 
         assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
     }
@@ -875,10 +945,12 @@ mod tests {
 
         cx.simulate_keystrokes("ctrl-/");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
         assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
 
         cx.simulate_keystrokes("ctrl-/");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
 
         assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
     }
@@ -904,6 +976,7 @@ mod tests {
             });
         });
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
 
         assert_eq!(
             cx.read(|cx| root.read(cx).overlay().tag_name().map(ToString::to_string)),
@@ -930,10 +1003,12 @@ mod tests {
             });
         });
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
         assert!(cx.read(|cx| root.read(cx).overlay().tag_name().is_some()));
 
         cx.simulate_keystrokes("ctrl-p");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
 
         cx.read(|cx| {
             assert!(root.read(cx).overlay().is_none(), "tag view cleared");
@@ -951,10 +1026,12 @@ mod tests {
 
         cx.simulate_keystrokes("ctrl-/");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
         assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
 
         cx.simulate_keystrokes("ctrl-.");
         cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
 
         cx.read(|cx| {
             assert!(root.read(cx).overlay().is_none(), "shortcuts cleared");

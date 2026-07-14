@@ -24,4 +24,5 @@ pub mod registry;
 pub mod store;
 pub mod tags;
 pub mod text_input;
+pub mod theme;
 pub mod window_frame;

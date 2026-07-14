@@ -9,10 +9,12 @@
 //! `crates/gpui/examples/window_shadow.rs` at the pinned rev.
 
 use gpui::{
-    canvas, div, point, prelude::*, px, rgb, Bounds, Context, CursorStyle, Decorations, Entity,
+    canvas, div, point, prelude::*, px, Bounds, Context, CursorStyle, Decorations, Entity,
     HitboxBehavior, IntoElement, MouseButton, MouseMoveEvent, ParentElement, Pixels, Point, Render,
     ResizeEdge, SharedString, Size, Styled, Window,
 };
+
+use crate::theme;
 
 /// Thickness of the resize hit zone along each edge.
 const EDGE: Pixels = px(6.0);
@@ -101,8 +103,8 @@ fn titlebar(title: SharedString) -> impl IntoElement {
         .flex()
         .items_center()
         .px_3()
-        .bg(rgb(0x2a2a2a))
-        .text_color(rgb(0xaaaaaa))
+        .bg(theme::bg_subtle())
+        .text_color(theme::chrome_fg())
         .child(title)
         .on_mouse_down(MouseButton::Left, |e, window, _| {
             // The top resize band overlaps the title bar. When the click
