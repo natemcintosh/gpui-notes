@@ -10,8 +10,8 @@
 
 use gpui::{
     canvas, div, point, prelude::*, px, rgb, Bounds, Context, CursorStyle, Decorations, Entity,
-    HitboxBehavior, IntoElement, MouseButton, ParentElement, Pixels, Point, Render, ResizeEdge,
-    SharedString, Size, Styled, Window,
+    HitboxBehavior, IntoElement, MouseButton, MouseMoveEvent, ParentElement, Pixels, Point, Render,
+    ResizeEdge, SharedString, Size, Styled, Window,
 };
 
 /// Thickness of the resize hit zone along each edge.
@@ -21,6 +21,9 @@ const TITLEBAR_HEIGHT: Pixels = px(28.0);
 pub struct WindowFrame<V: Render + 'static> {
     title: SharedString,
     child: Entity<V>,
+    /// Resize edge under the pointer as of the last mouse move, used to
+    /// refresh the window only when the edge cursor actually needs to change.
+    last_edge: Option<ResizeEdge>,
 }
 
 impl<V: Render + 'static> WindowFrame<V> {
@@ -28,12 +31,13 @@ impl<V: Render + 'static> WindowFrame<V> {
         Self {
             title: title.into(),
             child,
+            last_edge: None,
         }
     }
 }
 
 impl<V: Render + 'static> Render for WindowFrame<V> {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let decorations = window.window_decorations();
         let is_client = matches!(decorations, Decorations::Client { .. });
         let title = self.title.clone();
@@ -67,9 +71,17 @@ impl<V: Render + 'static> Render for WindowFrame<V> {
                     .size_full()
                     .absolute(),
                 )
-                // Needed so `set_cursor_style` above refreshes as the pointer
-                // tracks across edge zones.
-                .on_mouse_move(|_, window, _| window.refresh())
+                // `set_cursor_style` above only takes effect on a draw, so
+                // refresh when the pointer crosses into a different edge zone
+                // (or leaves one) — but not on every move, which would force
+                // constant redraws and make queued focus transitions appear
+                // tied to mouse movement.
+                .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, _| {
+                    let size = window.window_bounds().get_bounds().size;
+                    if edge_changed(&mut this.last_edge, e.position, size) {
+                        window.refresh();
+                    }
+                }))
                 .on_mouse_down(MouseButton::Left, |e, window, _| {
                     let size = window.window_bounds().get_bounds().size;
                     if let Some(edge) = resize_edge(e.position, EDGE, size) {
@@ -104,6 +116,22 @@ fn titlebar(title: SharedString) -> impl IntoElement {
         })
 }
 
+/// Updates `last_edge` with the resize edge under `pos` and reports whether it
+/// changed — i.e. whether the edge cursor needs a redraw to update.
+fn edge_changed(
+    last_edge: &mut Option<ResizeEdge>,
+    pos: Point<Pixels>,
+    size: Size<Pixels>,
+) -> bool {
+    let edge = resize_edge(pos, EDGE, size);
+    if edge == *last_edge {
+        false
+    } else {
+        *last_edge = edge;
+        true
+    }
+}
+
 fn resize_edge(pos: Point<Pixels>, edge: Pixels, size: Size<Pixels>) -> Option<ResizeEdge> {
     let e = if pos.y < edge && pos.x < edge {
         ResizeEdge::TopLeft
@@ -133,5 +161,56 @@ fn cursor_for(edge: ResizeEdge) -> CursorStyle {
         ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
         ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorStyle::ResizeUpLeftDownRight,
         ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::size;
+
+    #[test]
+    fn refreshes_only_when_edge_zone_changes() {
+        let win = size(px(800.0), px(600.0));
+        let mut last_edge = None;
+
+        // Moves within the content area never request a redraw.
+        assert!(!edge_changed(
+            &mut last_edge,
+            point(px(400.0), px(300.0)),
+            win
+        ));
+        assert!(!edge_changed(
+            &mut last_edge,
+            point(px(410.0), px(310.0)),
+            win
+        ));
+
+        // Entering an edge zone requests one redraw...
+        assert!(edge_changed(&mut last_edge, point(px(2.0), px(300.0)), win));
+        assert_eq!(last_edge, Some(ResizeEdge::Left));
+        // ...and moving along the same edge does not request another.
+        assert!(!edge_changed(
+            &mut last_edge,
+            point(px(3.0), px(200.0)),
+            win
+        ));
+
+        // Crossing into a different zone (corner) redraws again.
+        assert!(edge_changed(&mut last_edge, point(px(2.0), px(2.0)), win));
+        assert_eq!(last_edge, Some(ResizeEdge::TopLeft));
+
+        // Leaving the edge zones redraws once so the cursor resets.
+        assert!(edge_changed(
+            &mut last_edge,
+            point(px(400.0), px(300.0)),
+            win
+        ));
+        assert_eq!(last_edge, None);
+        assert!(!edge_changed(
+            &mut last_edge,
+            point(px(401.0), px(300.0)),
+            win
+        ));
     }
 }
