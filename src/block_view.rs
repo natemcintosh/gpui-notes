@@ -436,4 +436,33 @@ mod tests {
 
         cx.read(|cx| assert!(!bv.read(cx).is_editing(), "Escape should exit edit mode"));
     }
+
+    /// Regression test for #39: entering edit mode and leaving it without
+    /// typing flushes identical text back to the page, which must not mark
+    /// the page dirty (and thus must not trigger a file rewrite).
+    #[gpui::test]
+    fn focus_and_blur_without_typing_keeps_page_clean(cx: &mut TestAppContext) {
+        let (page, bv, cx) = mount(cx, "- hi\n");
+
+        cx.update(|window, cx| {
+            let handle = bv.read(cx).focus_handle.clone();
+            window.focus(&handle, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.read(|cx| bv.read(cx).is_editing()),
+            "precondition: editing",
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(!bv.read(cx).is_editing(), "escape exits edit mode");
+            assert!(
+                !page.read(cx).dirty(),
+                "untouched focus/blur cycle must not dirty the page",
+            );
+        });
+    }
 }

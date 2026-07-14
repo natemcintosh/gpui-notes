@@ -896,6 +896,46 @@ mod tests {
         );
     }
 
+    /// Regression test for #39: cycling pages with ctrl-p focuses (and thus
+    /// mounts an editor on) the first block of each page and blurs it on the
+    /// next switch. With zero typing, no page may become dirty and no file
+    /// may be rewritten.
+    #[gpui::test]
+    fn invariant_ctrl_p_cycling_keeps_pages_clean(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_path = tmp.path().to_path_buf();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        // Home is the outgoing page on the first ctrl-p; its blur-flush is
+        // what used to set the bogus dirty flag.
+        let home = cx.read(|cx| cx.global::<CurrentPage>().get().unwrap().clone());
+        let home_path = root_path.join("pages").join("Home.md");
+        let mtime_before = std::fs::metadata(&home_path).unwrap().modified().unwrap();
+
+        for _ in 0..4 {
+            cx.simulate_keystrokes("ctrl-p");
+            cx.run_until_parked();
+            cx.read(|cx| {
+                assert!(
+                    !home.read(cx).dirty(),
+                    "Home marked dirty by mere page cycling",
+                );
+                let current = cx.global::<CurrentPage>().get().unwrap();
+                assert!(
+                    !current.read(cx).dirty(),
+                    "{:?} marked dirty by mere page cycling",
+                    current.read(cx).name(),
+                );
+            });
+        }
+
+        let mtime_after = std::fs::metadata(&home_path).unwrap().modified().unwrap();
+        assert_eq!(
+            mtime_before, mtime_after,
+            "Home.md rewritten with zero user edits",
+        );
+    }
+
     /// Page switch clears any active overlay. Verifies the broader
     /// invariant by stacking it: tag view open → picker open → select
     /// → overlay is None. The intermediate tag view exit and picker
