@@ -152,6 +152,27 @@ impl PageRegistry {
         Ok(())
     }
 
+    /// Saves every dirty open page. Attempts all pages even if one write
+    /// fails; the first error is returned after the sweep so a single bad
+    /// page cannot block the rest from persisting (#43).
+    ///
+    /// # Errors
+    /// Returns the first I/O error encountered, if any.
+    pub fn save_all(&mut self, cx: &mut App) -> io::Result<()> {
+        let pages: Vec<Entity<Page>> = self
+            .open
+            .values()
+            .map(|entry| entry.entity.clone())
+            .collect();
+        let mut first_err = None;
+        for page in &pages {
+            if let Err(err) = self.save(page, cx) {
+                first_err.get_or_insert(err);
+            }
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+
     #[must_use]
     pub fn source_for_page(&self, page: &Entity<Page>, cx: &App) -> TagSource {
         let name = page.read(cx).name().clone();
@@ -215,6 +236,22 @@ pub fn pick_next<'a>(
         .and_then(|c| names.iter().position(|n| n == c))
         .map_or(0, |i| (i + 1) % names.len());
     Some(&names[idx])
+}
+
+/// Registers an `on_app_quit` observer that saves every dirty open page.
+/// Quit is the one exit path with no other flush (#43): ctrl-s and page
+/// switch cover the rest. On Linux the default `QuitMode` quits when the
+/// last window closes, so this fires for both the window close button and
+/// explicit app quit.
+pub fn save_all_on_quit(cx: &mut App) {
+    cx.on_app_quit(|cx| {
+        let result = cx.update_global::<PageRegistry, io::Result<()>>(PageRegistry::save_all);
+        if let Err(err) = result {
+            eprintln!("quit-save failed: {err}");
+        }
+        async {}
+    })
+    .detach();
 }
 
 /// Saves the outgoing current page if dirty, opens `name` (creating if missing),
@@ -411,6 +448,38 @@ mod tests {
             let page = reg.open_or_create_journal(date, cx).unwrap();
             assert_eq!(page.read(cx).body().as_ref(), "- hello\n");
         });
+    }
+
+    /// Unit test for #43: `save_all` sweeps every open page, persisting the
+    /// dirty ones and leaving clean ones untouched on disk.
+    #[gpui::test]
+    fn save_all_saves_every_dirty_page(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        cx.update(|cx| {
+            let store = NotesStore::new(&root).unwrap();
+            store.write("clean", "- untouched\n").unwrap();
+            let mut reg = PageRegistry::new(store);
+            let a = reg.open_or_create("a", cx).unwrap();
+            let b = reg.open_or_create("b", cx).unwrap();
+            let clean = reg.open("clean", cx).unwrap();
+            a.update(cx, |p, cx| p.set_body_for_test("from-a", cx));
+            b.update(cx, |p, cx| p.set_body_for_test("from-b", cx));
+
+            reg.save_all(cx).unwrap();
+
+            assert!(!a.read(cx).dirty());
+            assert!(!b.read(cx).dirty());
+            assert!(!clean.read(cx).dirty());
+        });
+
+        let a = std::fs::read_to_string(root.join("pages/a.md")).unwrap();
+        let b = std::fs::read_to_string(root.join("pages/b.md")).unwrap();
+        let clean = std::fs::read_to_string(root.join("pages/clean.md")).unwrap();
+        assert_eq!(a, "- from-a\n");
+        assert_eq!(b, "- from-b\n");
+        assert_eq!(clean, "- untouched\n");
     }
 
     #[gpui::test]
