@@ -4,7 +4,41 @@
 //! through view implementations. Callers use semantic names rather than raw
 //! RGB values.
 
-use gpui::{rgb, rgba, Rgba};
+use gpui::{rgb, rgba, App, Rgba, SharedString};
+
+/// The app-wide UI font family.
+///
+/// GPUI's default `.SystemUIFont` maps to "IBM Plex Sans" on Linux — a font
+/// Zed bundles as an asset but this app doesn't ship — and when a family
+/// fails to resolve, gpui's fallback stack drops the requested weight/style,
+/// so bold/italic silently render as regular text. Picking a family that is
+/// actually installed lets the platform text system match its bold/italic
+/// faces.
+#[must_use]
+pub fn ui_font_family(cx: &App) -> SharedString {
+    if cfg!(target_os = "macos") {
+        ".SystemUIFont".into()
+    } else {
+        pick_ui_font(&cx.text_system().all_font_names())
+    }
+}
+
+/// Returns the first candidate family present in `installed`, falling back to
+/// `.SystemUIFont` when none is (no worse than gpui's default behavior).
+fn pick_ui_font(installed: &[String]) -> SharedString {
+    const CANDIDATES: [&str; 5] = [
+        "Adwaita Sans",
+        "Cantarell",
+        "Noto Sans",
+        "Ubuntu",
+        "DejaVu Sans",
+    ];
+    CANDIDATES
+        .into_iter()
+        .find(|candidate| installed.iter().any(|name| name == candidate))
+        .unwrap_or(".SystemUIFont")
+        .into()
+}
 
 #[must_use]
 pub fn window_bg() -> Rgba {
@@ -144,4 +178,21 @@ pub fn error_fg() -> Rgba {
 #[must_use]
 pub fn transparent() -> Rgba {
     rgba(0x0000_0000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_first_installed_candidate() {
+        let installed = vec!["DejaVu Sans".to_string(), "Cantarell".to_string()];
+        assert_eq!(pick_ui_font(&installed).as_ref(), "Cantarell");
+    }
+
+    #[test]
+    fn falls_back_to_system_ui_font_when_no_candidate_installed() {
+        let installed = vec!["Comic Sans MS".to_string()];
+        assert_eq!(pick_ui_font(&installed).as_ref(), ".SystemUIFont");
+    }
 }

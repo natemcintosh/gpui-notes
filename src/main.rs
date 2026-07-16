@@ -112,6 +112,8 @@ struct RootView {
     _tag_observer: Subscription,
     _error_observer: Subscription,
     debug_hud: bool,
+    /// Resolved once at startup; see `theme::ui_font_family`.
+    ui_font: SharedString,
 }
 
 impl RootView {
@@ -126,6 +128,7 @@ impl RootView {
             _tag_observer: tag_observer,
             _error_observer: error_observer,
             debug_hud: std::env::var("GPUI_NOTES_DEBUG_HUD").is_ok_and(|value| value == "1"),
+            ui_font: theme::ui_font_family(cx),
         }
     }
 
@@ -553,6 +556,7 @@ impl Render for RootView {
             .flex_col()
             .size_full()
             .bg(theme::window_bg())
+            .font_family(self.ui_font.clone())
             .p_4()
             .gap_2();
         root.text_style().font_fallbacks = Some(text_input::emoji_font_fallbacks());
