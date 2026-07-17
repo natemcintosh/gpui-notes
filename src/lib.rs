@@ -1,8 +1,8 @@
 #![allow(clippy::unreadable_literal)]
 
 /// The platform's primary modifier for keybindings: `cmd` on macOS, `ctrl`
-/// elsewhere. Every `bind_keys` site and user-facing shortcut label must go
-/// through this so bindings and documentation stay in sync per platform.
+/// elsewhere. Every platform-specific `bind_keys` site goes through this;
+/// shortcut UI renders the registered keystrokes themselves at runtime.
 #[must_use]
 pub fn cmd_key() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -21,6 +21,8 @@ pub mod outline_view;
 pub mod page;
 pub mod page_picker;
 pub mod registry;
+pub mod shortcut_bar;
+pub mod shortcut_hints;
 pub mod store;
 pub mod tags;
 pub mod text_input;

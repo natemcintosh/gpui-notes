@@ -15,6 +15,8 @@ use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
 use gpui_notes::registry::{
     pick_next, save_all_on_quit, set_current_page, CurrentPage, PageRegistry,
 };
+use gpui_notes::shortcut_bar::{ShortcutBar, ShortcutOverlay};
+use gpui_notes::shortcut_hints::{self, ShortcutHint};
 use gpui_notes::store::NotesStore;
 use gpui_notes::tags::{self, OpenTag, TagIndex, TagSource};
 use gpui_notes::text_input;
@@ -34,29 +36,6 @@ actions!(
     ]
 );
 
-/// Cheatsheet shown in the shortcuts overlay. The strings here are the only
-/// place the bindings are documented to the user — keep in sync with the
-/// `cx.bind_keys(...)` block in `main` and the `bind_keys` fns of
-/// `block_view`/`outline_view`. Labels derive from the same platform
-/// modifier as the bindings, so macOS shows `cmd-*`.
-fn shortcuts() -> Vec<(String, &'static str)> {
-    let cmd = cmd_key();
-    vec![
-        (format!("{cmd}-o"), "Open page…"),
-        (format!("{cmd}-p"), "Cycle to next page"),
-        (format!("{cmd}-."), "Jump to today's journal"),
-        (format!("{cmd}-s"), "Save current page"),
-        ("escape".to_string(), "Close overlay / stop editing"),
-        (format!("{cmd}-/"), "Show this help"),
-        ("enter".to_string(), "Edit focused block"),
-        ("up / down".to_string(), "Move focus between blocks"),
-        ("tab / shift-tab".to_string(), "Indent / outdent block"),
-        ("alt-up / alt-down".to_string(), "Move block up / down"),
-        (format!("{cmd}-enter"), "Collapse / expand block"),
-        ("backspace".to_string(), "Delete empty block"),
-    ]
-}
-
 /// The four mutually-exclusive top-level UI modes. Encoding them as a single
 /// enum keeps overlay invariants (only one open at a time) unrepresentable as
 /// invalid states, and gives transition tests a single field to assert on.
@@ -72,7 +51,9 @@ pub enum OverlayMode {
         entity: Entity<PagePicker>,
         _sub: Subscription,
     },
-    ShortcutsHelp,
+    ShortcutsHelp {
+        hints: Vec<ShortcutHint>,
+    },
 }
 
 impl OverlayMode {
@@ -101,12 +82,23 @@ impl OverlayMode {
 
     #[must_use]
     pub fn is_shortcuts(&self) -> bool {
-        matches!(self, Self::ShortcutsHelp)
+        matches!(self, Self::ShortcutsHelp { .. })
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn shortcut_hints(&self) -> Option<&[ShortcutHint]> {
+        if let Self::ShortcutsHelp { hints } = self {
+            Some(hints)
+        } else {
+            None
+        }
     }
 }
 
 struct RootView {
     focus_handle: FocusHandle,
+    shortcut_bar: Entity<ShortcutBar>,
     overlay: OverlayMode,
     _current_observer: Subscription,
     _tag_observer: Subscription,
@@ -117,12 +109,13 @@ struct RootView {
 }
 
 impl RootView {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let current_observer = cx.observe_global::<CurrentPage>(|_, cx| cx.notify());
         let tag_observer = cx.observe_global::<TagIndex>(|_, cx| cx.notify());
         let error_observer = cx.observe_global::<LastError>(|_, cx| cx.notify());
         Self {
             focus_handle: cx.focus_handle(),
+            shortcut_bar: cx.new(|cx| ShortcutBar::new(window, cx)),
             overlay: OverlayMode::None,
             _current_observer: current_observer,
             _tag_observer: tag_observer,
@@ -146,7 +139,7 @@ impl RootView {
             OverlayMode::PagePicker { entity, .. } => {
                 entity.update(cx, |picker, cx| picker.focus_input(window, cx));
             }
-            OverlayMode::TagResults(_) | OverlayMode::ShortcutsHelp => {
+            OverlayMode::TagResults(_) | OverlayMode::ShortcutsHelp { .. } => {
                 window.focus(&self.focus_handle, cx);
             }
             OverlayMode::None => {
@@ -229,11 +222,13 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(self.overlay, OverlayMode::ShortcutsHelp) {
+        if matches!(self.overlay, OverlayMode::ShortcutsHelp { .. }) {
             self.overlay = OverlayMode::None;
             self.park_focus(window, cx);
         } else {
-            self.overlay = OverlayMode::ShortcutsHelp;
+            self.overlay = OverlayMode::ShortcutsHelp {
+                hints: shortcut_hints::for_focused(window, cx),
+            };
             self.park_focus(window, cx);
         }
         cx.notify();
@@ -320,53 +315,6 @@ impl RootView {
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| errors::dismiss(cx)),
             )
-            .into_any_element()
-    }
-
-    fn render_shortcuts_overlay() -> gpui::AnyElement {
-        let mut list = div().flex().flex_col().gap_1();
-        for (keys, label) in shortcuts() {
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .min_w(px(96.0))
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(theme::bg_subtle())
-                            .text_color(theme::row_selected_fg())
-                            .child(SharedString::from(keys)),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme::header_fg())
-                            .child(SharedString::from(label)),
-                    ),
-            );
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .bg(theme::overlay_bg())
-            .border_1()
-            .border_color(theme::overlay_border())
-            .rounded_md()
-            .p_4()
-            .min_w(px(360.0))
-            .child(
-                div()
-                    .text_color(theme::overlay_title_fg())
-                    .text_size(px(14.))
-                    .child("Keyboard shortcuts"),
-            )
-            .child(list)
             .into_any_element()
     }
 
@@ -503,7 +451,9 @@ impl RootView {
     fn debug_hud_text(&self, window: &Window, cx: &App) -> String {
         let (focus_target, block_mode) = match &self.overlay {
             OverlayMode::PagePicker { .. } => ("page picker input", "not applicable"),
-            OverlayMode::TagResults(_) | OverlayMode::ShortcutsHelp => ("root", "not applicable"),
+            OverlayMode::TagResults(_) | OverlayMode::ShortcutsHelp { .. } => {
+                ("root", "not applicable")
+            }
             OverlayMode::None => {
                 let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
                     return "focus: root · block: no page".to_string();
@@ -562,7 +512,14 @@ impl Render for RootView {
         root.text_style().font_fallbacks = Some(text_input::emoji_font_fallbacks());
 
         let Some(page) = current else {
-            return root.child(div().text_color(theme::header_fg()).child("No page open."));
+            return root
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme::header_fg())
+                        .child("No page open."),
+                )
+                .child(self.shortcut_bar.clone());
         };
 
         let (name, dirty, view) = {
@@ -596,11 +553,14 @@ impl Render for RootView {
             root.child(Self::render_tag_results(&tag, cx))
         } else {
             root.child(view)
-        };
+        }
+        .child(self.shortcut_bar.clone());
 
         let overlay_child: Option<gpui::AnyElement> = match &self.overlay {
             OverlayMode::PagePicker { entity, .. } => Some(entity.clone().into_any_element()),
-            OverlayMode::ShortcutsHelp => Some(Self::render_shortcuts_overlay()),
+            OverlayMode::ShortcutsHelp { hints } => {
+                Some(ShortcutOverlay::new(hints.clone()).into_any_element())
+            }
             OverlayMode::None | OverlayMode::TagResults(_) => None,
         };
 
@@ -636,11 +596,10 @@ fn main() {
             KeyBinding::new(&format!("{cmd}-."), JumpToToday, Some("RootView")),
             KeyBinding::new(&format!("{cmd}-o"), OpenPagePicker, Some("RootView")),
             KeyBinding::new("escape", CloseTagView, Some("RootView")),
-            // A bare `?` here would shadow typing `?` in every text input
-            // (#45) — gpui matches bindings along the whole focus path
-            // before falling through to input, so the trigger must be a
-            // modifier chord.
-            KeyBinding::new(&format!("{cmd}-/"), ToggleShortcuts, Some("RootView")),
+            // GPUI matches predicates against the whole focus path, so the
+            // explicit negation preserves literal `?` input (#45).
+            KeyBinding::new("?", ToggleShortcuts, Some("RootView && !TextInput")),
+            KeyBinding::new(&format!("{cmd}-/"), ToggleShortcuts, None),
         ]);
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
@@ -660,7 +619,7 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                let root = cx.new(RootView::new);
+                let root = cx.new(|cx| RootView::new(window, cx));
                 root.update(cx, |view, cx| view.park_focus(window, cx));
                 cx.activate(true);
                 cx.new(|_| WindowFrame::new("GPUI Notes", root))
@@ -681,18 +640,19 @@ mod tests {
         tmp: &TempDir,
     ) -> (Entity<RootView>, &'a mut VisualTestContext) {
         let root_dir = tmp.path().to_path_buf();
-        let (root, vcx) = cx.add_window_view(move |_window, cx| {
+        let (root, vcx) = cx.add_window_view(move |window, cx| {
             text_input::bind_keys(cx);
             block_view::bind_keys(cx);
             outline_view::bind_keys(cx);
             page_picker::bind_keys(cx);
             cx.bind_keys([
-                KeyBinding::new("escape", CloseTagView, Some("RootView")),
-                KeyBinding::new("ctrl-o", OpenPagePicker, Some("RootView")),
+                KeyBinding::new("ctrl-s", SavePage, Some("RootView")),
                 KeyBinding::new("ctrl-p", NextPage, Some("RootView")),
                 KeyBinding::new("ctrl-.", JumpToToday, Some("RootView")),
-                KeyBinding::new("ctrl-s", SavePage, Some("RootView")),
-                KeyBinding::new("ctrl-/", ToggleShortcuts, Some("RootView")),
+                KeyBinding::new("ctrl-o", OpenPagePicker, Some("RootView")),
+                KeyBinding::new("escape", CloseTagView, Some("RootView")),
+                KeyBinding::new("?", ToggleShortcuts, Some("RootView && !TextInput")),
+                KeyBinding::new("ctrl-/", ToggleShortcuts, None),
             ]);
             let store = NotesStore::new(&root_dir).unwrap();
             store.write("Home", "- home\n").unwrap();
@@ -703,7 +663,7 @@ mod tests {
             cx.set_global(LastError::default());
             save_all_on_quit(cx);
             set_current_page("Home", cx).unwrap();
-            RootView::new(cx)
+            RootView::new(window, cx)
         });
         vcx.update(|window, cx| {
             window.activate_window();
@@ -812,9 +772,112 @@ mod tests {
         assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
     }
 
+    #[gpui::test]
+    fn shortcut_hints_follow_the_focused_dispatch_stack(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        let viewing_hints = cx.update(|window, cx| shortcut_hints::for_focused(window, cx));
+        for action_name in [
+            "gpui_notes::SavePage",
+            "gpui_notes::NextPage",
+            "gpui_notes::JumpToToday",
+        ] {
+            assert!(
+                viewing_hints
+                    .iter()
+                    .any(|hint| hint.action_name == action_name),
+                "missing active root binding for {action_name}: {viewing_hints:?}",
+            );
+        }
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let (editing_hints, editing_contexts) = cx.update(|window, cx| {
+            (
+                shortcut_hints::for_focused(window, cx),
+                window.context_stack(),
+            )
+        });
+        assert!(
+            editing_hints
+                .iter()
+                .any(|hint| hint.action_name == "text_input::Backspace"),
+            "focused TextInput bindings should be discoverable in {editing_contexts:?}: {editing_hints:?}",
+        );
+        assert!(
+            editing_hints
+                .iter()
+                .any(|hint| hint.action_name == "gpui_notes::SavePage"),
+            "ancestor RootView bindings must remain discoverable: {editing_hints:?}",
+        );
+    }
+
+    #[gpui::test]
+    fn shortcuts_overlay_keeps_the_editing_context_snapshot(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-/");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let hints = root
+                .read(cx)
+                .overlay()
+                .shortcut_hints()
+                .expect("shortcuts overlay should be open");
+            assert!(
+                hints
+                    .iter()
+                    .any(|hint| hint.action_name == "text_input::Backspace"),
+                "overlay opened mid-edit must include text bindings: {hints:?}",
+            );
+            assert!(
+                hints
+                    .iter()
+                    .any(|hint| hint.action_name == "gpui_notes::SavePage"),
+                "overlay must include bindings inherited from RootView: {hints:?}",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn newly_registered_binding_appears_without_hint_metadata(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|_, cx| {
+            cx.bind_keys([KeyBinding::new("ctrl-shift-s", SavePage, Some("RootView"))]);
+        });
+        cx.run_until_parked();
+
+        let hints = cx.update(|window, cx| shortcut_hints::for_focused(window, cx));
+        assert!(
+            hints.iter().any(|hint| {
+                hint.keystroke == "ctrl-shift-S" && hint.action_name == "gpui_notes::SavePage"
+            }),
+            "runtime keymap addition should appear automatically: {hints:?}",
+        );
+    }
+
+    #[gpui::test]
+    fn question_mark_opens_shortcuts_outside_text_input(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("?");
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| root.read(cx).overlay().is_shortcuts()));
+    }
+
     /// Regression test for #45: a bare `?` (shift-/) while a block is being
     /// edited must reach the text input as a typed character. The old
-    /// `shift-/` → `ToggleShortcuts` binding on `RootView` shadowed it —
+    /// unqualified `shift-/` → `ToggleShortcuts` binding shadowed it —
     /// gpui matches bindings along the whole focus path before falling
     /// through to input, and `RootView` is an ancestor of every input.
     #[gpui::test]
