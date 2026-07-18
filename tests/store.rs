@@ -58,6 +58,7 @@ fn successful_write_leaves_no_tmp_file() {
 #[case::parent_dir("..")]
 #[case::current_dir(".")]
 #[case::hidden_dotfile(".hidden")]
+#[case::url("https://example.com")]
 fn invalid_names_are_rejected(#[case] bad: &str) {
     let (_tmp, store) = new_store();
     let err = store.write(bad, "x").unwrap_err();

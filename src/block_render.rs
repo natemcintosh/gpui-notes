@@ -97,10 +97,18 @@ pub fn lower(text: &str, extensions: &[&dyn InlineExtension]) -> Vec<BlockNode> 
     // Parallel stack describing what each inline buffer is for.
     let mut inline_ctx: Vec<InlineCtx> = Vec::new();
     let mut style_stack: Vec<Style> = vec![Style::default()];
+    // pulldown-cmark may split bracket-heavy plain text into adjacent `Text`
+    // events (for example, `[[Page]]` arrives as five events). Extensions
+    // operate on logical text runs, so coalesce those events until a real
+    // markdown boundary is encountered.
+    let mut pending_text: Option<(String, Style)> = None;
 
     let mut code_block: Option<(Option<SharedString>, String)> = None;
 
     for event in parser {
+        if !matches!(&event, Event::Text(_)) {
+            flush_pending_text(&mut pending_text, &mut inline_stack, extensions);
+        }
         match event {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
@@ -191,8 +199,15 @@ pub fn lower(text: &str, extensions: &[&dyn InlineExtension]) -> Vec<BlockNode> 
                 }
                 let style = style_stack.last().copied().unwrap_or_default();
                 let text: String = s.into_string();
-                for node in apply_extensions(&text, style, extensions) {
-                    push_inline(&mut inline_stack, node);
+                match pending_text.as_mut() {
+                    Some((pending, pending_style)) if *pending_style == style => {
+                        pending.push_str(&text);
+                    }
+                    Some(_) => {
+                        flush_pending_text(&mut pending_text, &mut inline_stack, extensions);
+                        pending_text = Some((text, style));
+                    }
+                    None => pending_text = Some((text, style)),
                 }
             }
             Event::Code(s) => {
@@ -213,6 +228,7 @@ pub fn lower(text: &str, extensions: &[&dyn InlineExtension]) -> Vec<BlockNode> 
             _ => {}
         }
     }
+    flush_pending_text(&mut pending_text, &mut inline_stack, extensions);
 
     blocks
 }
@@ -245,6 +261,19 @@ fn push_inline(stack: &mut [Vec<InlineNode>], node: InlineNode) {
         top.push(node);
     }
     // Top-level text outside any paragraph (rare with pulldown-cmark) is dropped.
+}
+
+fn flush_pending_text(
+    pending: &mut Option<(String, Style)>,
+    inline_stack: &mut [Vec<InlineNode>],
+    extensions: &[&dyn InlineExtension],
+) {
+    let Some((text, style)) = pending.take() else {
+        return;
+    };
+    for node in apply_extensions(&text, style, extensions) {
+        push_inline(inline_stack, node);
+    }
 }
 
 fn push_block(roots: &mut Vec<BlockNode>, quote_stack: &mut [Vec<BlockNode>], block: BlockNode) {

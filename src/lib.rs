@@ -19,6 +19,7 @@ pub mod journal;
 pub mod outline;
 pub mod outline_view;
 pub mod page;
+pub mod page_links;
 pub mod page_picker;
 pub mod registry;
 pub mod shortcut_bar;

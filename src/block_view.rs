@@ -21,6 +21,7 @@ use gpui::{
 use crate::block_render::{render_block, theme};
 use crate::outline::BlockId;
 use crate::page::Page;
+use crate::page_links::{LinkIndex, PageLinkExt};
 use crate::tags::TagExt;
 use crate::text_input::{TextInput, TextInputEvent};
 
@@ -73,6 +74,8 @@ pub struct BlockView {
     /// Re-render on wrapper blur so the focus ring clears (#42).
     _on_self_blur: Subscription,
     _page_sub: Subscription,
+    /// Missing/existing page-link styling changes when targets are created.
+    _link_index_sub: Option<Subscription>,
 }
 
 impl BlockView {
@@ -90,6 +93,9 @@ impl BlockView {
         // Re-render when the page outline changes (e.g., another block was
         // edited) so our rendered markdown stays current.
         let page_sub = cx.observe(&page, |_, _, cx| cx.notify());
+        let link_index_sub = cx
+            .has_global::<LinkIndex>()
+            .then(|| cx.observe_global::<LinkIndex>(|_, cx| cx.notify()));
 
         Self {
             block_id,
@@ -99,6 +105,7 @@ impl BlockView {
             _on_focus: on_focus,
             _on_self_blur: on_self_blur,
             _page_sub: page_sub,
+            _link_index_sub: link_index_sub,
         }
     }
 
@@ -237,8 +244,10 @@ impl Render for BlockView {
                     .child(SharedString::from("(empty — click to edit)"))
                     .into_any_element()
             } else {
+                let page_link_ext = PageLinkExt;
                 let tag_ext = TagExt;
-                let extensions: [&dyn crate::block_render::InlineExtension; 1] = [&tag_ext];
+                let extensions: [&dyn crate::block_render::InlineExtension; 2] =
+                    [&page_link_ext, &tag_ext];
                 render_block(&text, &extensions, window, cx)
             }
         };
@@ -496,6 +505,21 @@ mod tests {
             assert!(
                 !bv.read(cx).is_editing(),
                 "tag mouse-down should not bubble into block editing",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_page_link_does_not_enter_editing(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = mount(cx, "- [[Target]] trailing text\n");
+
+        cx.simulate_click(point(px(8.0), px(10.0)), Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                !bv.read(cx).is_editing(),
+                "page-link mouse-down should not bubble into block editing",
             );
         });
     }
