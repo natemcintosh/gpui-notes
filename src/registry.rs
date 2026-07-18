@@ -5,6 +5,7 @@ use chrono::NaiveDate;
 use gpui::{App, AppContext, BorrowAppContext, Entity, Global, SharedString};
 
 use crate::page::Page;
+use crate::page_links;
 use crate::store::NotesStore;
 use crate::tags::{self, TagSource};
 
@@ -154,6 +155,9 @@ impl PageRegistry {
         }
         page.update(cx, Page::mark_saved);
         tags::reindex_global_for_page(page, &key.source(), cx);
+        if matches!(key, PageKey::Page(_)) {
+            page_links::reindex_global_for_page(page, cx);
+        }
         Ok(())
     }
 
@@ -192,9 +196,13 @@ impl PageRegistry {
 
     fn insert(&mut self, key: PageKey, body: &str, cx: &mut App) -> Entity<Page> {
         let source = key.source();
+        let is_regular_page = matches!(key, PageKey::Page(_));
         let page = cx.new(|cx| Page::new(key.display_name(), body, cx));
         self.open.insert(key, page.clone());
         tags::reindex_global_for_page(&page, &source, cx);
+        if is_regular_page {
+            page_links::reindex_global_for_page(&page, cx);
+        }
         page
     }
 }
@@ -273,6 +281,7 @@ pub fn set_current_page(name: &str, cx: &mut App) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::page::PageEvent;
+    use crate::page_links::LinkIndex;
     use crate::tags::TagIndex;
     use gpui::TestAppContext;
     use tempfile::TempDir;
@@ -395,6 +404,34 @@ mod tests {
             let index = cx.global::<TagIndex>();
             assert!(index.blocks_for_tag("stale").is_empty());
             assert_eq!(index.blocks_for_tag("fresh").len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn open_create_and_save_refresh_link_index(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        cx.update(|cx| {
+            let store = NotesStore::new(&root).unwrap();
+            store.write("A", "- [[B]]\n").unwrap();
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            let mut reg = PageRegistry::new(store);
+
+            let page_a = reg.open("A", cx).unwrap();
+            assert_eq!(cx.global::<LinkIndex>().backlinks("B").len(), 1);
+            assert!(!cx.global::<LinkIndex>().page_exists("B"));
+
+            reg.open_or_create("B", cx).unwrap();
+            assert!(cx.global::<LinkIndex>().page_exists("B"));
+
+            let first = page_a.read(cx).outline().first_block_id().unwrap();
+            page_a.update(cx, |page, cx| page.set_block_text(first, "[[C]]", cx));
+            reg.save(&page_a, cx).unwrap();
+
+            let index = cx.global::<LinkIndex>();
+            assert!(index.backlinks("B").is_empty());
+            assert_eq!(index.backlinks("C").len(), 1);
         });
     }
 

@@ -11,6 +11,7 @@ use gpui_notes::errors::{self, LastError};
 use gpui_notes::journal;
 use gpui_notes::outline_view;
 use gpui_notes::page::Page;
+use gpui_notes::page_links::{LinkIndex, OpenPage};
 use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
 use gpui_notes::registry::{
     pick_next, save_all_on_quit, set_current_page, CurrentPage, PageRegistry,
@@ -199,6 +200,16 @@ impl RootView {
     fn open_tag(&mut self, action: &OpenTag, window: &mut Window, cx: &mut Context<Self>) {
         Self::reindex_current_page(cx);
         self.overlay = OverlayMode::TagResults(action.name.clone());
+        self.park_focus(window, cx);
+        cx.notify();
+    }
+
+    fn open_page(&mut self, action: &OpenPage, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = set_current_page(action.name.as_ref(), cx) {
+            errors::report(format!("open {:?} failed: {err}", action.name), cx);
+            return;
+        }
+        self.overlay = OverlayMode::None;
         self.park_focus(window, cx);
         cx.notify();
     }
@@ -498,6 +509,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::next_page))
             .on_action(cx.listener(Self::jump_to_today))
             .on_action(cx.listener(Self::open_tag))
+            .on_action(cx.listener(Self::open_page))
             .on_action(cx.listener(Self::close_tag_view))
             .on_action(cx.listener(Self::open_page_picker))
             .on_action(cx.listener(Self::toggle_shortcuts))
@@ -605,7 +617,9 @@ fn main() {
         let root_dir = NotesStore::default_root().expect("resolve notes root");
         let store = NotesStore::new(root_dir).expect("init notes store");
         let tag_index = TagIndex::rebuild_from(&store).expect("index tags");
+        let link_index = LinkIndex::rebuild_from(&store).expect("index page links");
         cx.set_global(tag_index);
+        cx.set_global(link_index);
         cx.set_global(PageRegistry::new(store));
         cx.set_global(CurrentPage::default());
         cx.set_global(LastError::default());
@@ -658,6 +672,7 @@ mod tests {
             store.write("Home", "- home\n").unwrap();
             store.write("Tagged", "- has #todo\n").unwrap();
             cx.set_global(TagIndex::rebuild_from(&store).unwrap());
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());
@@ -719,6 +734,63 @@ mod tests {
             assert_eq!(current.read(cx).name().as_ref(), "Tagged");
             assert!(root.read(cx).overlay().is_none());
         });
+    }
+
+    #[gpui::test]
+    fn open_page_action_creates_missing_target_and_navigates(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.open_page(
+                    &OpenPage {
+                        name: "New Target".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            assert_eq!(current.read(cx).name().as_ref(), "New Target");
+            assert!(cx.global::<LinkIndex>().page_exists("New Target"));
+            assert!(root.read(cx).overlay().is_none());
+        });
+        assert!(tmp.path().join("pages/New Target.md").is_file());
+    }
+
+    #[gpui::test]
+    fn invalid_open_page_action_is_non_destructive_and_reports_error(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.open_page(
+                    &OpenPage {
+                        name: "https://example.com".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            assert_eq!(current.read(cx).name().as_ref(), "Home");
+            assert!(cx.global::<LastError>().get().is_some());
+            assert!(!cx.global::<LinkIndex>().page_exists("https://example.com"));
+        });
+        assert_eq!(
+            NotesStore::new(tmp.path()).unwrap().list().unwrap(),
+            vec!["Home", "Tagged"],
+        );
     }
 
     /// Escape on the tag-results view returns to the previous page. Regression

@@ -177,7 +177,8 @@ fn atomic_write(final_path: &Path, body: &str) -> io::Result<()> {
 }
 
 fn validate_name(name: &str) -> io::Result<()> {
-    let invalid = name.is_empty() || name.starts_with('.') || name.contains('\\');
+    let invalid =
+        name.is_empty() || name.starts_with('.') || name.contains('\\') || name.contains("://");
     if invalid {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
