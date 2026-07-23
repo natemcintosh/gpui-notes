@@ -922,16 +922,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (_root, cx) = mount_root(cx, &tmp);
 
+        let save_binding_count = cx
+            .update(|window, cx| shortcut_hints::for_focused(window, cx))
+            .iter()
+            .filter(|hint| hint.action_name == "gpui_notes::SavePage")
+            .count();
         cx.update(|_, cx| {
             cx.bind_keys([KeyBinding::new("ctrl-shift-s", SavePage, Some("RootView"))]);
         });
         cx.run_until_parked();
 
         let hints = cx.update(|window, cx| shortcut_hints::for_focused(window, cx));
-        assert!(
-            hints.iter().any(|hint| {
-                hint.keystroke == "ctrl-shift-S" && hint.action_name == "gpui_notes::SavePage"
-            }),
+        assert_eq!(
+            hints
+                .iter()
+                .filter(|hint| hint.action_name == "gpui_notes::SavePage")
+                .count(),
+            save_binding_count + 1,
             "runtime keymap addition should appear automatically: {hints:?}",
         );
     }

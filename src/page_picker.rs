@@ -391,6 +391,39 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn shifted_vertical_arrows_remain_unbound(cx: &mut TestAppContext) {
+        let (picker, vcx) = cx.add_window_view(|_window, cx| {
+            text_input::bind_keys(cx);
+            bind_keys(cx);
+            PagePicker::new(entries(), cx)
+        });
+        vcx.update(|window, cx| {
+            window.activate_window();
+            let input_focus = picker.read(cx).input().focus_handle(cx);
+            window.focus(&input_focus, cx);
+        });
+        vcx.run_until_parked();
+
+        vcx.simulate_keystrokes("shift-down shift-up");
+        vcx.run_until_parked();
+        picker.read_with(vcx, |picker, _| {
+            assert_eq!(
+                picker.selected, 0,
+                "shifted vertical arrows must not move picker results",
+            );
+        });
+
+        vcx.simulate_keystrokes("down");
+        vcx.run_until_parked();
+        picker.read_with(vcx, |picker, _| {
+            assert_eq!(
+                picker.selected, 1,
+                "plain down remains available to the picker",
+            );
+        });
+    }
+
     struct SelectionRecorder {
         events: Vec<PagePickerEvent>,
         _sub: Subscription,

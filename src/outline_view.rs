@@ -775,17 +775,31 @@ mod tests {
             assert!(bv.read(cx).is_editing(), "precondition: editing");
         });
 
-        cx.simulate_keystrokes("tab up");
+        cx.simulate_keystrokes("up down shift-up shift-down");
         cx.run_until_parked();
 
         cx.read(|cx| {
-            let outline = page.read(cx).outline();
-            assert_eq!(outline.roots.len(), 2, "tab mid-edit must not indent");
             let bv = ov.read(cx).block_view(b).expect("b mounted").clone();
             assert!(
                 bv.read(cx).is_editing(),
-                "up mid-edit must not move focus out of the editor",
+                "vertical movement mid-edit must not move focus out of the editor",
             );
+            let input = bv
+                .read(cx)
+                .input_entity_for_test()
+                .expect("input remains mounted");
+            assert_eq!(
+                input.read(cx).selected_range(),
+                1..1,
+                "unsupported vertical movement must not disturb the caret",
+            );
+        });
+
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            assert_eq!(outline.roots.len(), 2, "tab mid-edit must not indent");
         });
     }
 

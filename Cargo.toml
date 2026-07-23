@@ -13,6 +13,7 @@ dirs = "5"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 pulldown-cmark = { version = "0.11", default-features = false }
 regex = "1"
+unicode-segmentation = "1.13.2"
 
 # font-kit is required on macOS — without it gpui_macos falls back to a
 # NoopTextSystem and text never paints. See README "GPUI dependency".

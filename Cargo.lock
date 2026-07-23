@@ -2175,6 +2175,7 @@ dependencies = [
  "rstest",
  "smallvec",
  "tempfile",
+ "unicode-segmentation",
 ]
 
 [[package]]
