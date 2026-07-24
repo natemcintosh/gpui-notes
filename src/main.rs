@@ -33,7 +33,8 @@ actions!(
         JumpToToday,
         CloseTagView,
         OpenPagePicker,
-        ToggleShortcuts
+        ToggleShortcuts,
+        Quit
     ]
 );
 
@@ -612,7 +613,9 @@ fn main() {
             // explicit negation preserves literal `?` input (#45).
             KeyBinding::new("?", ToggleShortcuts, Some("RootView && !TextInput")),
             KeyBinding::new(&format!("{cmd}-/"), ToggleShortcuts, None),
+            KeyBinding::new(&format!("{cmd}-q"), Quit, None),
         ]);
+        cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
         let store = NotesStore::new(root_dir).expect("init notes store");
