@@ -580,12 +580,12 @@ impl TextInput {
         VerticalMovementOutcome::Moved
     }
 
-    fn apply_pending_vertical_placement(&mut self, cx: &mut Context<Self>) {
-        let (Some(placement), Some(bounds), Some(layout)) = (
-            self.pending_vertical_placement.take(),
-            self.last_bounds,
-            self.last_layout.as_ref(),
-        ) else {
+    /// Resolve a queued cross-block landing spot against the layout of the
+    /// frame being drawn. Called from `prepaint`, before the caret quad is
+    /// built: a freshly mounted editor starts with its caret at end-of-content,
+    /// so applying this any later paints one frame at the wrong column.
+    fn apply_pending_vertical_placement(&mut self, layout: &CachedLayout, bounds: Bounds<Pixels>) {
+        let Some(placement) = self.pending_vertical_placement.take() else {
             return;
         };
         let row = match placement.row {
@@ -597,7 +597,6 @@ impl TextInput {
         self.selection.collapse(offset);
         self.caret_affinity = affinity;
         self.preferred_screen_x = Some(placement.preferred_screen_x);
-        cx.notify();
     }
 
     fn apply_edit(
@@ -915,14 +914,17 @@ impl Element for TextElement {
         _: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let input = self.input.read(cx);
-        let selected_range = input.selection.range();
-        let cursor = input.cursor_offset();
         let (line, line_height) = measured
             .borrow_mut()
             .take()
             .expect("measured text layout should be available during prepaint");
         let layout = CachedLayout { line, line_height };
+        self.input.update(cx, |input, _| {
+            input.apply_pending_vertical_placement(&layout, bounds);
+        });
+        let input = self.input.read(cx);
+        let selected_range = input.selection.range();
+        let cursor = input.cursor_offset();
         let cursor_pos = layout.position_for_caret(cursor, input.caret_affinity);
         let (selection, cursor) = if selected_range.is_empty() {
             (
@@ -981,10 +983,9 @@ impl Element for TextElement {
             }
         }
 
-        self.input.update(cx, |input, cx| {
+        self.input.update(cx, |input, _| {
             input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
-            input.apply_pending_vertical_placement(cx);
         });
     }
 }

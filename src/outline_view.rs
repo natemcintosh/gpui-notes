@@ -837,6 +837,15 @@ mod tests {
                     .map(|row_count| row_count - 1),
                 "Up enters the previous block on its last visual row",
             );
+            let destination_x = input
+                .cursor_screen_position_for_test()
+                .expect("destination cursor")
+                .x;
+            assert!(
+                (destination_x - clamped_x).abs() <= px(8.),
+                "Up lands on the sticky column, clamped by the short last row: \
+                 clamped={clamped_x:?}, destination={destination_x:?}",
+            );
         });
     }
 
