@@ -415,7 +415,7 @@ fn render_inlines(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let mut wrap = div().flex().flex_wrap();
+    let mut wrap = div().flex().flex_wrap().min_w_0();
     for node in nodes {
         wrap = wrap.child(render_inline(node, ctx, window, cx));
     }
@@ -431,6 +431,7 @@ fn render_inline(
     match node {
         InlineNode::Text { text, style } => styled_span(text, style),
         InlineNode::Code(text) => div()
+            .min_w_0()
             .font_family("monospace")
             .bg(theme::bg_subtle())
             .px_1()
@@ -443,6 +444,7 @@ fn render_inline(
             let href = url.clone();
             let mut wrap = div()
                 .id(id)
+                .min_w_0()
                 .cursor_pointer()
                 .text_color(theme::accent())
                 .underline()
@@ -469,7 +471,10 @@ fn render_inline(
 }
 
 fn styled_span(text: String, style: Style) -> AnyElement {
-    let mut d = div().child(SharedString::from(text));
+    // `min_w_0` overrides flex's `min-width: auto`, which would otherwise pin
+    // the span to its unwrapped text width — the text inside only rewraps once
+    // its container width is definite.
+    let mut d = div().min_w_0().child(SharedString::from(text));
     if style.bold {
         d = d.font_weight(FontWeight::BOLD);
     }
@@ -695,7 +700,7 @@ mod runtime_tests {
 
     use super::*;
     use gpui::{
-        point, BorrowAppContext, Context, Entity, Global, Modifiers, Render, TestAppContext,
+        point, size, BorrowAppContext, Context, Entity, Global, Modifiers, Render, TestAppContext,
         VisualTestContext,
     };
 
@@ -714,7 +719,11 @@ mod runtime_tests {
             } else {
                 render_block(&self.text, &[], window, cx)
             };
-            div().size_full().child(body)
+            div().size_full().child(
+                // Full width like the outline row, auto height so the wrap
+                // tests can read the rendered block's height back out.
+                div().w_full().debug_selector(|| "block".into()).child(body),
+            )
         }
     }
 
@@ -767,6 +776,88 @@ mod runtime_tests {
                 })
                 .into_any_element()
         }
+    }
+
+    /// Height of the rendered block in a window narrow enough to force
+    /// wrapping, in multiples of the window's line height. Headings render
+    /// taller rows, so their ratio is only a lower bound on the row count.
+    fn wrapped_rows(cx: &mut TestAppContext, text: &str) -> f32 {
+        let (_view, cx) = mount(cx, text, None);
+        cx.simulate_resize(size(px(240.), px(500.)));
+        cx.run_until_parked();
+
+        let line_height = cx.update(|window, _| window.line_height());
+        let bounds = cx.debug_bounds("block").expect("block painted");
+        bounds.size.height / line_height
+    }
+
+    /// View-mode blocks must soft-wrap like the editor does. Without
+    /// `min_w_0` on the inline spans, flex's `min-width: auto` pins each span
+    /// to its unwrapped width and the text is clipped at the window edge
+    /// instead — so moving into a long block would reveal text the user never
+    /// saw.
+    #[gpui::test]
+    fn long_plain_text_wraps_in_view_mode(cx: &mut TestAppContext) {
+        let rows = wrapped_rows(
+            cx,
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+        );
+        assert!(
+            rows > 1.,
+            "long view-mode text should wrap, got {rows} rows"
+        );
+    }
+
+    /// `flex_wrap` alone wraps *between* inline children, so a mixed block
+    /// always looks like it wraps. The bold run here is far wider than the
+    /// window on its own: only intra-span wrapping can push the block past
+    /// three rows.
+    #[gpui::test]
+    fn mixed_inline_styles_wrap_in_view_mode(cx: &mut TestAppContext) {
+        let rows = wrapped_rows(
+            cx,
+            "**a bold run that keeps going for quite a while and then keeps going \
+             some more so it cannot fit on one row** [a link](https://example.com) and #tag",
+        );
+        assert!(
+            rows > 3.,
+            "styled view-mode text should reflow inside its spans, got {rows} rows",
+        );
+    }
+
+    /// Each case pins one of the remaining `min_w_0` calls: the `Code` div,
+    /// the `Link` wrap div, and the `render_inlines` container (a heading
+    /// nests it one flex level deeper, so the constraint has to propagate).
+    /// Without them the span is a flex item pinned to its unwrapped width and
+    /// clips at the window edge instead of reflowing.
+    #[gpui::test]
+    fn long_code_link_and_heading_spans_wrap_in_view_mode(cx: &mut TestAppContext) {
+        let code = wrapped_rows(
+            cx,
+            "before `a long stretch of inline code that will not fit on one row` after",
+        );
+        assert!(
+            code > 3.,
+            "inline code should reflow, not clip: {code} rows"
+        );
+
+        let link = wrapped_rows(
+            cx,
+            "[a link label that is long enough that it cannot fit on one row](https://example.com)",
+        );
+        assert!(
+            link > 1.,
+            "link labels should reflow, not clip: {link} rows"
+        );
+
+        let heading = wrapped_rows(
+            cx,
+            "# a heading that is long enough that it cannot fit on one row",
+        );
+        assert!(
+            heading > 2.,
+            "headings should reflow, not clip: {heading} rows",
+        );
     }
 
     #[gpui::test]

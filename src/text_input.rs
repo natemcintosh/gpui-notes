@@ -991,6 +991,13 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A block editor swaps in place of the rendered markdown inside the
+        // same `BlockView` wrapper, so it takes the view row's metrics: no
+        // padding of its own and the ambient line height. Any extra inset
+        // would shift the text sideways, wrap at a different width, and
+        // reflow the outline vertically on every view↔edit crossing. Standalone
+        // fields (the page picker) keep the roomier field metrics.
+        let single_line = matches!(self.layout_mode, LayoutMode::SingleLine);
         div()
             .flex()
             .w_full()
@@ -1023,13 +1030,12 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .bg(theme::input_outer_bg())
             .text_color(theme::input_fg())
-            .line_height(px(28.))
+            .when(single_line, |el| el.line_height(px(28.)))
             .text_size(px(16.))
             .child(
                 div()
-                    .min_h(px(28. + 4. * 2.))
                     .w_full()
-                    .p(px(4.))
+                    .when(single_line, |el| el.min_h(px(28. + 4. * 2.)).p(px(4.)))
                     .bg(theme::input_bg())
                     .child(TextElement { input: cx.entity() }),
             )
@@ -1697,6 +1703,30 @@ mod tests {
                 );
                 assert_eq!(ime_bounds.size.height, line_height);
             });
+        });
+    }
+
+    /// The block editor renders inside the same wrapper as the rendered
+    /// markdown it replaces, so it must add no inset of its own and use the
+    /// ambient line height — otherwise entering/leaving edit mode shifts the
+    /// text and reflows the outline (the "weird jumps" when crossing blocks).
+    #[gpui::test]
+    fn wrapped_editor_matches_view_row_metrics(cx: &mut TestAppContext) {
+        let (input, cx) = mount_wrapped_input(cx, "hello");
+        let ambient_line_height = cx.update(|window, _| window.line_height());
+
+        input.read_with(cx, |input, _| {
+            let bounds = input.layout_bounds_for_test().expect("layout bounds");
+            assert_eq!(
+                bounds.origin,
+                point(px(0.), px(0.)),
+                "block editor must not inset its text from the row origin",
+            );
+            assert_eq!(
+                input.line_height_for_test(),
+                Some(ambient_line_height),
+                "block editor rows must match rendered-markdown rows",
+            );
         });
     }
 
