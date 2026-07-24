@@ -35,22 +35,25 @@ pub struct Outline {
     pub roots: Vec<Block>,
 }
 
-fn parse_bullet_line(line: &str) -> Option<(usize, String)> {
-    let mut indent: usize = 0;
-    let mut bytes_consumed: usize = 0;
+/// Width (spaces = 1, tab = 2) and byte length of a line's leading whitespace.
+fn leading_indent(line: &str) -> (usize, usize) {
+    let mut width = 0;
+    let mut bytes = 0;
     for b in line.bytes() {
         match b {
-            b' ' => {
-                indent += 1;
-                bytes_consumed += 1;
-            }
-            b'\t' => {
-                indent += 2;
-                bytes_consumed += 1;
-            }
+            b' ' => width += 1,
+            b'\t' => width += 2,
             _ => break,
         }
+        bytes += 1;
     }
+    (width, bytes)
+}
+
+/// Returns `(marker indent, text column, text)` for a bullet line. The text
+/// column is where continuation lines of this block must be indented to.
+fn parse_bullet_line(line: &str) -> Option<(usize, usize, String)> {
+    let (indent, bytes_consumed) = leading_indent(line);
     let rest = &line[bytes_consumed..];
     let mut it = rest.chars();
     let marker = it.next()?;
@@ -61,8 +64,45 @@ fn parse_bullet_line(line: &str) -> Option<(usize, String)> {
     if after != ' ' && after != '\t' {
         return None;
     }
+    let text_col = indent + 1 + if after == '\t' { 2 } else { 1 };
     let text_start = bytes_consumed + marker.len_utf8() + after.len_utf8();
-    Some((indent, line[text_start..].to_string()))
+    Some((indent, text_col, line[text_start..].to_string()))
+}
+
+fn is_fence(text: &str) -> bool {
+    text.trim_start().starts_with("```")
+}
+
+/// A line that is not a new bullet but belongs to the block whose text starts
+/// at `text_col`: it is indented at least that deep, and — outside a fence —
+/// does not itself look like a bullet. Returns the line with `text_col`
+/// columns of leading whitespace stripped.
+fn continuation_line(line: &str, text_col: usize, in_fence: bool) -> Option<String> {
+    if line.trim().is_empty() {
+        // Blank lines are structural spacing outside a fence, content inside one.
+        return in_fence.then(String::new);
+    }
+    let (width, _) = leading_indent(line);
+    if width < text_col || (!in_fence && parse_bullet_line(line).is_some()) {
+        return None;
+    }
+    let mut consumed = 0;
+    let mut bytes = 0;
+    for b in line.bytes() {
+        if consumed >= text_col {
+            break;
+        }
+        consumed += if b == b'\t' { 2 } else { 1 };
+        bytes += 1;
+    }
+    Some(line[bytes..].to_string())
+}
+
+/// The block most recently pushed by `parse`, addressed by its parse `path`.
+fn last_block_mut<'a>(roots: &'a mut Vec<Block>, path: &[(usize, usize)]) -> Option<&'a mut Block> {
+    let (&(_, last), parents) = path.split_last()?;
+    let parent_indices: Vec<usize> = parents.iter().map(|(_, i)| *i).collect();
+    Some(&mut children_mut(roots, &parent_indices)[last])
 }
 
 fn children_mut<'a>(roots: &'a mut Vec<Block>, path: &[usize]) -> &'a mut Vec<Block> {
@@ -81,10 +121,28 @@ impl Outline {
         // root to the most recent block. `path.len()` is the nesting level.
         let mut path: Vec<(usize, usize)> = Vec::new();
 
+        // The block currently accepting continuation lines: its text column,
+        // and whether a fence it opened is still unclosed.
+        let mut open: Option<(usize, bool)> = None;
+
         for line in input.lines() {
-            let Some((indent, text)) = parse_bullet_line(line) else {
+            if let Some((text_col, in_fence)) = open {
+                if let Some(rest) = continuation_line(line, text_col, in_fence) {
+                    if let Some(block) = last_block_mut(&mut roots, &path) {
+                        block.text.push('\n');
+                        block.text.push_str(&rest);
+                        if is_fence(&rest) {
+                            open = Some((text_col, !in_fence));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            let Some((indent, text_col, text)) = parse_bullet_line(line) else {
                 continue;
             };
+            open = Some((text_col, is_fence(&text)));
 
             while let Some(&(top_indent, _)) = path.last() {
                 if top_indent >= indent {
@@ -108,13 +166,22 @@ impl Outline {
     #[must_use]
     pub fn serialize(&self) -> String {
         fn walk(out: &mut String, blocks: &[Block], depth: usize) {
+            // Continuation lines are re-indented to the bullet's text column,
+            // which for `"  " * depth + "- "` is `depth * 2 + 2`.
+            let text_col = "  ".repeat(depth + 1);
             for b in blocks {
-                for _ in 0..depth {
-                    out.push_str("  ");
-                }
+                let mut lines = b.text.split('\n');
+                out.push_str(&text_col[2..]);
                 out.push_str("- ");
-                out.push_str(&b.text);
+                out.push_str(lines.next().unwrap_or_default());
                 out.push('\n');
+                for line in lines {
+                    if !line.is_empty() {
+                        out.push_str(&text_col);
+                        out.push_str(line);
+                    }
+                    out.push('\n');
+                }
                 walk(out, &b.children, depth + 1);
             }
         }
@@ -279,6 +346,7 @@ impl Outline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn ids(outline: &Outline) -> Vec<BlockId> {
         fn walk(out: &mut Vec<BlockId>, blocks: &[Block]) {
@@ -356,12 +424,42 @@ mod tests {
         }
     }
 
-    #[test]
-    fn serialize_is_idempotent_under_reparse() {
-        let src = "*\ta\n\t- b\n";
+    #[rstest]
+    #[case::tabs("*\ta\n\t- b\n")]
+    #[case::fence("- ```calc\n  1 + 1\n  ```\n")]
+    #[case::nested_fence("- Trip\n  - ```calc\n    flights = 420\n    total\n    ```\n")]
+    #[case::blank_line_in_fence("- ```calc\n  1 + 1\n\n  2 + 2\n  ```\n")]
+    #[case::bullet_in_fence("- ```\n  - not a child\n  ```\n- next\n")]
+    #[case::tabs_in_fence("- ```calc\n\t1 + 1\n\t```\n")]
+    #[case::fence_then_child("- ```calc\n  1 + 1\n  ```\n  - child\n")]
+    fn serialize_is_idempotent_under_reparse(#[case] src: &str) {
         let once = Outline::parse(src).serialize();
         let twice = Outline::parse(&once).serialize();
-        assert_eq!(once, twice);
+        assert_eq!(once, twice, "not idempotent for {src:?}");
+    }
+
+    #[test]
+    fn fence_body_joins_the_block_text() {
+        let o = Outline::parse("- Trip\n  - ```calc\n    flights = 420\n    total\n    ```\n");
+        let calc = &o.roots[0].children[0];
+        assert_eq!(calc.text, "```calc\nflights = 420\ntotal\n```");
+        assert!(calc.children.is_empty());
+    }
+
+    #[test]
+    fn bullet_inside_a_fence_is_not_a_child() {
+        let o = Outline::parse("- ```\n  - not a child\n  ```\n- next\n");
+        assert_eq!(o.roots.len(), 2);
+        assert_eq!(o.roots[0].text, "```\n- not a child\n```");
+        assert_eq!(o.roots[1].text, "next");
+    }
+
+    #[test]
+    fn indented_bullet_after_a_closed_fence_is_a_child() {
+        let o = Outline::parse("- ```calc\n  1 + 1\n  ```\n  - child\n");
+        assert_eq!(o.roots[0].text, "```calc\n1 + 1\n```");
+        assert_eq!(o.roots[0].children.len(), 1);
+        assert_eq!(o.roots[0].children[0].text, "child");
     }
 
     #[test]
