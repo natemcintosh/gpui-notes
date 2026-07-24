@@ -10,11 +10,9 @@ Both `gpui` and `gpui_platform` are pinned to a specific `rev` in `Cargo.toml` (
 
 ## Project management
 
-Feature planning, tracking, and dependencies live in GitHub Issues on this repo's `origin`. Use the `gh` CLI for all project management: `gh issue list`, `gh issue view <n>`, `gh issue create`, `gh issue edit`, `gh issue close`, etc. Dependencies between issues are expressed in the issue body under a `## Dependencies` section with `Blocked by: #N` and `Blocks: #M` lines — this forms the feature DAG. When picking the next piece of work, prefer issues whose `Blocked by` list is empty or fully closed.
+Issues, branches, and pull requests are optional for routine work. Do not create an issue or a feature branch by default; work directly on `main` unless the user explicitly asks for a separate branch or PR.
 
-When fetching issues from GitHub to decide what to work on, start with `just unblocked` — it lists the issues that are currently available (no open blockers). Only fall back to `gh issue list` if you need more detail beyond what `just unblocked` shows.
-
-When starting work on an issue, create a new branch linked to that issue (`gh issue develop <n> --checkout`) and, once the work is ready, open a PR against `main` with `gh pr create` — include `Closes #<n>` in the PR body so the issue auto-closes on merge.
+When work is already tracked in GitHub Issues, use the `gh` CLI for project management. Dependencies between issues are expressed in the issue body under a `## Dependencies` section with `Blocked by: #N` and `Blocks: #M` lines. When fetching tracked work, start with `just unblocked`, which lists issues with no open blockers.
 
 ## Commands
 
