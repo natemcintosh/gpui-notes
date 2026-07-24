@@ -39,6 +39,7 @@ actions!(
         Cut,
         Copy,
         Submit,
+        SubmitNow,
         Cancel,
     ]
 );
@@ -47,6 +48,9 @@ actions!(
 pub enum TextInputEvent {
     Changed(SharedString),
     Submitted,
+    /// `shift-enter`: submit even where the owner would have treated plain
+    /// Enter as "extend what I am editing".
+    SubmittedNow,
     Cancelled,
 }
 
@@ -141,12 +145,19 @@ impl PendingVerticalPlacement {
     }
 }
 
-struct CachedLayout {
+/// One logical line of the buffer (the content split on `\n`), already
+/// soft-wrapped into visual rows. Byte offsets and row indices in this struct's
+/// methods are *local* to the line; `CachedLayout` maps them to buffer-wide
+/// ones using `start` and `first_row`.
+struct LineLayout {
     line: WrappedLine,
-    line_height: Pixels,
+    /// Byte offset of this line's first character within the buffer.
+    start: usize,
+    /// Index of this line's first visual row among all rows in the buffer.
+    first_row: usize,
 }
 
-impl CachedLayout {
+impl LineLayout {
     fn row_count(&self) -> usize {
         self.line.wrap_boundaries().len() + 1
     }
@@ -188,6 +199,58 @@ impl CachedLayout {
             .unwrap_or_else(|| self.row_count() - 1)
     }
 
+    fn x_for(&self, index: usize) -> Pixels {
+        self.line.unwrapped_layout.x_for_index(index)
+    }
+}
+
+struct CachedLayout {
+    /// Never empty: `shape_text` always yields at least one logical line.
+    lines: Vec<LineLayout>,
+    line_height: Pixels,
+}
+
+impl CachedLayout {
+    fn row_count(&self) -> usize {
+        self.lines
+            .last()
+            .map_or(1, |line| line.first_row + line.row_count())
+    }
+
+    /// The logical line containing `offset`. A line owns the offsets from its
+    /// start through its end inclusive; the `\n` byte itself belongs to no
+    /// line, so the two are never ambiguous.
+    fn line_for_offset(&self, offset: usize) -> &LineLayout {
+        let ix = self
+            .lines
+            .partition_point(|line| line.start <= offset)
+            .saturating_sub(1);
+        &self.lines[ix]
+    }
+
+    fn line_for_row(&self, row: usize) -> &LineLayout {
+        let ix = self
+            .lines
+            .partition_point(|line| line.first_row <= row)
+            .saturating_sub(1);
+        &self.lines[ix]
+    }
+
+    fn row_start(&self, row: usize) -> usize {
+        let line = self.line_for_row(row);
+        line.start + line.row_start(row - line.first_row)
+    }
+
+    fn row_end(&self, row: usize) -> usize {
+        let line = self.line_for_row(row);
+        line.start + line.row_end(row - line.first_row)
+    }
+
+    fn row_for_caret(&self, index: usize, affinity: CaretAffinity) -> usize {
+        let line = self.line_for_offset(index);
+        line.first_row + line.row_for_caret(index - line.start, affinity)
+    }
+
     fn row_for_y(&self, y: Pixels) -> usize {
         let mut row = 0;
         while row + 1 < self.row_count() && y >= self.line_height * (row + 1) {
@@ -197,43 +260,45 @@ impl CachedLayout {
     }
 
     fn position_for_caret(&self, index: usize, affinity: CaretAffinity) -> Point<Pixels> {
-        let row = self.row_for_caret(index, affinity);
-        let row_start = self.row_start(row);
+        let line = self.line_for_offset(index);
+        let local = index - line.start;
+        let row = line.row_for_caret(local, affinity);
         point(
-            self.line.unwrapped_layout.x_for_index(index)
-                - self.line.unwrapped_layout.x_for_index(row_start),
-            self.line_height * row,
+            line.x_for(local) - line.x_for(line.row_start(row)),
+            self.line_height * (line.first_row + row),
         )
     }
 
     fn caret_for_row_x(&self, row: usize, x: Pixels) -> (usize, CaretAffinity) {
         let row = row.min(self.row_count() - 1);
-        let position = point(x, self.line_height * row + self.line_height / 2.);
-        let index = self
+        let line = self.line_for_row(row);
+        let local_row = row - line.first_row;
+        let position = point(x, self.line_height * local_row + self.line_height / 2.);
+        let index = line
             .line
             .closest_index_for_position(position, self.line_height)
             .unwrap_or_else(|index| index);
-        let affinity = if row > 0 && index == self.row_start(row) {
+        let affinity = if local_row > 0 && index == line.row_start(local_row) {
             CaretAffinity::Downstream
         } else {
             CaretAffinity::Upstream
         };
-        (index, affinity)
+        (line.start + index, affinity)
     }
 
     fn selection_quads(&self, selection: Range<usize>, bounds: Bounds<Pixels>) -> Vec<PaintQuad> {
         let mut quads = Vec::new();
         for row in 0..self.row_count() {
+            let line = self.line_for_row(row);
             let row_start = self.row_start(row);
-            let row_end = self.row_end(row);
             let start = selection.start.max(row_start);
-            let end = selection.end.min(row_end);
+            let end = selection.end.min(self.row_end(row));
             if start >= end {
                 continue;
             }
-            let start_x = self.line.unwrapped_layout.x_for_index(row_start);
-            let selection_left = self.line.unwrapped_layout.x_for_index(start) - start_x;
-            let selection_right = self.line.unwrapped_layout.x_for_index(end) - start_x;
+            let start_x = line.x_for(row_start - line.start);
+            let selection_left = line.x_for(start - line.start) - start_x;
+            let selection_right = line.x_for(end - line.start) - start_x;
             quads.push(fill(
                 Bounds::from_corners(
                     point(
@@ -441,6 +506,17 @@ impl TextInput {
     #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextInputEvent::Submitted);
+    }
+
+    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
+    fn submit_now(&mut self, _: &SubmitNow, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::SubmittedNow);
+    }
+
+    /// Break the line at the caret. Owners that treat Enter as "extend this
+    /// buffer" rather than "I'm done" call this from their `Submitted` handler.
+    pub fn insert_newline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_text_in_range(None, "\n", window, cx);
     }
 
     #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
@@ -783,7 +859,7 @@ struct TextElement {
     input: Entity<TextInput>,
 }
 
-type MeasuredLine = Rc<RefCell<Option<(WrappedLine, Pixels)>>>;
+type MeasuredLine = Rc<RefCell<Option<(Vec<WrappedLine>, Pixels)>>>;
 
 struct PrepaintState {
     layout: Option<CachedLayout>,
@@ -888,17 +964,25 @@ impl Element for TextElement {
                 } else {
                     None
                 };
-                let line = window
+                // One `WrappedLine` per `\n`-separated logical line, each
+                // independently soft-wrapped. The element is as wide as its
+                // widest line and as tall as all of them stacked.
+                let lines: Vec<WrappedLine> = window
                     .text_system()
                     .shape_text(display_text.clone(), font_size, &runs, wrap_width, None)
                     .expect("text shaping should succeed")
                     .into_iter()
-                    .next()
-                    .expect("shape_text always returns a logical line");
-                let measured_size = line.size(line_height);
+                    .collect();
+                let measured_size = lines.iter().fold(size(px(0.), px(0.)), |acc, line| {
+                    let line_size = line.size(line_height);
+                    size(
+                        acc.width.max(line_size.width),
+                        acc.height + line_size.height,
+                    )
+                });
                 measured_for_layout
                     .borrow_mut()
-                    .replace((line, line_height));
+                    .replace((lines, line_height));
                 measured_size
             },
         );
@@ -914,11 +998,27 @@ impl Element for TextElement {
         _: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let (line, line_height) = measured
+        let (shaped, line_height) = measured
             .borrow_mut()
             .take()
             .expect("measured text layout should be available during prepaint");
-        let layout = CachedLayout { line, line_height };
+        let mut start = 0;
+        let mut first_row = 0;
+        let lines: Vec<LineLayout> = shaped
+            .into_iter()
+            .map(|line| {
+                let laid_out = LineLayout {
+                    line,
+                    start,
+                    first_row,
+                };
+                // `+ 1` skips the `\n` that separated this line from the next.
+                start += laid_out.line.len() + 1;
+                first_row += laid_out.row_count();
+                laid_out
+            })
+            .collect();
+        let layout = CachedLayout { lines, line_height };
         self.input.update(cx, |input, _| {
             input.apply_pending_vertical_placement(&layout, bounds);
         });
@@ -965,17 +1065,19 @@ impl Element for TextElement {
             window.paint_quad(selection);
         }
         let layout = prepaint.layout.take().unwrap();
-        layout
-            .line
-            .paint(
-                bounds.origin,
-                layout.line_height,
-                TextAlign::Left,
-                Some(bounds),
-                window,
-                cx,
-            )
-            .unwrap();
+        for line in &layout.lines {
+            let origin = bounds.origin + point(px(0.), layout.line_height * line.first_row);
+            line.line
+                .paint(
+                    origin,
+                    layout.line_height,
+                    TextAlign::Left,
+                    Some(bounds),
+                    window,
+                    cx,
+                )
+                .unwrap();
+        }
 
         if focus_handle.is_focused(window) {
             if let Some(cursor) = prepaint.cursor.take() {
@@ -1024,6 +1126,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::submit_now))
             .on_action(cx.listener(Self::cancel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1067,11 +1170,10 @@ impl TextInput {
 
     pub(crate) fn visual_row_width_for_test(&self, row: usize) -> Option<Pixels> {
         let layout = self.last_layout.as_ref()?;
-        let start = layout.row_start(row);
-        let end = layout.row_end(row);
+        let line = layout.line_for_row(row);
         Some(
-            layout.line.unwrapped_layout.x_for_index(end)
-                - layout.line.unwrapped_layout.x_for_index(start),
+            line.x_for(layout.row_end(row) - line.start)
+                - line.x_for(layout.row_start(row) - line.start),
         )
     }
 
@@ -1175,6 +1277,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
         KeyBinding::new("delete", Delete, Some("TextInput")),
         KeyBinding::new("enter", Submit, Some("TextInput")),
+        KeyBinding::new("shift-enter", SubmitNow, Some("TextInput")),
         KeyBinding::new("escape", Cancel, Some("TextInput")),
         KeyBinding::new(&format!("{cmd}-a"), SelectAll, Some("TextInput")),
         KeyBinding::new(&format!("{cmd}-c"), Copy, Some("TextInput")),
@@ -1676,6 +1779,45 @@ mod tests {
         });
     }
 
+    /// A `\n` in the buffer is a hard row break, and offsets on either side of
+    /// it resolve to their own logical line (#62).
+    #[gpui::test]
+    fn newlines_split_the_buffer_into_stacked_rows(cx: &mut TestAppContext) {
+        let (input, cx) = mount_wrapped_input(cx, "ab\ncd\nef");
+
+        cx.update(|_, cx| {
+            input.update(cx, |input, _| {
+                assert_eq!(input.visual_row_count_for_test(), Some(3));
+                let line_height = input.line_height_for_test().expect("line height");
+                let bounds = input.layout_bounds_for_test().expect("layout bounds");
+                assert!(
+                    bounds.size.height >= line_height * 3.,
+                    "three logical lines need three rows of height",
+                );
+
+                // Offset 2 is the caret *before* the first `\n` (end of "ab");
+                // offset 3 is the caret after it (start of "cd").
+                input.selection = Selection::collapsed(2);
+                assert_eq!(input.visual_row_for_test(), Some(0));
+                let end_of_first = input
+                    .cursor_screen_position_for_test()
+                    .expect("caret position");
+
+                input.selection = Selection::collapsed(3);
+                assert_eq!(input.visual_row_for_test(), Some(1));
+                let start_of_second = input
+                    .cursor_screen_position_for_test()
+                    .expect("caret position");
+
+                assert_eq!(start_of_second.x, bounds.left(), "second row starts at x=0");
+                assert_eq!(start_of_second.y, end_of_first.y + line_height);
+
+                input.selection = Selection::collapsed(input.content.len());
+                assert_eq!(input.visual_row_for_test(), Some(2));
+            });
+        });
+    }
+
     #[gpui::test]
     fn wrapped_ime_bounds_follow_caret_affinity_at_wrap_boundary(cx: &mut TestAppContext) {
         let (input, cx) = mount_wrapped_input(
@@ -1687,7 +1829,7 @@ mod tests {
             input.update(cx, |input, cx| {
                 let layout = input.last_layout.as_ref().expect("wrapped layout painted");
                 assert!(layout.row_count() > 1, "precondition: input wraps");
-                let boundary = layout.boundary_index(0);
+                let boundary = layout.row_start(1);
                 let line_height = layout.line_height;
                 let input_bounds = input.last_bounds.expect("input bounds");
                 input.selection = Selection::collapsed(boundary);

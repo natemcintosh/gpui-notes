@@ -93,7 +93,7 @@ impl PagePicker {
                 this.recompute_filter(query.as_ref());
                 cx.notify();
             }
-            TextInputEvent::Submitted => {
+            TextInputEvent::Submitted | TextInputEvent::SubmittedNow => {
                 if let Some(entry) = this.current_entry() {
                     cx.emit(PagePickerEvent::Selected(entry));
                 }

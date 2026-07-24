@@ -174,7 +174,7 @@ impl BlockView {
         let on_blur = cx.on_blur(&input_focus, window, |this, window, cx| {
             this.end_editing(window, cx);
         });
-        let on_event = cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
+        let on_event = cx.subscribe_in(&input, window, |this, input, event, window, cx| {
             match event {
                 // Escape returns to focused-Viewing on this block (#42), so
                 // the block stays visibly selected and window-level bindings
@@ -183,7 +183,17 @@ impl BlockView {
                     this.end_editing_inner(cx);
                     window.focus(&this.focus_handle, cx);
                 }
+                // Enter finishes the block, except where the block is a body
+                // rather than a line — then it just breaks the line, and
+                // shift-enter is the way out (#62).
                 TextInputEvent::Submitted => {
+                    if extends_on_enter(input.read(cx).content()) {
+                        input.update(cx, |input, cx| input.insert_newline(window, cx));
+                    } else {
+                        this.insert_sibling_below(cx);
+                    }
+                }
+                TextInputEvent::SubmittedNow => {
                     this.insert_sibling_below(cx);
                 }
                 // Flush every keystroke to the page so all save paths
@@ -268,6 +278,13 @@ impl BlockView {
             .update(cx, |p, cx| p.set_block_text(block_id, text, cx));
         cx.notify();
     }
+}
+
+/// Whether Enter should add a line to the block rather than start a new one:
+/// once the block already spans lines, or once it has opened a code fence that
+/// is still waiting for its closing one.
+fn extends_on_enter(text: &str) -> bool {
+    text.contains('\n') || text.matches("```").count() % 2 == 1
 }
 
 impl Focusable for BlockView {
@@ -495,6 +512,72 @@ mod tests {
             assert_eq!(page.read(cx).outline().get(block_id), Some("HI"));
             assert!(page.read(cx).dirty());
         });
+    }
+
+    /// Opens the editor on a block whose body is an unclosed calc fence — the
+    /// state in which Enter must extend the block rather than end it (#62).
+    fn edit_open_fence(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Page>,
+        Entity<BlockView>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let (page, bv, cx) = mount(cx, "- ```calc\n");
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        (page, bv, cx)
+    }
+
+    #[gpui::test]
+    fn enter_inside_an_open_fence_adds_a_line_not_a_sibling(cx: &mut TestAppContext) {
+        let (page, bv, cx) = edit_open_fence(cx);
+
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("1 + 1");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(bv.read(cx).is_editing(), "still editing the same block");
+            let outline = page.read(cx).outline();
+            assert_eq!(outline.roots.len(), 1, "no sibling was inserted");
+            assert_eq!(outline.get(bv.read(cx).block_id), Some("```calc\n1 + 1"));
+        });
+    }
+
+    #[gpui::test]
+    fn escape_flushes_the_whole_multi_line_body(cx: &mut TestAppContext) {
+        let (page, bv, cx) = edit_open_fence(cx);
+
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("2 * 3");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("```");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(!bv.read(cx).is_editing(), "escape leaves editing");
+            let outline = page.read(cx).outline();
+            assert_eq!(
+                outline.get(bv.read(cx).block_id),
+                Some("```calc\n2 * 3\n```")
+            );
+            assert_eq!(outline.serialize(), "- ```calc\n  2 * 3\n  ```\n");
+        });
+    }
+
+    /// The escape hatch: shift-enter starts a new block even where plain Enter
+    /// would have added a line.
+    #[gpui::test]
+    fn shift_enter_inside_a_fence_still_inserts_a_sibling(cx: &mut TestAppContext) {
+        let (page, _bv, cx) = edit_open_fence(cx);
+
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+
+        cx.read(|cx| assert_eq!(page.read(cx).outline().roots.len(), 2));
     }
 
     /// `begin_editing` is idempotent: clicking a block that is already being
