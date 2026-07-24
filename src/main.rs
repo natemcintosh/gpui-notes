@@ -562,8 +562,18 @@ impl Render for RootView {
             root = root.child(Self::render_error_line(message, cx));
         }
 
+        // `OutlineView` owns its own scroll container (it needs the handle on
+        // the element whose children are the block rows); tag results get one
+        // here.
         let body = if let Some(tag) = active_tag {
-            root.child(Self::render_tag_results(&tag, cx))
+            root.child(
+                div()
+                    .id("tag-results")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(Self::render_tag_results(&tag, cx)),
+            )
         } else {
             root.child(view)
         }

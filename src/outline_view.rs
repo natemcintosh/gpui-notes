@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{
     actions, div, px, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    IntoElement, KeyBinding, ParentElement, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 use crate::block_render::theme;
@@ -63,6 +64,9 @@ pub struct OutlineView {
     /// focus and vertical edit transfers. Pruned alongside `blocks` when ids
     /// disappear from the outline.
     block_subs: HashMap<BlockId, Subscription>,
+    /// Attached to the scrolling root so keyboard focus moves can reveal the
+    /// target row. Child indices line up with `flatten_visible` order.
+    scroll: ScrollHandle,
     _page_sub: Subscription,
 }
 
@@ -74,6 +78,7 @@ impl OutlineView {
             focus_handle: cx.focus_handle(),
             blocks: HashMap::new(),
             block_subs: HashMap::new(),
+            scroll: ScrollHandle::new(),
             _page_sub: sub,
         }
     }
@@ -173,6 +178,7 @@ impl OutlineView {
         target_bv.update(cx, |block, cx| {
             block.begin_editing_at(placement, window, cx);
         });
+        self.scroll.scroll_to_item(target_index);
     }
 
     /// The id of the block whose wrapper currently holds focus (i.e. the
@@ -203,6 +209,7 @@ impl OutlineView {
         let bv = self.get_or_create(target, window, cx);
         let handle = bv.focus_handle(cx);
         window.focus(&handle, cx);
+        self.scroll.scroll_to_item(new_idx);
     }
 
     /// Run one of the `Page` outline ops on the focused block. Focus stays
@@ -309,6 +316,7 @@ impl Render for OutlineView {
         // view map and traversal order. Actions dispatched from a focused
         // block bubble up through this ancestor node.
         let mut root = div()
+            .id("outline")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &FocusUp, window, cx| {
                 this.move_focus(-1, window, cx);
@@ -336,8 +344,12 @@ impl Render for OutlineView {
             }))
             .flex()
             .flex_col()
+            .flex_1()
+            .min_h_0()
             .w_full()
-            .gap_1();
+            .gap_1()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll);
         for (depth, id) in flat {
             let bv = self.get_or_create(id, window, cx);
             #[allow(clippy::cast_precision_loss)]

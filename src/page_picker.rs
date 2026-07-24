@@ -11,6 +11,8 @@ use gpui::{
     Subscription, Window,
 };
 
+use gpui::ScrollHandle;
+
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme;
 
@@ -75,6 +77,9 @@ pub struct PagePicker {
     all_entries: Vec<PageEntry>,
     filtered: Vec<usize>,
     selected: usize,
+    /// Attached to the scrolling row list so the selected row is revealed
+    /// whenever the selection or filter changes.
+    scroll: ScrollHandle,
     focus_handle: FocusHandle,
     _input_sub: Subscription,
 }
@@ -104,6 +109,7 @@ impl PagePicker {
             all_entries: entries,
             filtered,
             selected: 0,
+            scroll: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             _input_sub: sub,
         }
@@ -215,7 +221,17 @@ impl Focusable for PagePicker {
 
 impl Render for PagePicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col().gap_0p5();
+        // The picker only re-renders on selection/filter changes, so revealing
+        // here (rather than in each handler) doesn't fight mouse scrolling.
+        self.scroll.scroll_to_item(self.selected);
+        let mut list = div()
+            .id("page-picker-list")
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .max_h(px(400.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll);
         if self.filtered.is_empty() {
             list = list.child(
                 div()
