@@ -23,28 +23,38 @@ use crate::outline::BlockId;
 use crate::page::Page;
 use crate::page_links::{LinkIndex, PageLinkExt};
 use crate::tags::TagExt;
-use crate::text_input::{TextInput, TextInputEvent};
+use crate::text_input::{
+    PendingVerticalPlacement, TextInput, TextInputEvent, VerticalDirection, VerticalMovementOutcome,
+};
 
-actions!(block_view, [BeginEditing]);
+actions!(block_view, [BeginEditing, MoveCaretUp, MoveCaretDown]);
 
-/// Registers the block-level key bindings. The `BlockView` key context only
-/// receives keystrokes while a block wrapper (not its `TextInput`) holds
-/// focus, so `enter` here cannot shadow the input's own enter-to-submit.
+/// Registers block-level key bindings. Enter is limited to viewing mode, while
+/// plain Up/Down bubble from the focused input through the editing context.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
-        "enter",
-        BeginEditing,
-        Some("BlockView && !editing"),
-    )]);
+    cx.bind_keys([
+        KeyBinding::new("enter", BeginEditing, Some("BlockView && !editing")),
+        KeyBinding::new("up", MoveCaretUp, Some("BlockView && editing")),
+        KeyBinding::new("down", MoveCaretDown, Some("BlockView && editing")),
+    ]);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AdjacentEditRequest {
+    pub(crate) direction: VerticalDirection,
+    pub(crate) preferred_screen_x: gpui::Pixels,
 }
 
 /// Events emitted by `BlockView` to its parent (typically `OutlineView`).
 #[derive(Debug, Clone)]
-pub enum BlockViewEvent {
+pub(crate) enum BlockViewEvent {
     /// The user finished a block with Enter and a new sibling was inserted
     /// after `self.block_id`. The parent should mount the view for the newly
     /// created block and put it into editing.
     FocusRequested(BlockId),
+    /// Vertical caret movement passed the first or last visual row. The
+    /// outline resolves the adjacent visible block and preserves screen x.
+    AdjacentEditRequested(AdjacentEditRequest),
 }
 
 impl EventEmitter<BlockViewEvent> for BlockView {}
@@ -125,6 +135,24 @@ impl BlockView {
     }
 
     pub(crate) fn begin_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_editing_with_placement(None, window, cx);
+    }
+
+    pub(crate) fn begin_editing_at(
+        &mut self,
+        placement: PendingVerticalPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_editing_with_placement(Some(placement), window, cx);
+    }
+
+    fn begin_editing_with_placement(
+        &mut self,
+        placement: Option<PendingVerticalPlacement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if matches!(self.mode, BlockMode::Editing { .. }) {
             return;
         }
@@ -135,7 +163,13 @@ impl BlockView {
             .get(self.block_id)
             .unwrap_or("")
             .to_string();
-        let input = cx.new(|cx| TextInput::with_content(cx, "", text));
+        let input = cx.new(|cx| {
+            let mut input = TextInput::with_wrapped_content(cx, "", text);
+            if let Some(placement) = placement {
+                input.set_pending_vertical_placement(placement);
+            }
+            input
+        });
         let input_focus = input.focus_handle(cx);
         let on_blur = cx.on_blur(&input_focus, window, |this, window, cx| {
             this.end_editing(window, cx);
@@ -172,6 +206,23 @@ impl BlockView {
             _on_event: on_event,
         };
         cx.notify();
+    }
+
+    fn move_caret_vertical(&mut self, direction: VerticalDirection, cx: &mut Context<Self>) {
+        let BlockMode::Editing { input, .. } = &self.mode else {
+            return;
+        };
+        let outcome = input.update(cx, |input, cx| input.move_vertical(direction, cx));
+        if let VerticalMovementOutcome::Adjacent {
+            direction,
+            preferred_screen_x,
+        } = outcome
+        {
+            cx.emit(BlockViewEvent::AdjacentEditRequested(AdjacentEditRequest {
+                direction,
+                preferred_screen_x,
+            }));
+        }
     }
 
     fn end_editing(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -276,8 +327,9 @@ impl Render for BlockView {
         // box turns white but the cursor never appears until a second click.
         // The `editing` flag lets outline-op bindings scope themselves to
         // "BlockView && !editing" (#44): the wrapper is an ancestor of the
-        // TextInput, so without the flag, keys the input doesn't bind
-        // (up/down/tab…) would trigger outline ops mid-edit.
+        // TextInput, so without the flag, structural keys the input doesn't
+        // bind could trigger outline ops mid-edit. Plain Up/Down are
+        // explicitly rebound for visual-row navigation in edit mode.
         let key_context = if self.is_editing() {
             "BlockView editing"
         } else {
@@ -290,7 +342,14 @@ impl Render for BlockView {
             .on_action(cx.listener(|this, _: &BeginEditing, window, cx| {
                 this.begin_editing(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &MoveCaretUp, _, cx| {
+                this.move_caret_vertical(VerticalDirection::Up, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MoveCaretDown, _, cx| {
+                this.move_caret_vertical(VerticalDirection::Down, cx);
+            }))
             .flex_1()
+            .min_w_0()
             .min_h(px(20.0))
             .py_0p5()
             .px_0p5()

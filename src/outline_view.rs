@@ -16,6 +16,7 @@ use crate::block_render::theme;
 use crate::block_view::{BlockView, BlockViewEvent};
 use crate::outline::{Block, BlockId};
 use crate::page::Page;
+use crate::text_input::{PendingVerticalPlacement, VerticalDirection};
 
 actions!(
     outline_view,
@@ -58,9 +59,9 @@ pub struct OutlineView {
     /// mode parks focus on the block itself (#42), not here.
     focus_handle: FocusHandle,
     blocks: HashMap<BlockId, Entity<BlockView>>,
-    /// One subscription per cached `BlockView` listening for
-    /// `BlockViewEvent::FocusRequested` so we can mount and focus the target.
-    /// Pruned alongside `blocks` when ids disappear from the outline.
+    /// One subscription per cached `BlockView`, used for sibling-insertion
+    /// focus and vertical edit transfers. Pruned alongside `blocks` when ids
+    /// disappear from the outline.
     block_subs: HashMap<BlockId, Subscription>,
     _page_sub: Subscription,
 }
@@ -123,19 +124,55 @@ impl OutlineView {
         }
         let page = self.page.clone();
         let bv = cx.new(|block_cx| BlockView::new(id, page, window, block_cx));
-        let sub = cx.subscribe_in(&bv, window, |this, _bv, event, window, cx| match event {
-            BlockViewEvent::FocusRequested(target) => {
-                let target = *target;
-                let target_bv = this.get_or_create(target, window, cx);
-                // Focus no longer implies editing (#42), so the new sibling
-                // must be put into editing explicitly — the user pressed
-                // Enter to keep typing. `begin_editing` focuses the input.
-                target_bv.update(cx, |bv, cx| bv.begin_editing(window, cx));
-            }
-        });
+        let sub = cx.subscribe_in(
+            &bv,
+            window,
+            move |this, _bv, event, window, cx| match event {
+                BlockViewEvent::FocusRequested(target) => {
+                    let target = *target;
+                    let target_bv = this.get_or_create(target, window, cx);
+                    // Focus no longer implies editing (#42), so the new sibling
+                    // must be put into editing explicitly — the user pressed
+                    // Enter to keep typing. `begin_editing` focuses the input.
+                    target_bv.update(cx, |bv, cx| bv.begin_editing(window, cx));
+                }
+                BlockViewEvent::AdjacentEditRequested(request) => {
+                    this.move_edit_to_adjacent(id, *request, window, cx);
+                }
+            },
+        );
         self.blocks.insert(id, bv.clone());
         self.block_subs.insert(id, sub);
         bv
+    }
+
+    fn move_edit_to_adjacent(
+        &mut self,
+        source: BlockId,
+        request: crate::block_view::AdjacentEditRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let flat = flatten_visible(&self.page.read(cx).outline().roots);
+        let Some(source_index) = flat.iter().position(|&(_, id)| id == source) else {
+            return;
+        };
+        let target_index = match request.direction {
+            VerticalDirection::Up => source_index.checked_sub(1),
+            VerticalDirection::Down => (source_index + 1 < flat.len()).then_some(source_index + 1),
+        };
+        let Some(target_index) = target_index else {
+            // Clamp at the first and last outline entries without blurring
+            // the source editor or wrapping around.
+            return;
+        };
+        let target = flat[target_index].1;
+        let placement =
+            PendingVerticalPlacement::for_navigation(request.direction, request.preferred_screen_x);
+        let target_bv = self.get_or_create(target, window, cx);
+        target_bv.update(cx, |block, cx| {
+            block.begin_editing_at(placement, window, cx);
+        });
     }
 
     /// The id of the block whose wrapper currently holds focus (i.e. the
@@ -299,6 +336,7 @@ impl Render for OutlineView {
             }))
             .flex()
             .flex_col()
+            .w_full()
             .gap_1();
         for (depth, id) in flat {
             let bv = self.get_or_create(id, window, cx);
@@ -307,6 +345,8 @@ impl Render for OutlineView {
             let row = div()
                 .flex()
                 .flex_row()
+                .w_full()
+                .min_w_0()
                 .items_start()
                 .pl(indent)
                 .child(
@@ -328,7 +368,7 @@ mod tests {
     use super::*;
     use crate::outline::Block;
     use crate::text_input;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{point, size, Modifiers, TestAppContext, VisualTestContext};
 
     struct TestPage(Entity<Page>);
     impl gpui::Global for TestPage {}
@@ -579,6 +619,21 @@ mod tests {
         cx.update(|window, cx| ov.read(cx).focused_block_id(window, cx))
     }
 
+    fn editing_input(
+        cx: &mut VisualTestContext,
+        ov: &Entity<OutlineView>,
+        id: BlockId,
+    ) -> Entity<crate::text_input::TextInput> {
+        cx.read(|cx| {
+            ov.read(cx)
+                .block_view(id)
+                .expect("block view mounted")
+                .read(cx)
+                .input_entity_for_test()
+                .expect("block should be editing")
+        })
+    }
+
     // ── #44: keyboard navigation and block operations ──────────────────
 
     #[gpui::test]
@@ -610,6 +665,240 @@ mod tests {
         cx.simulate_keystrokes("up");
         cx.run_until_parked();
         assert_eq!(focused_id(cx, &ov), Some(a), "up clamps at the first block");
+    }
+
+    #[gpui::test]
+    fn vertical_arrows_move_visual_rows_and_collapse_active_selection(cx: &mut TestAppContext) {
+        let body = format!("- {}\n", "alpha beta gamma delta ".repeat(12));
+        let (page, ov, cx) = mount(cx, &body);
+        cx.simulate_resize(size(px(240.), px(600.)));
+        cx.run_until_parked();
+        let block = cx.read(|cx| page.read(cx).outline().roots[0].id);
+
+        focus_block(cx, &ov, block);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let input = editing_input(cx, &ov, block);
+        let (row_count, input_bounds) = cx.read(|cx| {
+            let input = input.read(cx);
+            (
+                input.visual_row_count_for_test(),
+                input.layout_bounds_for_test(),
+            )
+        });
+        assert!(
+            row_count.is_some_and(|rows| rows > 2),
+            "precondition: editor wraps to several visual rows; \
+             rows={row_count:?}, bounds={input_bounds:?}",
+        );
+
+        cx.simulate_keystrokes("home shift-right shift-right down");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let input = input.read(cx);
+            assert!(
+                input.selected_range().is_empty(),
+                "plain Down clears an active selection",
+            );
+            assert_eq!(
+                input.visual_row_for_test(),
+                Some(1),
+                "movement continues from the active selection head",
+            );
+        });
+
+        let before_shifted = cx.read(|cx| {
+            let input = input.read(cx);
+            (input.cursor_offset_for_test(), input.visual_row_for_test())
+        });
+        cx.simulate_keystrokes("shift-down shift-up");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let input = input.read(cx);
+            assert_eq!(
+                (input.cursor_offset_for_test(), input.visual_row_for_test(),),
+                before_shifted,
+                "Shift-Up/Down remain unbound in block editors",
+            );
+        });
+    }
+
+    #[gpui::test]
+    #[allow(clippy::too_many_lines)] // One end-to-end scenario verifies sticky x before, during, and after transfer.
+    fn vertical_arrows_cross_blocks_and_preserve_sticky_screen_column(cx: &mut TestAppContext) {
+        let root_text = format!("{}alpha beta x", "alpha beta gamma delta ".repeat(9));
+        let child_text = "one two three four five six ".repeat(10);
+        let body = format!("- {root_text}\n  - {child_text}\n");
+        let (page, ov, cx) = mount(cx, &body);
+        cx.simulate_resize(size(px(280.), px(700.)));
+        cx.run_until_parked();
+        let (root, child) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[0].children[0].id)
+        });
+
+        focus_block(cx, &ov, root);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let root_input = editing_input(cx, &ov, root);
+        let (click, rows) = cx.read(|cx| {
+            let input = root_input.read(cx);
+            let bounds = input.layout_bounds_for_test().expect("root layout");
+            let line_height = input.line_height_for_test().expect("line height");
+            (
+                point(bounds.left() + px(200.), bounds.top() + line_height / 2.),
+                input.visual_row_count_for_test().expect("row count"),
+            )
+        });
+        assert!(rows > 2, "precondition: root wraps");
+        cx.simulate_click(click, Modifiers::default());
+        cx.run_until_parked();
+        let preferred_x = cx.read(|cx| {
+            root_input
+                .read(cx)
+                .cursor_screen_position_for_test()
+                .expect("cursor position")
+                .x
+        });
+
+        for _ in 1..rows {
+            cx.simulate_keystrokes("down");
+            cx.run_until_parked();
+        }
+        assert!(
+            cx.read(|cx| root_input.read(cx).visual_row_for_test()) == Some(rows - 1),
+            "caret should reach the root's last visual row before crossing",
+        );
+        let clamped_x = cx.read(|cx| {
+            root_input
+                .read(cx)
+                .cursor_screen_position_for_test()
+                .expect("cursor on last root row")
+                .x
+        });
+        let (first_width, last_width) = cx.read(|cx| {
+            let input = root_input.read(cx);
+            (
+                input.visual_row_width_for_test(0),
+                input.visual_row_width_for_test(rows - 1),
+            )
+        });
+        assert!(
+            clamped_x + px(8.) < preferred_x,
+            "precondition: the short last row clamps the sticky column; \
+             preferred={preferred_x:?}, clamped={clamped_x:?}, \
+             first_width={first_width:?}, last_width={last_width:?}",
+        );
+
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        let child_input = editing_input(cx, &ov, child);
+        cx.update(|window, cx| {
+            let root_view = ov.read(cx).block_view(root).expect("root cached").read(cx);
+            let child_view = ov
+                .read(cx)
+                .block_view(child)
+                .expect("child cached")
+                .read(cx);
+            assert!(!root_view.is_editing(), "source exits edit mode normally");
+            assert!(child_view.is_editing(), "destination enters edit mode");
+            assert!(
+                child_input.focus_handle(cx).is_focused(window),
+                "destination TextInput receives focus",
+            );
+        });
+        cx.read(|cx| {
+            let input = child_input.read(cx);
+            assert_eq!(
+                input.visual_row_for_test(),
+                Some(0),
+                "Down enters the next block on its first visual row",
+            );
+            let destination_x = input
+                .cursor_screen_position_for_test()
+                .expect("destination cursor")
+                .x;
+            assert!(
+                (destination_x - preferred_x).abs() <= px(8.),
+                "absolute screen column should survive indentation: \
+                 preferred={preferred_x:?}, destination={destination_x:?}",
+            );
+        });
+
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        let root_input = editing_input(cx, &ov, root);
+        cx.read(|cx| {
+            let input = root_input.read(cx);
+            assert_eq!(
+                input.visual_row_for_test(),
+                input
+                    .visual_row_count_for_test()
+                    .map(|row_count| row_count - 1),
+                "Up enters the previous block on its last visual row",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn vertical_edit_navigation_respects_collapse_and_outline_boundaries(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- parent\n  - hidden\n- next\n");
+        let (parent, hidden, next) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (
+                outline.roots[0].id,
+                outline.roots[0].children[0].id,
+                outline.roots[1].id,
+            )
+        });
+
+        focus_block(cx, &ov, parent);
+        cx.simulate_keystrokes(&format!("{}-enter", crate::cmd_key()));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("home up");
+        cx.run_until_parked();
+        assert!(
+            cx.read(|cx| ov
+                .read(cx)
+                .block_view(parent)
+                .expect("parent mounted")
+                .read(cx)
+                .is_editing()),
+            "Up clamps at the first visible block without leaving edit mode",
+        );
+
+        cx.simulate_keystrokes("end down");
+        cx.run_until_parked();
+        assert!(
+            cx.read(|cx| ov
+                .read(cx)
+                .block_view(next)
+                .expect("next mounted")
+                .read(cx)
+                .is_editing()),
+            "collapsed descendants must be skipped",
+        );
+        assert!(
+            cx.read(|cx| ov
+                .read(cx)
+                .block_view(hidden)
+                .is_none_or(|view| !view.read(cx).is_editing())),
+            "hidden child must not receive the edit transfer",
+        );
+
+        cx.simulate_keystrokes("end down");
+        cx.run_until_parked();
+        assert!(
+            cx.read(|cx| ov
+                .read(cx)
+                .block_view(next)
+                .expect("next mounted")
+                .read(cx)
+                .is_editing()),
+            "Down clamps at the last visible block without leaving edit mode",
+        );
     }
 
     #[gpui::test]
@@ -760,10 +1049,11 @@ mod tests {
     }
 
     /// The `!editing` guard in `BLOCK_CONTEXT`: while a block's `TextInput` is
-    /// focused, outline keys (which the input does not bind) must not leak
-    /// into outline ops through the wrapper's ancestor key context.
+    /// focused, structural outline keys must not leak into outline ops through
+    /// the wrapper's ancestor key context. Plain Up/Down are intentionally
+    /// bound by `BlockView` now; their shifted variants remain unbound.
     #[gpui::test]
-    fn outline_keys_do_not_fire_while_editing(cx: &mut TestAppContext) {
+    fn structural_outline_keys_do_not_fire_while_editing(cx: &mut TestAppContext) {
         let (page, ov, cx) = mount(cx, "- a\n- b\n");
         let b = cx.read(|cx| page.read(cx).outline().roots[1].id);
 
@@ -775,7 +1065,7 @@ mod tests {
             assert!(bv.read(cx).is_editing(), "precondition: editing");
         });
 
-        cx.simulate_keystrokes("up down shift-up shift-down");
+        cx.simulate_keystrokes("shift-up shift-down");
         cx.run_until_parked();
 
         cx.read(|cx| {
@@ -791,7 +1081,7 @@ mod tests {
             assert_eq!(
                 input.read(cx).selected_range(),
                 1..1,
-                "unsupported vertical movement must not disturb the caret",
+                "shifted vertical movement must not disturb the caret",
             );
         });
 

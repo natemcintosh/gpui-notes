@@ -2,15 +2,16 @@
 // When bumping the pinned gpui rev (see Cargo.toml), diff against that file
 // first — the IME and Element APIs drift frequently on HEAD.
 
-use std::ops::Range;
+use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::FontFallbacks;
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, GlobalElementId, InspectorElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, div, fill, point, prelude::*, px, relative, size, App, AvailableSpace, Bounds,
+    ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
+    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -85,13 +86,183 @@ impl Selection {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LayoutMode {
+    SingleLine,
+    SoftWrapped,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaretAffinity {
+    /// A caret at a soft-wrap boundary is painted at the end of the row above.
+    Upstream,
+    /// A caret at a soft-wrap boundary is painted at the start of the row below.
+    Downstream,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VerticalDirection {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum VerticalMovementOutcome {
+    Moved,
+    Adjacent {
+        direction: VerticalDirection,
+        preferred_screen_x: Pixels,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlacementRow {
+    First,
+    Last,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PendingVerticalPlacement {
+    row: PlacementRow,
+    preferred_screen_x: Pixels,
+}
+
+impl PendingVerticalPlacement {
+    #[must_use]
+    pub(crate) fn for_navigation(direction: VerticalDirection, preferred_screen_x: Pixels) -> Self {
+        let row = match direction {
+            VerticalDirection::Up => PlacementRow::Last,
+            VerticalDirection::Down => PlacementRow::First,
+        };
+        Self {
+            row,
+            preferred_screen_x,
+        }
+    }
+}
+
+struct CachedLayout {
+    line: WrappedLine,
+    line_height: Pixels,
+}
+
+impl CachedLayout {
+    fn row_count(&self) -> usize {
+        self.line.wrap_boundaries().len() + 1
+    }
+
+    fn boundary_index(&self, boundary: usize) -> usize {
+        let boundary = self.line.wrap_boundaries()[boundary];
+        self.line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index
+    }
+
+    fn row_start(&self, row: usize) -> usize {
+        if row == 0 {
+            0
+        } else {
+            self.boundary_index(row - 1)
+        }
+    }
+
+    fn row_end(&self, row: usize) -> usize {
+        if row + 1 == self.row_count() {
+            self.line.len()
+        } else {
+            self.boundary_index(row)
+        }
+    }
+
+    fn row_for_caret(&self, index: usize, affinity: CaretAffinity) -> usize {
+        self.line
+            .wrap_boundaries()
+            .iter()
+            .enumerate()
+            .find_map(|(row, _)| {
+                let boundary = self.boundary_index(row);
+                if index < boundary || (index == boundary && affinity == CaretAffinity::Upstream) {
+                    Some(row)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| self.row_count() - 1)
+    }
+
+    fn row_for_y(&self, y: Pixels) -> usize {
+        let mut row = 0;
+        while row + 1 < self.row_count() && y >= self.line_height * (row + 1) {
+            row += 1;
+        }
+        row
+    }
+
+    fn position_for_caret(&self, index: usize, affinity: CaretAffinity) -> Point<Pixels> {
+        let row = self.row_for_caret(index, affinity);
+        let row_start = self.row_start(row);
+        point(
+            self.line.unwrapped_layout.x_for_index(index)
+                - self.line.unwrapped_layout.x_for_index(row_start),
+            self.line_height * row,
+        )
+    }
+
+    fn caret_for_row_x(&self, row: usize, x: Pixels) -> (usize, CaretAffinity) {
+        let row = row.min(self.row_count() - 1);
+        let position = point(x, self.line_height * row + self.line_height / 2.);
+        let index = self
+            .line
+            .closest_index_for_position(position, self.line_height)
+            .unwrap_or_else(|index| index);
+        let affinity = if row > 0 && index == self.row_start(row) {
+            CaretAffinity::Downstream
+        } else {
+            CaretAffinity::Upstream
+        };
+        (index, affinity)
+    }
+
+    fn selection_quads(&self, selection: Range<usize>, bounds: Bounds<Pixels>) -> Vec<PaintQuad> {
+        let mut quads = Vec::new();
+        for row in 0..self.row_count() {
+            let row_start = self.row_start(row);
+            let row_end = self.row_end(row);
+            let start = selection.start.max(row_start);
+            let end = selection.end.min(row_end);
+            if start >= end {
+                continue;
+            }
+            let start_x = self.line.unwrapped_layout.x_for_index(row_start);
+            let selection_left = self.line.unwrapped_layout.x_for_index(start) - start_x;
+            let selection_right = self.line.unwrapped_layout.x_for_index(end) - start_x;
+            quads.push(fill(
+                Bounds::from_corners(
+                    point(
+                        bounds.left() + selection_left,
+                        bounds.top() + self.line_height * row,
+                    ),
+                    point(
+                        bounds.left() + selection_right,
+                        bounds.top() + self.line_height * (row + 1),
+                    ),
+                ),
+                theme::input_selection(),
+            ));
+        }
+        quads
+    }
+}
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
     selection: Selection,
+    caret_affinity: CaretAffinity,
+    preferred_screen_x: Option<Pixels>,
+    pending_vertical_placement: Option<PendingVerticalPlacement>,
+    layout_mode: LayoutMode,
     marked_range: Option<Range<usize>>,
-    last_layout: Option<ShapedLine>,
+    last_layout: Option<CachedLayout>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
 }
@@ -108,6 +279,23 @@ impl TextInput {
         placeholder: impl Into<SharedString>,
         content: impl Into<SharedString>,
     ) -> Self {
+        Self::with_layout(cx, placeholder, content, LayoutMode::SingleLine)
+    }
+
+    pub(crate) fn with_wrapped_content(
+        cx: &mut Context<Self>,
+        placeholder: impl Into<SharedString>,
+        content: impl Into<SharedString>,
+    ) -> Self {
+        Self::with_layout(cx, placeholder, content, LayoutMode::SoftWrapped)
+    }
+
+    fn with_layout(
+        cx: &mut Context<Self>,
+        placeholder: impl Into<SharedString>,
+        content: impl Into<SharedString>,
+        layout_mode: LayoutMode,
+    ) -> Self {
         let content: SharedString = content.into();
         let end = content.len();
         Self {
@@ -115,6 +303,10 @@ impl TextInput {
             content,
             placeholder: placeholder.into(),
             selection: Selection::collapsed(end),
+            caret_affinity: CaretAffinity::Upstream,
+            preferred_screen_x: None,
+            pending_vertical_placement: None,
+            layout_mode,
             marked_range: None,
             last_layout: None,
             last_bounds: None,
@@ -130,6 +322,11 @@ impl TextInput {
     #[must_use]
     pub fn selected_range(&self) -> Range<usize> {
         self.selection.range()
+    }
+
+    pub(crate) fn set_pending_vertical_placement(&mut self, placement: PendingVerticalPlacement) {
+        self.preferred_screen_x = Some(placement.preferred_screen_x);
+        self.pending_vertical_placement = Some(placement);
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -175,6 +372,9 @@ impl TextInput {
             anchor: 0,
             head: self.content.len(),
         };
+        self.caret_affinity = CaretAffinity::Upstream;
+        self.preferred_screen_x = None;
+        self.pending_vertical_placement = None;
         cx.notify();
     }
 
@@ -214,7 +414,7 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            // Single-line input: flatten newlines.
+            // The buffer is one logical line even when it is visually wrapped.
             self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
         }
     }
@@ -260,10 +460,11 @@ impl TextInput {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.is_selecting = true;
+        let (offset, affinity) = self.caret_for_mouse_position(event.position);
         if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+            self.select_to_with_affinity(offset, affinity, cx);
         } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx);
+            self.move_to_with_affinity(offset, affinity, cx);
         }
     }
 
@@ -273,12 +474,25 @@ impl TextInput {
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.is_selecting {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+            let (offset, affinity) = self.caret_for_mouse_position(event.position);
+            self.select_to_with_affinity(offset, affinity, cx);
         }
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.move_to_with_affinity(offset, CaretAffinity::Upstream, cx);
+    }
+
+    fn move_to_with_affinity(
+        &mut self,
+        offset: usize,
+        affinity: CaretAffinity,
+        cx: &mut Context<Self>,
+    ) {
         self.selection.collapse(offset);
+        self.caret_affinity = affinity;
+        self.preferred_screen_x = None;
+        self.pending_vertical_placement = None;
         cx.notify();
     }
 
@@ -287,25 +501,103 @@ impl TextInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.select_to_with_affinity(offset, CaretAffinity::Upstream, cx);
+    }
+
+    fn select_to_with_affinity(
+        &mut self,
+        offset: usize,
+        affinity: CaretAffinity,
+        cx: &mut Context<Self>,
+    ) {
         self.selection.extend_to(offset);
+        self.caret_affinity = affinity;
+        self.preferred_screen_x = None;
+        self.pending_vertical_placement = None;
         cx.notify();
     }
 
-    fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
+    fn caret_for_mouse_position(&self, position: Point<Pixels>) -> (usize, CaretAffinity) {
         if self.content.is_empty() {
-            return 0;
+            return (0, CaretAffinity::Upstream);
         }
         let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
         else {
-            return 0;
+            return (0, CaretAffinity::Upstream);
         };
         if position.y < bounds.top() {
-            return 0;
+            return (0, CaretAffinity::Upstream);
         }
         if position.y > bounds.bottom() {
-            return self.content.len();
+            return (self.content.len(), CaretAffinity::Upstream);
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        let row = line.row_for_y(position.y - bounds.top());
+        line.caret_for_row_x(row, position.x - bounds.left())
+    }
+
+    pub(crate) fn move_vertical(
+        &mut self,
+        direction: VerticalDirection,
+        cx: &mut Context<Self>,
+    ) -> VerticalMovementOutcome {
+        let Some(bounds) = self.last_bounds else {
+            return VerticalMovementOutcome::Moved;
+        };
+        let Some(layout) = self.last_layout.as_ref() else {
+            return VerticalMovementOutcome::Moved;
+        };
+
+        // Plain vertical movement always starts at the active head. Unlike
+        // horizontal arrows, the selected edge is not chosen by direction.
+        self.selection.collapse(self.selection.head);
+        let current_position = layout.position_for_caret(self.selection.head, self.caret_affinity);
+        let preferred_screen_x = self
+            .preferred_screen_x
+            .unwrap_or(bounds.left() + current_position.x);
+        self.preferred_screen_x = Some(preferred_screen_x);
+
+        let current_row = layout.row_for_caret(self.selection.head, self.caret_affinity);
+        let target_row = match direction {
+            VerticalDirection::Up => current_row.checked_sub(1),
+            VerticalDirection::Down => {
+                (current_row + 1 < layout.row_count()).then_some(current_row + 1)
+            }
+        };
+
+        let Some(target_row) = target_row else {
+            cx.notify();
+            return VerticalMovementOutcome::Adjacent {
+                direction,
+                preferred_screen_x,
+            };
+        };
+
+        let (offset, affinity) =
+            layout.caret_for_row_x(target_row, preferred_screen_x - bounds.left());
+        self.selection.collapse(offset);
+        self.caret_affinity = affinity;
+        cx.notify();
+        VerticalMovementOutcome::Moved
+    }
+
+    fn apply_pending_vertical_placement(&mut self, cx: &mut Context<Self>) {
+        let (Some(placement), Some(bounds), Some(layout)) = (
+            self.pending_vertical_placement.take(),
+            self.last_bounds,
+            self.last_layout.as_ref(),
+        ) else {
+            return;
+        };
+        let row = match placement.row {
+            PlacementRow::First => 0,
+            PlacementRow::Last => layout.row_count() - 1,
+        };
+        let (offset, affinity) =
+            layout.caret_for_row_x(row, placement.preferred_screen_x - bounds.left());
+        self.selection.collapse(offset);
+        self.caret_affinity = affinity;
+        self.preferred_screen_x = Some(placement.preferred_screen_x);
+        cx.notify();
     }
 
     fn apply_edit(
@@ -316,6 +608,9 @@ impl TextInput {
     ) {
         debug_assert!(new_selection.is_empty());
         self.selection = Selection::collapsed(new_selection.end);
+        self.caret_affinity = CaretAffinity::Upstream;
+        self.preferred_screen_x = None;
+        self.pending_vertical_placement = None;
         self.marked_range = None;
         self.set_content_and_emit(new_content, cx);
         cx.notify();
@@ -433,6 +728,9 @@ impl EntityInputHandler for TextInput {
             |relative_range| range.start + offset_from_utf16_in(new_text, relative_range.end),
         );
         self.selection = Selection::collapsed(cursor);
+        self.caret_affinity = CaretAffinity::Upstream;
+        self.preferred_screen_x = None;
+        self.pending_vertical_placement = None;
         self.set_content_and_emit(new_content, cx);
         cx.notify();
     }
@@ -446,16 +744,26 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
-        Some(Bounds::from_corners(
-            point(
-                bounds.left() + last_layout.x_for_index(range.start),
-                bounds.top(),
-            ),
-            point(
-                bounds.left() + last_layout.x_for_index(range.end),
-                bounds.bottom(),
-            ),
-        ))
+        let (start_affinity, end_affinity) = if range.is_empty() {
+            (self.caret_affinity, self.caret_affinity)
+        } else {
+            (CaretAffinity::Downstream, CaretAffinity::Upstream)
+        };
+        let start = last_layout.position_for_caret(range.start, start_affinity);
+        let end = last_layout.position_for_caret(range.end, end_affinity);
+        let top = bounds.top() + start.y;
+        let bottom = bounds.top() + end.y + last_layout.line_height;
+        if start.y == end.y {
+            Some(Bounds::from_corners(
+                point(bounds.left() + start.x, top),
+                point(bounds.left() + end.x.max(start.x + px(2.)), bottom),
+            ))
+        } else {
+            Some(Bounds::from_corners(
+                point(bounds.left(), top),
+                point(bounds.right(), bottom),
+            ))
+        }
     }
 
     fn character_index_for_point(
@@ -464,9 +772,10 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<usize> {
-        let line_point = self.last_bounds?.localize(&point)?;
+        let bounds = self.last_bounds?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let row = last_layout.row_for_y(point.y - bounds.top());
+        let (utf8_index, _) = last_layout.caret_for_row_x(row, point.x - bounds.left());
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -475,10 +784,12 @@ struct TextElement {
     input: Entity<TextInput>,
 }
 
+type MeasuredLine = Rc<RefCell<Option<(WrappedLine, Pixels)>>>;
+
 struct PrepaintState {
-    line: Option<ShapedLine>,
+    layout: Option<CachedLayout>,
     cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+    selection: Vec<PaintQuad>,
 }
 
 impl IntoElement for TextElement {
@@ -489,7 +800,7 @@ impl IntoElement for TextElement {
 }
 
 impl Element for TextElement {
-    type RequestLayoutState = ();
+    type RequestLayoutState = MeasuredLine;
     type PrepaintState = PrepaintState;
 
     fn id(&self) -> Option<ElementId> {
@@ -507,27 +818,11 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        (): &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected_range = input.selection.range();
-        let cursor = input.cursor_offset();
+        let layout_mode = input.layout_mode;
+        let marked_range = input.marked_range.clone();
         let style = window.text_style();
-
         let (display_text, text_color) = if content.is_empty() {
             (
                 input.placeholder.clone(),
@@ -550,7 +845,7 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+        let runs = if let Some(marked_range) = marked_range {
             vec![
                 TextRun {
                     len: marked_range.start,
@@ -571,50 +866,78 @@ impl Element for TextElement {
                 },
             ]
             .into_iter()
-            .filter(|r| r.len > 0)
-            .collect()
+            .filter(|run| run.len > 0)
+            .collect::<Vec<_>>()
         } else {
             vec![run]
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(display_text, font_size, &runs, None);
+        let line_height = window.line_height();
+        let measured: MeasuredLine = Rc::default();
+        let measured_for_layout = measured.clone();
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        let layout_id = window.request_measured_layout(
+            style,
+            move |known_dimensions, available_space, window, _cx| {
+                let wrap_width = if layout_mode == LayoutMode::SoftWrapped {
+                    known_dimensions.width.or(match available_space.width {
+                        AvailableSpace::Definite(width) => Some(width),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                let line = window
+                    .text_system()
+                    .shape_text(display_text.clone(), font_size, &runs, wrap_width, None)
+                    .expect("text shaping should succeed")
+                    .into_iter()
+                    .next()
+                    .expect("shape_text always returns a logical line");
+                let measured_size = line.size(line_height);
+                measured_for_layout
+                    .borrow_mut()
+                    .replace((line, line_height));
+                measured_size
+            },
+        );
+        (layout_id, measured)
+    }
 
-        let cursor_pos = line.x_for_index(cursor);
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        measured: &mut Self::RequestLayoutState,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let input = self.input.read(cx);
+        let selected_range = input.selection.range();
+        let cursor = input.cursor_offset();
+        let (line, line_height) = measured
+            .borrow_mut()
+            .take()
+            .expect("measured text layout should be available during prepaint");
+        let layout = CachedLayout { line, line_height };
+        let cursor_pos = layout.position_for_caret(cursor, input.caret_affinity);
         let (selection, cursor) = if selected_range.is_empty() {
             (
-                None,
+                Vec::new(),
                 Some(fill(
-                    Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
-                        size(px(2.), bounds.bottom() - bounds.top()),
-                    ),
+                    Bounds::new(bounds.origin + cursor_pos, size(px(2.), line_height)),
                     theme::input_cursor(),
                 )),
             )
         } else {
-            (
-                Some(fill(
-                    Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.end),
-                            bounds.bottom(),
-                        ),
-                    ),
-                    theme::input_selection(),
-                )),
-                None,
-            )
+            (layout.selection_quads(selected_range, bounds), None)
         };
 
         PrepaintState {
-            line: Some(line),
+            layout: Some(layout),
             cursor,
             selection,
         }
@@ -625,7 +948,7 @@ impl Element for TextElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        (): &mut Self::RequestLayoutState,
+        _: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
@@ -636,19 +959,21 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
+        for selection in prepaint.selection.drain(..) {
             window.paint_quad(selection);
         }
-        let line = prepaint.line.take().unwrap();
-        line.paint(
-            bounds.origin,
-            window.line_height(),
-            TextAlign::Left,
-            None,
-            window,
-            cx,
-        )
-        .unwrap();
+        let layout = prepaint.layout.take().unwrap();
+        layout
+            .line
+            .paint(
+                bounds.origin,
+                layout.line_height,
+                TextAlign::Left,
+                Some(bounds),
+                window,
+                cx,
+            )
+            .unwrap();
 
         if focus_handle.is_focused(window) {
             if let Some(cursor) = prepaint.cursor.take() {
@@ -656,9 +981,10 @@ impl Element for TextElement {
             }
         }
 
-        self.input.update(cx, |input, _| {
-            input.last_layout = Some(line);
+        self.input.update(cx, |input, cx| {
+            input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
+            input.apply_pending_vertical_placement(cx);
         });
     }
 }
@@ -667,6 +993,7 @@ impl Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
+            .w_full()
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
@@ -700,7 +1027,7 @@ impl Render for TextInput {
             .text_size(px(16.))
             .child(
                 div()
-                    .h(px(28. + 4. * 2.))
+                    .min_h(px(28. + 4. * 2.))
                     .w_full()
                     .p(px(4.))
                     .bg(theme::input_bg())
@@ -712,6 +1039,47 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+impl TextInput {
+    pub(crate) fn cursor_offset_for_test(&self) -> usize {
+        self.cursor_offset()
+    }
+
+    pub(crate) fn visual_row_for_test(&self) -> Option<usize> {
+        self.last_layout
+            .as_ref()
+            .map(|layout| layout.row_for_caret(self.cursor_offset(), self.caret_affinity))
+    }
+
+    pub(crate) fn visual_row_count_for_test(&self) -> Option<usize> {
+        self.last_layout.as_ref().map(CachedLayout::row_count)
+    }
+
+    pub(crate) fn visual_row_width_for_test(&self, row: usize) -> Option<Pixels> {
+        let layout = self.last_layout.as_ref()?;
+        let start = layout.row_start(row);
+        let end = layout.row_end(row);
+        Some(
+            layout.line.unwrapped_layout.x_for_index(end)
+                - layout.line.unwrapped_layout.x_for_index(start),
+        )
+    }
+
+    pub(crate) fn cursor_screen_position_for_test(&self) -> Option<Point<Pixels>> {
+        let bounds = self.last_bounds?;
+        let layout = self.last_layout.as_ref()?;
+        Some(bounds.origin + layout.position_for_caret(self.cursor_offset(), self.caret_affinity))
+    }
+
+    pub(crate) fn layout_bounds_for_test(&self) -> Option<Bounds<Pixels>> {
+        self.last_bounds
+    }
+
+    pub(crate) fn line_height_for_test(&self) -> Option<Pixels> {
+        self.last_layout.as_ref().map(|layout| layout.line_height)
     }
 }
 
@@ -913,7 +1281,7 @@ fn apply_delete(content: &str, selection: Range<usize>) -> (String, Range<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Entity, Focusable, TestAppContext, VisualTestContext};
+    use gpui::{size, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext};
     use rstest::rstest;
 
     #[rstest]
@@ -1065,6 +1433,25 @@ mod tests {
         vcx.update(|window, cx| {
             window.activate_window();
             window.focus(&input.focus_handle(cx), cx);
+        });
+        vcx.run_until_parked();
+        (input, vcx)
+    }
+
+    fn mount_wrapped_input<'a>(
+        cx: &'a mut TestAppContext,
+        content: &str,
+    ) -> (Entity<TextInput>, &'a mut VisualTestContext) {
+        let content = content.to_string();
+        let (input, vcx) = cx.add_window_view(move |_window, cx| {
+            bind_keys(cx);
+            TextInput::with_wrapped_content(cx, "", content)
+        });
+        vcx.simulate_resize(size(px(220.), px(500.)));
+        vcx.update(|window, cx| {
+            window.activate_window();
+            window.focus(&input.focus_handle(cx), cx);
+            window.draw(cx).clear();
         });
         vcx.run_until_parked();
         (input, vcx)
@@ -1227,6 +1614,110 @@ mod tests {
             assert_eq!(input.content().as_ref(), "xc");
             assert_eq!(input.selected_range(), 1..1);
             assert_eq!(input.marked_range, None);
+        });
+    }
+
+    #[gpui::test]
+    fn wrapped_layout_grows_and_clicks_later_unicode_rows(cx: &mut TestAppContext) {
+        let content = "alpha 🦀 e\u{301} beta gamma delta epsilon zeta eta theta iota kappa lambda";
+        let (input, cx) = mount_wrapped_input(cx, content);
+
+        let click = input.read_with(cx, |input, _| {
+            let rows = input
+                .visual_row_count_for_test()
+                .expect("wrapped layout painted");
+            let bounds = input.layout_bounds_for_test().expect("layout bounds");
+            let line_height = input.line_height_for_test().expect("line height");
+            assert!(rows > 1, "narrow host should produce visual wrapping");
+            assert!(
+                bounds.size.height > line_height,
+                "wrapped editor height should grow with its visual rows",
+            );
+            assert_eq!(
+                input
+                    .last_layout
+                    .as_ref()
+                    .expect("cached layout")
+                    .selection_quads(0..content.len(), bounds)
+                    .len(),
+                rows,
+                "a full selection should paint one highlight per visual row",
+            );
+            point(
+                bounds.left() + px(32.),
+                bounds.top() + line_height + line_height / 2.,
+            )
+        });
+
+        cx.simulate_click(click, Modifiers::default());
+        cx.run_until_parked();
+
+        input.read_with(cx, |input, _| {
+            let cursor = input.cursor_offset_for_test();
+            assert_eq!(
+                input.visual_row_for_test(),
+                Some(1),
+                "click should place the caret on the second visual row",
+            );
+            assert!(
+                cursor == content.len()
+                    || content
+                        .grapheme_indices(true)
+                        .any(|(boundary, _)| boundary == cursor),
+                "mouse placement must remain on a Unicode grapheme boundary",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn wrapped_ime_bounds_follow_caret_affinity_at_wrap_boundary(cx: &mut TestAppContext) {
+        let (input, cx) = mount_wrapped_input(
+            cx,
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+        );
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                let layout = input.last_layout.as_ref().expect("wrapped layout painted");
+                assert!(layout.row_count() > 1, "precondition: input wraps");
+                let boundary = layout.boundary_index(0);
+                let line_height = layout.line_height;
+                let input_bounds = input.last_bounds.expect("input bounds");
+                input.selection = Selection::collapsed(boundary);
+                input.caret_affinity = CaretAffinity::Downstream;
+                let boundary_utf16 = input.offset_to_utf16(boundary);
+
+                let ime_bounds = input
+                    .bounds_for_range(boundary_utf16..boundary_utf16, input_bounds, window, cx)
+                    .expect("IME bounds");
+                assert_eq!(
+                    ime_bounds.top(),
+                    input_bounds.top() + line_height,
+                    "downstream affinity puts the IME caret on the next row",
+                );
+                assert_eq!(ime_bounds.size.height, line_height);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn regular_constructor_remains_single_line_when_narrow(cx: &mut TestAppContext) {
+        let (input, cx) = mount_input(
+            cx,
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+        );
+        cx.simulate_resize(size(px(180.), px(300.)));
+        cx.run_until_parked();
+
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.visual_row_count_for_test(), Some(1));
+            assert_eq!(
+                input
+                    .layout_bounds_for_test()
+                    .map(|bounds| bounds.size.height),
+                input.line_height_for_test(),
+                "page-picker-style inputs must retain one-line height",
+            );
         });
     }
 }
