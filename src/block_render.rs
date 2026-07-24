@@ -17,6 +17,8 @@ use gpui::{
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
+use crate::calc;
+
 /// Compatibility re-export for existing block-render callers. New code should
 /// import [`crate::theme`] directly.
 pub use crate::theme;
@@ -374,6 +376,13 @@ fn render_block_node(
                 .text_size(px(size))
                 .child(render_inlines(children, ctx, window, cx))
                 .into_any_element()
+        }
+        // A ```calc fence is arithmetic, not source: evaluate it and show the
+        // results beside each line. Everything else renders as plain code.
+        BlockNode::CodeBlock { ref lang, ref text }
+            if lang.as_ref().is_some_and(|l| l == "calc") =>
+        {
+            calc::render(text, window, cx)
         }
         BlockNode::CodeBlock { lang: _, text } => div()
             .bg(theme::code_bg())
