@@ -13,16 +13,17 @@
 //! state to drift out of sync and every save path sees in-flight edits (#38).
 
 use gpui::{
-    actions, div, prelude::*, px, AnyElement, App, AppContext, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
-    SharedString, Styled, Subscription, Window,
+    actions, anchored, deferred, div, prelude::*, px, AnyElement, App, AppContext, Context, Corner,
+    ElementId, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton,
+    ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
 
 use crate::block_render::{render_block, theme};
 use crate::outline::BlockId;
 use crate::page::Page;
+use crate::page_completion::{self, CompletionKind, CompletionState};
 use crate::page_links::{LinkIndex, PageLinkExt};
-use crate::tags::TagExt;
+use crate::tags::{TagExt, TagIndex};
 use crate::text_input::{
     PendingVerticalPlacement, TextInput, TextInputEvent, VerticalDirection, VerticalMovementOutcome,
 };
@@ -67,11 +68,21 @@ pub enum BlockMode {
     Viewing,
     Editing {
         input: Entity<TextInput>,
+        /// The `[[Page]]` / `#tag` popup, when the caret sits in a completion
+        /// site. It lives inside `Editing` so "popup open on a block that
+        /// isn't being edited" is unrepresentable and every exit path closes
+        /// it for free.
+        completion: Option<CompletionState>,
         /// Drops on edit exit. Fires `end_editing` when focus leaves the input.
         _on_blur: Subscription,
         /// Drops on edit exit. Fires on `TextInputEvent::Cancelled` (Escape)
         /// because the blur listener can lag a frame.
         _on_event: Subscription,
+        /// Drops on edit exit. Recomputes the completion popup. Observes the
+        /// input rather than subscribing to `Changed` because caret movement
+        /// notifies without changing the text, and moving out of `[[foo`
+        /// must close the popup.
+        _on_input_notify: Subscription,
     },
 }
 
@@ -180,6 +191,12 @@ impl BlockView {
                 // the block stays visibly selected and window-level bindings
                 // (ctrl-s etc.) keep dispatching through the focus chain.
                 TextInputEvent::Cancelled => {
+                    // The completion popup swallows the first Escape: it is a
+                    // transient layer over the edit, so dismissing it must not
+                    // also throw the user out of the block.
+                    if this.close_completion(cx) {
+                        return;
+                    }
                     this.end_editing_inner(cx);
                     window.focus(&this.focus_handle, cx);
                 }
@@ -187,6 +204,9 @@ impl BlockView {
                 // rather than a line — then it just breaks the line, and
                 // shift-enter is the way out (#62).
                 TextInputEvent::Submitted => {
+                    if this.accept_completion(cx) {
+                        return;
+                    }
                     if extends_on_enter(input.read(cx).content()) {
                         input.update(cx, |input, cx| input.insert_newline(window, cx));
                     } else {
@@ -206,19 +226,192 @@ impl BlockView {
                     let text = text.to_string();
                     this.page
                         .update(cx, |p, cx| p.set_block_text(block_id, text, cx));
+                    Self::autopair_page_link(input, cx);
                 }
             }
+        });
+        let on_input_notify = cx.observe(&input, |this, input, cx| {
+            this.refresh_completion(&input, cx);
         });
         window.focus(&input_focus, cx);
         self.mode = BlockMode::Editing {
             input,
+            completion: None,
             _on_blur: on_blur,
             _on_event: on_event,
+            _on_input_notify: on_input_notify,
         };
         cx.notify();
     }
 
+    /// Closes `[[` with `]]` so the link is well-formed the moment the popup
+    /// opens, leaving the caret between the pairs.
+    ///
+    /// Driven from `Changed` rather than the completion refresh so it can only
+    /// fire on an actual edit: parking the caret inside an existing `[[foo]]`
+    /// also opens a popup with an empty query, and must not insert anything.
+    fn autopair_page_link(input: &Entity<TextInput>, cx: &mut Context<Self>) {
+        let (content, selection) = {
+            let input = input.read(cx);
+            (input.content().clone(), input.selected_range())
+        };
+        if !selection.is_empty() {
+            return;
+        }
+        let caret = selection.start;
+        if !content[..caret].ends_with("[[") || content[caret..].starts_with("]]") {
+            return;
+        }
+        input.update(cx, |input, cx| {
+            input.replace_range(caret..caret, "]]", 0, cx);
+        });
+    }
+
+    /// Recomputes the completion popup from the editor's text and caret.
+    fn refresh_completion(&mut self, input: &Entity<TextInput>, cx: &mut Context<Self>) {
+        let BlockMode::Editing { completion, .. } = &self.mode else {
+            return;
+        };
+        let previous = completion
+            .as_ref()
+            .map(|state| (state.range.clone(), state.selected));
+
+        let (content, selection) = {
+            let input = input.read(cx);
+            (input.content().clone(), input.selected_range())
+        };
+        let next = selection
+            .is_empty()
+            .then(|| page_completion::trigger_at(&content, selection.start))
+            .flatten()
+            .and_then(|trigger| {
+                let names = Self::completion_names(trigger.kind, cx);
+                CompletionState::new(&trigger, &names)
+            })
+            .map(|mut state| {
+                // Repainting the input re-notifies without moving the caret;
+                // keep the highlighted row so the popup doesn't flick back to
+                // the top under the user.
+                if let Some((range, selected)) = &previous {
+                    if *range == state.range {
+                        state.selected = (*selected).min(state.candidates.len() - 1);
+                    }
+                }
+                state
+            });
+
+        let BlockMode::Editing { completion, .. } = &mut self.mode else {
+            return;
+        };
+        if *completion != next {
+            *completion = next;
+            cx.notify();
+        }
+    }
+
+    /// The names offered for `kind`. Both indexes are optional globals — tests
+    /// that don't seed them still get the "New page/tag" row.
+    fn completion_names(kind: CompletionKind, cx: &App) -> Vec<SharedString> {
+        match kind {
+            CompletionKind::Page => cx
+                .try_global::<LinkIndex>()
+                .map(LinkIndex::page_names)
+                .unwrap_or_default(),
+            CompletionKind::Tag => cx
+                .try_global::<TagIndex>()
+                .map(|index| {
+                    index
+                        .all_tags()
+                        .into_iter()
+                        .map(|summary| summary.display)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Dismisses the popup. Returns whether there was one to dismiss, which is
+    /// how Escape decides between closing the popup and leaving edit mode.
+    fn close_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let BlockMode::Editing { completion, .. } = &mut self.mode else {
+            return false;
+        };
+        let had_popup = completion.take().is_some();
+        if had_popup {
+            cx.notify();
+        }
+        had_popup
+    }
+
+    /// Splices the highlighted candidate over the trigger. Returns whether a
+    /// popup was open, which is how Enter decides between accepting and its
+    /// usual "finish this block" meaning.
+    fn accept_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let (input, state) = match &mut self.mode {
+            BlockMode::Editing {
+                input, completion, ..
+            } => match completion.take() {
+                Some(state) => (input.clone(), state),
+                None => return false,
+            },
+            BlockMode::Viewing => return false,
+        };
+        let Some(insertion) = state.insertion() else {
+            return false;
+        };
+
+        let mut range = state.range;
+        let content = input.read(cx).content().clone();
+        // Swallow the auto-paired `]]` so accepting yields `[[Name]]` rather
+        // than `[[Name]]]]`.
+        if state.kind == CompletionKind::Page && content[range.end..].starts_with("]]") {
+            range.end += 2;
+        }
+        let caret = insertion.len();
+        input.update(cx, |input, cx| {
+            input.replace_range(range, &insertion, caret, cx);
+        });
+        cx.notify();
+        true
+    }
+
+    fn accept_completion_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        if let BlockMode::Editing {
+            completion: Some(state),
+            ..
+        } = &mut self.mode
+        {
+            state.selected = row;
+        }
+        self.accept_completion(cx);
+    }
+
+    /// Up/Down drive the popup while it is open; only otherwise do they move
+    /// the caret between visual rows.
+    fn move_completion_selection(
+        &mut self,
+        direction: VerticalDirection,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let BlockMode::Editing {
+            completion: Some(state),
+            ..
+        } = &mut self.mode
+        else {
+            return false;
+        };
+        match direction {
+            VerticalDirection::Up => state.select_up(),
+            VerticalDirection::Down => state.select_down(),
+        }
+        cx.notify();
+        true
+    }
+
     fn move_caret_vertical(&mut self, direction: VerticalDirection, cx: &mut Context<Self>) {
+        if self.move_completion_selection(direction, cx) {
+            return;
+        }
         let BlockMode::Editing { input, .. } = &self.mode else {
             return;
         };
@@ -290,6 +483,84 @@ fn extends_on_enter(text: &str) -> bool {
 impl Focusable for BlockView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl BlockView {
+    /// The completion popup, anchored under the caret. Returns `None` unless a
+    /// popup is open.
+    ///
+    /// The caret rectangle comes from the input's *painted* layout, so on the
+    /// frame the popup opens it trails the buffer by the characters just
+    /// typed; the next frame corrects it. Before the first paint there is no
+    /// rectangle at all, and `anchored` falls back to laying the popup out
+    /// where it sits in the tree — directly under the block.
+    fn render_completion(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let BlockMode::Editing {
+            input,
+            completion: Some(state),
+            ..
+        } = &self.mode
+        else {
+            return None;
+        };
+
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .bg(theme::overlay_bg())
+            .border_1()
+            .border_color(theme::overlay_border())
+            .rounded_md()
+            .p_1()
+            .min_w(px(220.0))
+            .max_w(px(420.0))
+            // Keep clicks on the popup from reaching the blocks it covers.
+            .occlude();
+        for row in 0..state.candidates.len() {
+            let Some(label) = state.label(row) else {
+                continue;
+            };
+            let (bg_color, fg_color) = if row == state.selected {
+                (theme::row_selected(), theme::row_selected_fg())
+            } else {
+                (theme::row_bg(), theme::header_fg())
+            };
+            list = list.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "block-completion-row-{row}"
+                    ))))
+                    .debug_selector(move || format!("completion-row-{row}"))
+                    .cursor_pointer()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(bg_color)
+                    .text_color(fg_color)
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.accept_completion_row(row, cx);
+                    })),
+            );
+        }
+
+        let caret = input.read(cx).caret_bounds();
+        Some(
+            deferred(
+                anchored()
+                    .anchor(Corner::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    .when_some(caret, |el, caret| el.position(caret.bottom_left()))
+                    .child(list),
+            )
+            // Paint above the blocks below this one, and outside the outline's
+            // scroll container.
+            .with_priority(1)
+            .into_any_element(),
+        )
     }
 }
 
@@ -381,6 +652,7 @@ impl Render for BlockView {
                 }),
             )
             .child(content)
+            .children(self.render_completion(cx))
     }
 }
 
@@ -401,6 +673,32 @@ impl BlockView {
         match &self.mode {
             BlockMode::Editing { input, .. } => Some(input.clone()),
             BlockMode::Viewing => None,
+        }
+    }
+
+    /// The popup's visible rows, or `None` when no popup is open.
+    pub(crate) fn completion_labels_for_test(&self) -> Option<Vec<SharedString>> {
+        let BlockMode::Editing {
+            completion: Some(state),
+            ..
+        } = &self.mode
+        else {
+            return None;
+        };
+        Some(
+            (0..state.candidates.len())
+                .filter_map(|row| state.label(row))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn completion_selection_for_test(&self) -> Option<usize> {
+        match &self.mode {
+            BlockMode::Editing {
+                completion: Some(state),
+                ..
+            } => Some(state.selected),
+            _ => None,
         }
     }
 }
@@ -441,6 +739,294 @@ mod tests {
         vcx.run_until_parked();
         let page = vcx.read(|cx| cx.global::<TestPage>().0.clone());
         (page, bv, vcx)
+    }
+
+    /// Like `mount`, but seeds the two completion indexes so the `[[` and `#`
+    /// popups have something to offer: pages `ruff` and `rust`, and the tags
+    /// found in `#ruff #rustup`.
+    fn mount_with_indexes<'a>(
+        cx: &'a mut TestAppContext,
+        body: &str,
+    ) -> (
+        Entity<Page>,
+        Entity<BlockView>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let body = body.to_string();
+        let (bv, vcx) = cx.add_window_view(move |window, cx| {
+            text_input::bind_keys(cx);
+            super::bind_keys(cx);
+
+            let mut link_index = LinkIndex::default();
+            for name in ["ruff", "rust"] {
+                let indexed = cx.new(|cx| Page::new(name.into(), "", cx));
+                link_index.reindex_page(indexed.read(cx));
+            }
+            cx.set_global(link_index);
+
+            let mut tag_index = TagIndex::default();
+            tag_index.reindex_page(
+                &crate::tags::TagSource::Page("tagged".into()),
+                &crate::outline::Outline::parse("- #ruff #rustup\n"),
+            );
+            cx.set_global(tag_index);
+
+            let page = cx.new(|cx| Page::new("foo".into(), &body, cx));
+            let block_id = page.read(cx).outline().first_block_id().unwrap();
+            cx.set_global(TestPage(page));
+            BlockView::new(block_id, cx.global::<TestPage>().0.clone(), window, cx)
+        });
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let page = vcx.read(|cx| cx.global::<TestPage>().0.clone());
+        (page, bv, vcx)
+    }
+
+    /// Puts an empty block into edit mode through the real keyboard path.
+    fn edit_empty_block(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Page>,
+        Entity<BlockView>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let (page, bv, cx) = mount_with_indexes(cx, "- \n");
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        (page, bv, cx)
+    }
+
+    fn block_text(cx: &mut gpui::VisualTestContext, bv: &Entity<BlockView>) -> String {
+        cx.read(|cx| {
+            let bv = bv.read(cx);
+            bv.input_entity_for_test()
+                .expect("still editing")
+                .read(cx)
+                .content()
+                .to_string()
+        })
+    }
+
+    fn caret(cx: &mut gpui::VisualTestContext, bv: &Entity<BlockView>) -> usize {
+        cx.read(|cx| {
+            bv.read(cx)
+                .input_entity_for_test()
+                .expect("still editing")
+                .read(cx)
+                .selected_range()
+                .start
+        })
+    }
+
+    #[gpui::test]
+    fn typing_double_bracket_auto_pairs_and_opens_completion(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = edit_empty_block(cx);
+
+        cx.simulate_input("[[");
+        cx.run_until_parked();
+
+        assert_eq!(block_text(cx, &bv), "[[]]", "the closing pair is inserted");
+        assert_eq!(caret(cx, &bv), 2, "the caret stays between the brackets");
+        cx.read(|cx| {
+            assert_eq!(
+                bv.read(cx).completion_labels_for_test(),
+                Some(vec!["ruff".into(), "rust".into()]),
+                "an empty query lists every page, with no New row",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn typing_narrows_the_candidates_and_offers_a_new_page(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = edit_empty_block(cx);
+
+        cx.simulate_input("[[ru");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert_eq!(
+                bv.read(cx).completion_labels_for_test(),
+                Some(vec!["ruff".into(), "rust".into(), "New page: ru".into()]),
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn enter_accepts_the_selected_page_without_leaving_the_block(cx: &mut TestAppContext) {
+        let (page, bv, cx) = edit_empty_block(cx);
+
+        cx.simulate_input("[[ru");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            block_text(cx, &bv),
+            "[[ruff]]",
+            "the auto-paired `]]` is consumed rather than doubled",
+        );
+        assert_eq!(caret(cx, &bv), 8, "the caret lands after the link");
+        cx.read(|cx| {
+            assert!(bv.read(cx).is_editing(), "accepting stays in the block");
+            assert!(
+                bv.read(cx).completion_labels_for_test().is_none(),
+                "the popup closes on accept",
+            );
+            assert_eq!(
+                page.read(cx).outline().roots.len(),
+                1,
+                "enter must not also insert a sibling",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn enter_on_the_new_page_row_inserts_the_typed_name(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = edit_empty_block(cx);
+
+        cx.simulate_input("[[zzz");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                bv.read(cx).completion_labels_for_test(),
+                Some(vec!["New page: zzz".into()]),
+                "a query matching nothing still offers the new page",
+            );
+        });
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(block_text(cx, &bv), "[[zzz]]");
+    }
+
+    #[gpui::test]
+    fn down_moves_the_completion_selection_not_the_caret(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = edit_empty_block(cx);
+
+        cx.simulate_input("[[ru");
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+
+        assert_eq!(caret(cx, &bv), 4, "the caret did not move");
+        cx.read(|cx| {
+            assert_eq!(bv.read(cx).completion_selection_for_test(), Some(1));
+        });
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(block_text(cx, &bv), "[[rust]]");
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_popup_before_it_leaves_editing(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = edit_empty_block(cx);
+
+        cx.simulate_input("[[ru");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                bv.read(cx).completion_labels_for_test().is_none(),
+                "the first escape dismisses the popup",
+            );
+            assert!(
+                bv.read(cx).is_editing(),
+                "and leaves the block in edit mode"
+            );
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(!bv.read(cx).is_editing(), "the second escape exits editing");
+            assert!(
+                bv.read(cx).focus_handle.is_focused(window),
+                "and parks focus on the block (#42)",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn moving_the_caret_out_of_the_link_closes_the_popup(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = edit_empty_block(cx);
+
+        cx.simulate_input("[[ru");
+        cx.run_until_parked();
+        cx.read(|cx| assert!(bv.read(cx).completion_labels_for_test().is_some()));
+
+        cx.simulate_keystrokes("home");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                bv.read(cx).completion_labels_for_test().is_none(),
+                "no `[[` before the caret means no popup",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn hash_opens_tag_completion_and_enter_inserts_the_tag(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = edit_empty_block(cx);
+
+        cx.simulate_input("see #ru");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                bv.read(cx).completion_labels_for_test(),
+                Some(vec!["ruff".into(), "rustup".into(), "New tag: ru".into()]),
+            );
+        });
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            block_text(cx, &bv),
+            "see #ruff",
+            "a tag is spliced in bare, with no closing delimiter",
+        );
+    }
+
+    /// A click on a popup row must not first blur the `TextInput` — the blur
+    /// listener would `end_editing` and drop the popup before the click ever
+    /// reached its handler.
+    #[gpui::test]
+    fn clicking_a_row_accepts_it_without_ending_the_edit(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = edit_empty_block(cx);
+
+        cx.simulate_input("[[ru");
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("completion-row-1")
+            .expect("the second row painted");
+        cx.simulate_click(row.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        cx.read(|cx| assert!(bv.read(cx).is_editing(), "the click kept the block open"));
+        assert_eq!(block_text(cx, &bv), "[[rust]]", "the clicked row was used");
+    }
+
+    #[gpui::test]
+    fn a_caret_parked_inside_an_existing_link_does_not_add_brackets(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = mount_with_indexes(cx, "- [[ruff]]\n");
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter home right right");
+        cx.run_until_parked();
+
+        assert_eq!(
+            block_text(cx, &bv),
+            "[[ruff]]",
+            "moving the caret past `[[` is not an edit, so nothing is auto-paired",
+        );
+        cx.read(|cx| {
+            assert_eq!(
+                bv.read(cx).completion_labels_for_test(),
+                Some(vec!["ruff".into(), "rust".into()]),
+                "the popup still opens so the link can be retargeted",
+            );
+        });
     }
 
     /// Focuses the block wrapper and settles — the "focused, viewing"

@@ -519,6 +519,25 @@ impl TextInput {
         self.replace_text_in_range(None, "\n", window, cx);
     }
 
+    /// Replaces `range` (byte offsets into `content`) with `text`, leaving the
+    /// caret `caret_in_text` bytes into what was inserted. Goes through the
+    /// same `apply_edit` path as typing, so subscribers see a normal `Changed`.
+    ///
+    /// The caret offset is what lets a caller insert a closing delimiter and
+    /// stay in front of it — unlike the IME path, which always collapses to the
+    /// end of the insertion.
+    pub fn replace_range(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        caret_in_text: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let caret = range.start + caret_in_text;
+        let (content, _) = apply_replace(&self.content, range, text);
+        self.apply_edit(content, caret..caret, cx);
+    }
+
     #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextInputEvent::Cancelled);
@@ -1152,6 +1171,21 @@ impl Focusable for TextInput {
     }
 }
 
+impl TextInput {
+    /// The caret's rectangle in window coordinates, for anchoring a popup to
+    /// it. `None` before the first paint, since the geometry comes from the
+    /// layout cached during painting — which also means the value trails the
+    /// buffer by one frame right after an edit.
+    #[must_use]
+    pub fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
+        let bounds = self.last_bounds?;
+        let layout = self.last_layout.as_ref()?;
+        let origin =
+            bounds.origin + layout.position_for_caret(self.cursor_offset(), self.caret_affinity);
+        Some(Bounds::new(origin, size(px(2.), layout.line_height)))
+    }
+}
+
 #[cfg(test)]
 impl TextInput {
     pub(crate) fn cursor_offset_for_test(&self) -> usize {
@@ -1178,9 +1212,7 @@ impl TextInput {
     }
 
     pub(crate) fn cursor_screen_position_for_test(&self) -> Option<Point<Pixels>> {
-        let bounds = self.last_bounds?;
-        let layout = self.last_layout.as_ref()?;
-        Some(bounds.origin + layout.position_for_caret(self.cursor_offset(), self.caret_affinity))
+        self.caret_bounds().map(|bounds| bounds.origin)
     }
 
     pub(crate) fn layout_bounds_for_test(&self) -> Option<Bounds<Pixels>> {

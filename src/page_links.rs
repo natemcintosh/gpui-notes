@@ -67,6 +67,20 @@ impl LinkIndex {
         self.pages.contains(name)
     }
 
+    /// Every page name the index knows about, sorted case-insensitively.
+    /// Backs the `[[` completion popup, which needs the list on every
+    /// keystroke and so cannot afford to re-read the notes directory.
+    #[must_use]
+    pub fn page_names(&self) -> Vec<SharedString> {
+        let mut names: Vec<SharedString> = self
+            .pages
+            .iter()
+            .map(|name| SharedString::from(name.clone()))
+            .collect();
+        names.sort_by_key(|name| name.to_lowercase());
+        names
+    }
+
     /// Builds an index from every regular page currently on disk.
     ///
     /// # Errors
