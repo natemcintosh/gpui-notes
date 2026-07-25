@@ -473,7 +473,7 @@ mod tests {
             reg.save(&page, cx).unwrap();
         });
 
-        assert!(root.join("journals/2026-04-18.md").is_file());
+        assert!(root.join("journals/2026_04_18.md").is_file());
         assert!(!root.join("pages/2026-04-18.md").exists());
 
         cx.update(|cx| {
@@ -541,7 +541,7 @@ mod tests {
         });
 
         let page = std::fs::read_to_string(root.join("pages/2026-01-02.md")).unwrap();
-        let journal = std::fs::read_to_string(root.join("journals/2026-01-02.md")).unwrap();
+        let journal = std::fs::read_to_string(root.join("journals/2026_01_02.md")).unwrap();
         assert_eq!(page, "- page-body\n");
         assert_eq!(journal, "- journal-body\n");
     }
@@ -570,7 +570,7 @@ mod tests {
             "- page-body\n",
         );
         assert_eq!(
-            std::fs::read_to_string(root.join("journals/2026-01-02.md")).unwrap(),
+            std::fs::read_to_string(root.join("journals/2026_01_02.md")).unwrap(),
             "",
             "journal file must not receive the page's body",
         );

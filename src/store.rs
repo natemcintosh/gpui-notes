@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 const PAGES_DIR: &str = "pages";
 const JOURNALS_DIR: &str = "journals";
-const JOURNAL_DATE_FMT: &str = "%Y-%m-%d";
+/// Journal filenames on disk use Logseq's underscore form. Journal *titles* in
+/// the UI stay ISO (`%Y-%m-%d`) — see `journal::is_journal_name`.
+const JOURNAL_DATE_FMT: &str = "%Y_%m_%d";
 
 pub struct NotesStore {
     root: PathBuf,
