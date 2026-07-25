@@ -16,11 +16,8 @@ Not currently planned (may be revisited later): graph view, query blocks, task s
 
 ## Notes storage
 
-Pages are stored as plain `.md` files in a notes root directory:
-
-- Linux: `$XDG_DATA_HOME/gpui-notes` (falls back to `~/.local/share/gpui-notes`)
-- macOS: `~/Library/Application Support/gpui-notes`
-- Windows: `%APPDATA%\gpui-notes`
+Pages are stored as plain `.md` files in a notes root directory, which defaults to
+`~/Desktop/logseq-test-zone`.
 
 Override the location with the `GPUI_NOTES_ROOT` environment variable (must be an absolute path).
 

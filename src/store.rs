@@ -31,7 +31,7 @@ impl NotesStore {
 
     /// # Errors
     /// Returns an error if `GPUI_NOTES_ROOT` is set but not absolute, or if the
-    /// platform data directory cannot be determined.
+    /// home directory cannot be determined.
     pub fn default_root() -> io::Result<PathBuf> {
         if let Some(override_root) = std::env::var_os("GPUI_NOTES_ROOT") {
             let p = PathBuf::from(override_root);
@@ -43,13 +43,13 @@ impl NotesStore {
             }
             return Ok(p);
         }
-        let data_dir = dirs::data_dir().ok_or_else(|| {
+        let home_dir = dirs::home_dir().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "could not determine platform data directory",
+                "could not determine home directory",
             )
         })?;
-        Ok(data_dir.join("gpui-notes"))
+        Ok(home_dir.join("Desktop").join("logseq-test-zone"))
     }
 
     /// # Errors
