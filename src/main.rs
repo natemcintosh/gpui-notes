@@ -1,21 +1,20 @@
 #![allow(clippy::unreadable_literal)]
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, AppContext, Bounds, Context, ElementId, Entity,
-    FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, size, App, AppContext, Bounds, Context, Div, ElementId, Entity,
+    FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, NavigationDirection,
+    ParentElement, Render, SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions,
 };
 use gpui_notes::block_view;
 use gpui_notes::cmd_key;
 use gpui_notes::errors::{self, LastError};
+use gpui_notes::history::{self, NavHistory};
 use gpui_notes::journal;
 use gpui_notes::outline_view;
 use gpui_notes::page::Page;
 use gpui_notes::page_links::{LinkIndex, OpenPage};
 use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
-use gpui_notes::registry::{
-    pick_next, save_all_on_quit, set_current_page, CurrentPage, PageRegistry,
-};
+use gpui_notes::registry::{pick_next, save_all_on_quit, CurrentPage, PageRegistry};
 use gpui_notes::shortcut_bar::{ShortcutBar, ShortcutOverlay};
 use gpui_notes::shortcut_hints::{self, ShortcutHint};
 use gpui_notes::store::NotesStore;
@@ -34,6 +33,8 @@ actions!(
         CloseTagView,
         OpenPagePicker,
         ToggleShortcuts,
+        NavigateBack,
+        NavigateForward,
         Quit
     ]
 );
@@ -167,7 +168,8 @@ impl RootView {
     }
 
     fn jump_to_today(&mut self, _: &JumpToToday, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(err) = journal::open_today(cx) {
+        // Resolve the date fresh on every press, per `journal::open_today`.
+        if let Err(err) = history::navigate_to(&TagSource::Journal(journal::today()), cx) {
             errors::report(format!("open today's journal failed: {err}"), cx);
             return;
         }
@@ -190,7 +192,7 @@ impl RootView {
         let Some(next) = pick_next(&names, current.as_ref()) else {
             return;
         };
-        if let Err(err) = set_current_page(next.as_ref(), cx) {
+        if let Err(err) = history::navigate_to(&TagSource::Page(next.clone()), cx) {
             errors::report(format!("open {next:?} failed: {err}"), cx);
             return;
         }
@@ -206,13 +208,71 @@ impl RootView {
     }
 
     fn open_page(&mut self, action: &OpenPage, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(err) = set_current_page(action.name.as_ref(), cx) {
+        if let Err(err) = history::navigate_to(&TagSource::Page(action.name.clone()), cx) {
             errors::report(format!("open {:?} failed: {err}", action.name), cx);
             return;
         }
         self.overlay = OverlayMode::None;
         self.park_focus(window, cx);
         cx.notify();
+    }
+
+    fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate_history(NavigationDirection::Back, window, cx);
+    }
+
+    fn navigate_forward(
+        &mut self,
+        _: &NavigateForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_history(NavigationDirection::Forward, window, cx);
+    }
+
+    /// Shared by the keyboard actions and the mouse side buttons. An empty
+    /// stack leaves the overlay and focus untouched, so a stray back press
+    /// cannot dismiss an overlay the user is still reading.
+    fn navigate_history(
+        &mut self,
+        direction: NavigationDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match history::go(direction, cx) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(err) => {
+                let label = match direction {
+                    NavigationDirection::Back => "back",
+                    NavigationDirection::Forward => "forward",
+                };
+                errors::report(format!("navigate {label} failed: {err}"), cx);
+                return;
+            }
+        }
+        self.overlay = OverlayMode::None;
+        self.park_focus(window, cx);
+        cx.notify();
+    }
+
+    /// Claims the mouse's back/forward side buttons for history navigation.
+    /// Nothing else in the tree listens for `Navigate`, so the root element can
+    /// take them for the whole window. Split out of `render` to keep that
+    /// method within the `too_many_lines` budget.
+    fn bind_navigation_mouse(root: Div, cx: &mut Context<Self>) -> Div {
+        root.on_mouse_down(
+            MouseButton::Navigate(NavigationDirection::Back),
+            cx.listener(|this, _, window, cx| {
+                this.navigate_history(NavigationDirection::Back, window, cx);
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Navigate(NavigationDirection::Forward),
+            cx.listener(|this, _, window, cx| {
+                this.navigate_history(NavigationDirection::Forward, window, cx);
+            }),
+        )
     }
 
     /// Escape handler. Closes whichever overlay is currently active and
@@ -384,11 +444,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let result = match entry {
-            PageEntry::Page(name) => set_current_page(name.as_ref(), cx),
-            PageEntry::Journal(date) => journal::open_for_date(*date, cx).map(|_| ()),
+        let target = match entry {
+            PageEntry::Page(name) => TagSource::Page(name.clone()),
+            PageEntry::Journal(date) => TagSource::Journal(*date),
         };
-        if let Err(err) = result {
+        if let Err(err) = history::navigate_to(&target, cx) {
             errors::report(format!("page picker: open failed: {err}"), cx);
         }
         self.close_picker(window, cx);
@@ -410,11 +470,7 @@ impl RootView {
     }
 
     fn open_tag_hit(&mut self, source: &TagSource, window: &mut Window, cx: &mut Context<Self>) {
-        let result = match source {
-            TagSource::Page(name) => set_current_page(name.as_ref(), cx),
-            TagSource::Journal(date) => journal::open_for_date(*date, cx).map(|_| ()),
-        };
-        if let Err(err) = result {
+        if let Err(err) = history::navigate_to(source, cx) {
             errors::report(format!("open tag result failed: {err}"), cx);
             return;
         }
@@ -503,7 +559,7 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current: Option<Entity<Page>> = cx.global::<CurrentPage>().get().cloned();
 
-        let mut root = div()
+        let root = div()
             .track_focus(&self.focus_handle(cx))
             .key_context("RootView")
             .on_action(cx.listener(Self::save_current))
@@ -514,6 +570,9 @@ impl Render for RootView {
             .on_action(cx.listener(Self::close_tag_view))
             .on_action(cx.listener(Self::open_page_picker))
             .on_action(cx.listener(Self::toggle_shortcuts))
+            .on_action(cx.listener(Self::navigate_back))
+            .on_action(cx.listener(Self::navigate_forward));
+        let mut root = Self::bind_navigation_mouse(root, cx)
             .relative()
             .flex()
             .flex_col()
@@ -624,6 +683,12 @@ fn main() {
             KeyBinding::new("?", ToggleShortcuts, Some("RootView && !TextInput")),
             KeyBinding::new(&format!("{cmd}-/"), ToggleShortcuts, None),
             KeyBinding::new(&format!("{cmd}-q"), Quit, None),
+            // Registered last so the four-slot shortcut bar keeps showing the
+            // bindings above. `!TextInput` keeps a block edit from being
+            // navigated out from under the user, and on macOS leaves alt-arrow
+            // free for `WordLeft`/`WordRight` (see `text_input::bind_keys`).
+            KeyBinding::new("alt-left", NavigateBack, Some("RootView && !TextInput")),
+            KeyBinding::new("alt-right", NavigateForward, Some("RootView && !TextInput")),
         ]);
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
 
@@ -636,7 +701,10 @@ fn main() {
         cx.set_global(PageRegistry::new(store));
         cx.set_global(CurrentPage::default());
         cx.set_global(LastError::default());
+        cx.set_global(NavHistory::default());
         save_all_on_quit(cx);
+        // Deliberately not `navigate_to`: the first page is not a history
+        // entry, so the back stack starts empty.
         journal::open_today(cx).expect("open today's journal");
 
         let bounds = Bounds::centered(None, size(px(640.0), px(420.0)), cx);
@@ -660,6 +728,7 @@ fn main() {
 mod tests {
     use super::*;
     use gpui::{point, Modifiers, TestAppContext, VisualTestContext};
+    use gpui_notes::registry::set_current_page;
     use tempfile::TempDir;
 
     fn mount_root<'a>(
@@ -680,6 +749,8 @@ mod tests {
                 KeyBinding::new("escape", CloseTagView, Some("RootView")),
                 KeyBinding::new("?", ToggleShortcuts, Some("RootView && !TextInput")),
                 KeyBinding::new("ctrl-/", ToggleShortcuts, None),
+                KeyBinding::new("alt-left", NavigateBack, Some("RootView && !TextInput")),
+                KeyBinding::new("alt-right", NavigateForward, Some("RootView && !TextInput")),
             ]);
             let store = NotesStore::new(&root_dir).unwrap();
             store.write("Home", "- home\n").unwrap();
@@ -689,7 +760,9 @@ mod tests {
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());
+            cx.set_global(NavHistory::default());
             save_all_on_quit(cx);
+            // Setup, not navigation: matches `main`'s startup, back stack empty.
             set_current_page("Home", cx).unwrap();
             RootView::new(window, cx)
         });
@@ -1564,5 +1637,185 @@ mod tests {
 
         // Restore permissions so TempDir cleanup can remove the files.
         std::fs::set_permissions(&pages, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Back/forward navigation history.
+    //
+    // `mount_root` starts on Home with an empty back stack. `ctrl-p` is the
+    // deterministic way to reach a second page (`pick_next` cycles Home →
+    // Tagged), and `ctrl-.` reaches a journal — the two target shapes that
+    // must stay distinguishable through a round trip.
+    // ────────────────────────────────────────────────────────────────────
+
+    fn current_page_name(cx: &mut VisualTestContext) -> String {
+        cx.read(|cx| {
+            cx.global::<CurrentPage>()
+                .get()
+                .unwrap()
+                .read(cx)
+                .name()
+                .to_string()
+        })
+    }
+
+    #[gpui::test]
+    fn back_returns_to_previous_page(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Tagged");
+
+        cx.simulate_keystrokes("alt-left");
+        cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
+        assert_eq!(current_page_name(cx), "Home");
+    }
+
+    #[gpui::test]
+    fn forward_returns_after_back(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("alt-left");
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Home");
+
+        cx.simulate_keystrokes("alt-right");
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Tagged");
+    }
+
+    /// An empty back stack must be inert, not an error and not a focus change.
+    #[gpui::test]
+    fn back_with_empty_history_is_noop(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("alt-left");
+        cx.run_until_parked();
+
+        assert_root_in_focus_path(cx, &root);
+        assert_eq!(current_page_name(cx), "Home");
+        cx.read(|cx| {
+            assert!(
+                cx.global::<LastError>().get().is_none(),
+                "no error reported"
+            );
+        });
+    }
+
+    /// Browser semantics: navigating somewhere new abandons the forward branch.
+    #[gpui::test]
+    fn navigating_clears_forward_stack(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("alt-left");
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Home");
+
+        // A fresh navigation while Tagged sits on the forward stack.
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+        let journal = current_page_name(cx);
+        assert_ne!(journal, "Home");
+
+        cx.simulate_keystrokes("alt-right");
+        cx.run_until_parked();
+        assert_eq!(
+            current_page_name(cx),
+            journal,
+            "forward must be dead after a new navigation",
+        );
+    }
+
+    /// The mouse side button is the production trigger, so drive the real
+    /// `MouseButton::Navigate` event rather than calling the handler — that is
+    /// what catches a listener attached to the wrong element.
+    #[gpui::test]
+    fn mouse_back_and_forward_buttons_navigate(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Tagged");
+
+        cx.simulate_mouse_down(
+            point(px(24.0), px(50.0)),
+            MouseButton::Navigate(NavigationDirection::Back),
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Home");
+
+        cx.simulate_mouse_down(
+            point(px(24.0), px(50.0)),
+            MouseButton::Navigate(NavigationDirection::Forward),
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Tagged");
+    }
+
+    /// Guards the `PageKey::Page` vs `PageKey::Journal` distinction (#40): a
+    /// journal's display name is an ISO date, and going back from it must
+    /// return to the page, not to a page named after that date.
+    #[gpui::test]
+    fn back_from_journal_returns_to_page(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+        assert_ne!(current_page_name(cx), "Home");
+
+        cx.simulate_keystrokes("alt-left");
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Home");
+    }
+
+    /// The `!TextInput` predicate: alt-left must not navigate away from a block
+    /// that is being edited. On macOS it falls through to `WordLeft`; on Linux,
+    /// where `text_input` binds ctrl-arrow for word motion, it is simply inert.
+    /// Either way the editor keeps focus and the page must not change.
+    #[gpui::test]
+    fn alt_left_while_editing_does_not_navigate(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        // Navigate first so the back stack is non-empty: a suppressed
+        // `NavigateBack` and an inert one are indistinguishable otherwise.
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Tagged");
+
+        // Enter opens the first block ("has #todo") with the caret at the end.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("alt-left");
+        cx.run_until_parked();
+        cx.simulate_input("X");
+        cx.run_until_parked();
+
+        assert_eq!(
+            current_page_name(cx),
+            "Tagged",
+            "alt-left must not navigate back while a block editor is focused",
+        );
+        cx.read(|cx| {
+            let body = cx.global::<CurrentPage>().get().unwrap().read(cx).body();
+            assert!(
+                body.contains('X'),
+                "the editor must still hold focus after alt-left; body: {body:?}",
+            );
+        });
     }
 }
