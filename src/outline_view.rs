@@ -15,7 +15,8 @@ use gpui::{
 
 use crate::block_render::theme;
 use crate::block_view::{BlockView, BlockViewEvent};
-use crate::outline::{Block, BlockId};
+use crate::linked_refs::LinkedRefsView;
+use crate::outline::{Block, BlockId, Outline};
 use crate::page::Page;
 use crate::text_input::{PendingVerticalPlacement, VerticalDirection};
 
@@ -54,8 +55,20 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// Which slice of the page this view renders.
+///
+/// `Subtree` views back the linked-references rows: they show one block and
+/// its descendants from some *other* page, are not their own scroll root, and
+/// carry no references section of their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutlineScope {
+    Page,
+    Subtree(BlockId),
+}
+
 pub struct OutlineView {
     page: Entity<Page>,
+    scope: OutlineScope,
     /// Fallback focus target (e.g. an empty outline); a block exiting edit
     /// mode parks focus on the block itself (#42), not here.
     focus_handle: FocusHandle,
@@ -67,19 +80,47 @@ pub struct OutlineView {
     /// Attached to the scrolling root so keyboard focus moves can reveal the
     /// target row. Child indices line up with `flatten_visible` order.
     scroll: ScrollHandle,
+    /// Built on first render (not in `new`: `Page::new` constructs its view
+    /// from `cx.entity()` before the page itself exists). `Page` scope only.
+    linked_refs: Option<Entity<LinkedRefsView>>,
     _page_sub: Subscription,
 }
 
 impl OutlineView {
     pub fn new(page: Entity<Page>, cx: &mut Context<Self>) -> Self {
+        Self::scoped(page, OutlineScope::Page, cx)
+    }
+
+    /// A view over `root` and its descendants only. Edits, indents and moves
+    /// still act on `page`, so a linked reference is editable in place.
+    pub fn subtree(page: Entity<Page>, root: BlockId, cx: &mut Context<Self>) -> Self {
+        Self::scoped(page, OutlineScope::Subtree(root), cx)
+    }
+
+    fn scoped(page: Entity<Page>, scope: OutlineScope, cx: &mut Context<Self>) -> Self {
         let sub = cx.observe(&page, |_, _, cx| cx.notify());
         Self {
             page,
+            scope,
             focus_handle: cx.focus_handle(),
             blocks: HashMap::new(),
             block_subs: HashMap::new(),
             scroll: ScrollHandle::new(),
+            linked_refs: None,
             _page_sub: sub,
+        }
+    }
+
+    /// The roots this view renders and navigates within. Keeping every
+    /// traversal behind this one accessor is what stops focus moves and
+    /// backspace in a linked reference from escaping into the rest of the
+    /// source page.
+    fn scoped_roots<'a>(&self, outline: &'a Outline) -> &'a [Block] {
+        match self.scope {
+            OutlineScope::Page => &outline.roots,
+            OutlineScope::Subtree(id) => outline
+                .path_to(id)
+                .map_or(&[][..], |path| block_slice_at(&outline.roots, &path)),
         }
     }
 
@@ -87,7 +128,11 @@ impl OutlineView {
     /// needed. An empty outline falls back to this view's own focus handle so
     /// the enclosing `RootView` remains in the key dispatch path.
     pub fn focus_first_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(first_id) = self.page.read(cx).outline().first_block_id() else {
+        let first = self
+            .scoped_roots(self.page.read(cx).outline())
+            .first()
+            .map(|block| block.id);
+        let Some(first_id) = first else {
             window.focus(&self.focus_handle, cx);
             return;
         };
@@ -158,7 +203,7 @@ impl OutlineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let flat = flatten_visible(&self.page.read(cx).outline().roots);
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
         let Some(source_index) = flat.iter().position(|&(_, id)| id == source) else {
             return;
         };
@@ -198,7 +243,7 @@ impl OutlineView {
         let Some(current) = self.focused_block_id(window, cx) else {
             return;
         };
-        let flat = flatten_visible(&self.page.read(cx).outline().roots);
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
         let Some(idx) = flat.iter().position(|&(_, id)| id == current) else {
             return;
         };
@@ -243,7 +288,7 @@ impl OutlineView {
                 && outline
                     .path_to(current)
                     .is_some_and(|path| children_at(&outline.roots, &path).is_empty());
-            (flatten_visible(&outline.roots), deletable)
+            (flatten_visible(self.scoped_roots(outline)), deletable)
         };
         if !deletable || flat.len() <= 1 {
             return;
@@ -265,6 +310,33 @@ impl OutlineView {
     pub fn block_view(&self, id: BlockId) -> Option<&Entity<BlockView>> {
         self.blocks.get(&id)
     }
+
+    /// How many block rows this view has mounted, i.e. how much of the outline
+    /// is on screen. Pruned to the scope on every render.
+    #[cfg(test)]
+    #[must_use]
+    pub fn rendered_block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// The linked-references section, once it has been rendered at least once.
+    #[must_use]
+    pub fn linked_refs(&self) -> Option<&Entity<LinkedRefsView>> {
+        self.linked_refs.as_ref()
+    }
+}
+
+/// The one-element slice holding the block at `path`, so a subtree can be
+/// handed to the same `&[Block]` traversals the whole outline uses.
+fn block_slice_at<'a>(roots: &'a [Block], path: &[usize]) -> &'a [Block] {
+    let Some((&last, parents)) = path.split_last() else {
+        return &[];
+    };
+    let mut blocks = roots;
+    for &i in parents {
+        blocks = &blocks[i].children;
+    }
+    &blocks[last..=last]
 }
 
 /// The children of the block at `path` (empty slice semantics: `path` must
@@ -303,10 +375,10 @@ fn collect_all_ids(blocks: &[Block], out: &mut HashSet<BlockId>) {
 impl Render for OutlineView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (flat, all_ids) = {
-            let outline = self.page.read(cx).outline();
+            let roots = self.scoped_roots(self.page.read(cx).outline());
             let mut all = HashSet::new();
-            collect_all_ids(&outline.roots, &mut all);
-            (flatten_visible(&outline.roots), all)
+            collect_all_ids(roots, &mut all);
+            (flatten_visible(roots), all)
         };
         self.blocks.retain(|id, _| all_ids.contains(id));
         self.block_subs.retain(|id, _| all_ids.contains(id));
@@ -315,7 +387,7 @@ impl Render for OutlineView {
         // but the handlers live here because the ops need the outline-wide
         // view map and traversal order. Actions dispatched from a focused
         // block bubble up through this ancestor node.
-        let mut root = div()
+        let root = div()
             .id("outline")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &FocusUp, window, cx| {
@@ -344,12 +416,20 @@ impl Render for OutlineView {
             }))
             .flex()
             .flex_col()
-            .flex_1()
-            .min_h_0()
             .w_full()
-            .gap_1()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll);
+            .gap_1();
+
+        // Only the page-level view scrolls: a subtree view is rendered inside
+        // that scroll container, and nesting a second one would trap the wheel.
+        let mut root = match self.scope {
+            OutlineScope::Page => root.flex_1().min_h_0().overflow_y_scroll().track_scroll(
+                // Child indices line up with `flat`, so the refs section must
+                // stay the last child (see below).
+                &self.scroll,
+            ),
+            OutlineScope::Subtree(_) => root,
+        };
+
         for (depth, id) in flat {
             let bv = self.get_or_create(id, window, cx);
             #[allow(clippy::cast_precision_loss)]
@@ -370,6 +450,14 @@ impl Render for OutlineView {
                 )
                 .child(bv);
             root = root.child(row);
+        }
+
+        if self.scope == OutlineScope::Page {
+            let page = self.page.clone();
+            let refs = self
+                .linked_refs
+                .get_or_insert_with(|| cx.new(|cx| LinkedRefsView::new(page, cx)));
+            root = root.child(refs.clone());
         }
         root
     }
@@ -405,6 +493,81 @@ mod tests {
         vcx.run_until_parked();
         let page = vcx.read(|cx| cx.global::<TestPage>().0.clone());
         (page, ov, vcx)
+    }
+
+    /// Same as `mount`, but the view is scoped to the first root's subtree —
+    /// the shape the linked-references rows use.
+    fn mount_subtree<'a>(
+        cx: &'a mut TestAppContext,
+        body: &str,
+    ) -> (Entity<Page>, Entity<OutlineView>, &'a mut VisualTestContext) {
+        let body = body.to_string();
+        let (ov, vcx) = cx.add_window_view(move |_window, cx| {
+            text_input::bind_keys(cx);
+            crate::block_view::bind_keys(cx);
+            super::bind_keys(cx);
+            let page = cx.new(|cx| Page::new("foo".into(), &body, cx));
+            let root = page.read(cx).outline().roots[0].id;
+            cx.set_global(TestPage(page));
+            OutlineView::subtree(cx.global::<TestPage>().0.clone(), root, cx)
+        });
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let page = vcx.read(|cx| cx.global::<TestPage>().0.clone());
+        (page, ov, vcx)
+    }
+
+    #[gpui::test]
+    fn subtree_scope_renders_only_that_block_and_its_descendants(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount_subtree(cx, "- a\n\t- a1\n- b\n");
+
+        let (a, a1, b) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (
+                outline.roots[0].id,
+                outline.roots[0].children[0].id,
+                outline.roots[1].id,
+            )
+        });
+
+        cx.read(|cx| {
+            let view = ov.read(cx);
+            assert!(view.block_view(a).is_some(), "root of the subtree renders");
+            assert!(view.block_view(a1).is_some(), "descendants render");
+            assert!(
+                view.block_view(b).is_none(),
+                "a sibling outside the subtree must not render",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn subtree_focus_clamps_at_its_own_last_block(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount_subtree(cx, "- a\n\t- a1\n- b\n");
+
+        let a1 = cx.read(|cx| page.read(cx).outline().roots[0].children[0].id);
+
+        // Focus is precondition setup here; the behaviour under test is the key.
+        cx.update(|window, cx| {
+            let bv = ov
+                .read(cx)
+                .block_view(a1)
+                .cloned()
+                .expect("descendant rendered");
+            window.focus(&bv.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            let bv = ov.read(cx).block_view(a1).cloned().expect("still cached");
+            assert!(
+                bv.read(cx).focus_handle(cx).is_focused(window),
+                "down must not escape the subtree into the next root block",
+            );
+        });
     }
 
     #[gpui::test]

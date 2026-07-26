@@ -760,7 +760,8 @@ mod tests {
             let mut link_index = LinkIndex::default();
             for name in ["ruff", "rust"] {
                 let indexed = cx.new(|cx| Page::new(name.into(), "", cx));
-                link_index.reindex_page(indexed.read(cx));
+                link_index
+                    .reindex_page(indexed.read(cx), &crate::tags::TagSource::Page(name.into()));
             }
             cx.set_global(link_index);
 

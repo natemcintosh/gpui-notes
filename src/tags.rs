@@ -26,7 +26,7 @@ pub struct OpenTag {
     pub name: SharedString,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TagSource {
     Page(SharedString),
     Journal(NaiveDate),

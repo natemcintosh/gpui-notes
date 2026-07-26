@@ -154,10 +154,9 @@ impl PageRegistry {
             PageKey::Journal(date) => self.store.write_journal(*date, &body)?,
         }
         page.update(cx, Page::mark_saved);
-        tags::reindex_global_for_page(page, &key.source(), cx);
-        if matches!(key, PageKey::Page(_)) {
-            page_links::reindex_global_for_page(page, cx);
-        }
+        let source = key.source();
+        tags::reindex_global_for_page(page, &source, cx);
+        page_links::reindex_global_for_page(page, &source, cx);
         Ok(())
     }
 
@@ -196,13 +195,10 @@ impl PageRegistry {
 
     fn insert(&mut self, key: PageKey, body: &str, cx: &mut App) -> Entity<Page> {
         let source = key.source();
-        let is_regular_page = matches!(key, PageKey::Page(_));
         let page = cx.new(|cx| Page::new(key.display_name(), body, cx));
         self.open.insert(key, page.clone());
         tags::reindex_global_for_page(&page, &source, cx);
-        if is_regular_page {
-            page_links::reindex_global_for_page(&page, cx);
-        }
+        page_links::reindex_global_for_page(&page, &source, cx);
         page
     }
 }
@@ -432,6 +428,40 @@ mod tests {
             let index = cx.global::<LinkIndex>();
             assert!(index.backlinks("B").is_empty());
             assert_eq!(index.backlinks("C").len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn open_and_save_refresh_link_index_for_journals(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let date = NaiveDate::from_ymd_opt(2026, 7, 23).unwrap();
+
+        cx.update(|cx| {
+            let store = NotesStore::new(&root).unwrap();
+            store.write_journal(date, "- issue [[Target]]\n").unwrap();
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            let mut reg = PageRegistry::new(store);
+
+            let journal = reg.open_or_create_journal(date, cx).unwrap();
+            assert_eq!(
+                cx.global::<LinkIndex>()
+                    .backlinks("Target")
+                    .iter()
+                    .collect::<Vec<_>>(),
+                [&TagSource::Journal(date)],
+            );
+
+            let first = journal.read(cx).outline().first_block_id().unwrap();
+            journal.update(cx, |page, cx| page.set_block_text(first, "[[Other]]", cx));
+            reg.save(&journal, cx).unwrap();
+
+            let index = cx.global::<LinkIndex>();
+            assert!(
+                index.backlinks("Target").is_empty(),
+                "saving a journal must refresh its links",
+            );
+            assert_eq!(index.backlinks("Other").len(), 1);
         });
     }
 

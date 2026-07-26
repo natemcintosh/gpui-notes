@@ -1,6 +1,6 @@
 //! `[[Page Name]]` links and the forward/reverse index that backs them.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::LazyLock;
 
@@ -16,13 +16,12 @@ use crate::block_render::{
 use crate::outline::{Block, BlockId, Outline};
 use crate::page::Page;
 use crate::store::NotesStore;
+use crate::tags::TagSource;
 
 static PAGE_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\[([^\[\]\n]+?)\]\]").expect("page-link regex is valid"));
 
-pub type Backlink = (SharedString, BlockId);
-
-static EMPTY_BACKLINKS: LazyLock<BTreeSet<Backlink>> = LazyLock::new(BTreeSet::new);
+static EMPTY_BACKLINKS: LazyLock<BTreeSet<TagSource>> = LazyLock::new(BTreeSet::new);
 static EMPTY_TARGETS: LazyLock<HashSet<SharedString>> = LazyLock::new(HashSet::new);
 
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
@@ -35,10 +34,18 @@ pub struct OpenPage {
 ///
 /// Page names are case-preserving and case-sensitive. The separate `pages`
 /// set lets the renderer distinguish a missing target without touching disk.
+///
+/// The reverse map records only *which* sources link to a target, never the
+/// referencing `BlockId`s: ids minted by `rebuild_from`'s throwaway
+/// `Outline::parse` do not survive into the `Page` that is opened later, so
+/// the linked-references UI resolves them from the live page instead
+/// (`blocks_linking_to`).
 #[derive(Default)]
 pub struct LinkIndex {
-    reverse: HashMap<String, BTreeSet<Backlink>>,
-    forward: HashMap<String, HashSet<SharedString>>,
+    reverse: HashMap<String, BTreeSet<TagSource>>,
+    /// Keyed by `TagSource` rather than by display name so that a page named
+    /// `2026-07-23` cannot purge the reverse entries of that date's journal.
+    forward: BTreeMap<TagSource, HashSet<SharedString>>,
     pages: HashSet<String>,
 }
 
@@ -46,19 +53,19 @@ impl Global for LinkIndex {}
 
 impl LinkIndex {
     /// Replaces all indexed links for `page` with its current outline.
-    pub fn reindex_page(&mut self, page: &Page) {
-        self.reindex_outline(page.name(), page.outline());
+    pub fn reindex_page(&mut self, page: &Page, source: &TagSource) {
+        self.reindex_outline(source, page.outline());
     }
 
-    /// Returns sources that link to `target`, ordered by page name then block.
+    /// Returns the sources that link to `target`.
     #[must_use]
-    pub fn backlinks(&self, target: &str) -> &BTreeSet<Backlink> {
+    pub fn backlinks(&self, target: &str) -> &BTreeSet<TagSource> {
         self.reverse.get(target).unwrap_or(&EMPTY_BACKLINKS)
     }
 
     /// Returns the unique page names referenced by `source`.
     #[must_use]
-    pub fn targets(&self, source: &str) -> &HashSet<SharedString> {
+    pub fn targets(&self, source: &TagSource) -> &HashSet<SharedString> {
         self.forward.get(source).unwrap_or(&EMPTY_TARGETS)
     }
 
@@ -81,30 +88,36 @@ impl LinkIndex {
         names
     }
 
-    /// Builds an index from every regular page currently on disk.
+    /// Builds an index from every page and journal currently on disk.
+    ///
+    /// Journals are indexed because they are where most references are
+    /// written; they are deliberately kept out of `pages`, which drives
+    /// missing-page styling and the `[[` completion list.
     ///
     /// # Errors
-    /// Returns the first I/O error from listing or reading pages.
+    /// Returns the first I/O error from listing or reading pages/journals.
     pub fn rebuild_from(store: &NotesStore) -> io::Result<Self> {
         let mut index = Self::default();
         for name in store.list()? {
             let body = store.read(&name)?;
-            let source = SharedString::from(name);
+            let source = TagSource::Page(SharedString::from(name));
             index.reindex_outline(&source, &Outline::parse(&body));
+        }
+        for date in store.list_journals()? {
+            let body = store.read_journal(date)?;
+            index.reindex_outline(&TagSource::Journal(date), &Outline::parse(&body));
         }
         Ok(index)
     }
 
-    fn reindex_outline(&mut self, source: &SharedString, outline: &Outline) {
-        let source_name = source.to_string();
-
+    fn reindex_outline(&mut self, source: &TagSource, outline: &Outline) {
         // The forward map identifies exactly which reverse entries can contain
         // this source, avoiding a sweep over unrelated targets.
-        if let Some(old_targets) = self.forward.remove(&source_name) {
+        if let Some(old_targets) = self.forward.remove(source) {
             for target in old_targets {
                 let target = target.to_string();
                 let remove_entry = self.reverse.get_mut(&target).is_some_and(|backlinks| {
-                    backlinks.retain(|(page, _)| page.as_ref() != source.as_ref());
+                    backlinks.remove(source);
                     backlinks.is_empty()
                 });
                 if remove_entry {
@@ -120,13 +133,30 @@ impl LinkIndex {
                 self.reverse
                     .entry(target.to_string())
                     .or_default()
-                    .insert((source.clone(), block.id));
+                    .insert(source.clone());
             }
         }
 
-        self.pages.insert(source_name.clone());
-        self.forward.insert(source_name, targets);
+        if let TagSource::Page(name) = source {
+            self.pages.insert(name.to_string());
+        }
+        self.forward.insert(source.clone(), targets);
     }
+}
+
+/// Ids of the blocks in `outline` whose text links to `target`, in document
+/// order. Resolved against a live outline, so the ids are always current.
+#[must_use]
+pub fn blocks_linking_to(outline: &Outline, target: &str) -> Vec<BlockId> {
+    all_blocks(&outline.roots)
+        .into_iter()
+        .filter(|block| {
+            page_links_in_text(&block.text)
+                .iter()
+                .any(|link| link.as_ref() == target)
+        })
+        .map(|block| block.id)
+        .collect()
 }
 
 pub struct PageLinkExt;
@@ -180,17 +210,14 @@ impl InlineExtension for PageLinkExt {
     }
 }
 
-/// Refreshes the global index after a regular page is opened, created, or saved.
-pub fn reindex_global_for_page(page: &gpui::Entity<Page>, cx: &mut App) {
+/// Refreshes the global index after a page or journal is opened, created, or saved.
+pub fn reindex_global_for_page(page: &gpui::Entity<Page>, source: &TagSource, cx: &mut App) {
     if !cx.has_global::<LinkIndex>() {
         return;
     }
-    let (name, outline) = {
-        let page = page.read(cx);
-        (page.name().clone(), page.outline().clone())
-    };
+    let outline = page.read(cx).outline().clone();
     cx.update_global::<LinkIndex, ()>(|index, _| {
-        index.reindex_outline(&name, &outline);
+        index.reindex_outline(source, &outline);
     });
 }
 
@@ -255,6 +282,7 @@ fn collect_links_from_inlines(nodes: &[InlineNode], out: &mut BTreeSet<SharedStr
 mod tests {
     use super::*;
     use crate::block_render::{render_block, BlockNode};
+    use chrono::NaiveDate;
     use gpui::{
         point, Context, Entity, FocusHandle, Focusable, Modifiers, Render, TestAppContext,
         VisualTestContext,
@@ -331,24 +359,32 @@ mod tests {
         );
     }
 
+    fn page(name: &str) -> TagSource {
+        TagSource::Page(SharedString::from(name.to_string()))
+    }
+
     #[test]
     fn reindex_adds_and_removes_forward_and_reverse_links() {
         let mut index = LinkIndex::default();
         let first = Outline::parse("- [[B]] and [[C]]\n- another [[B]]\n");
-        index.reindex_outline(&"A".into(), &first);
+        index.reindex_outline(&page("A"), &first);
 
-        assert_eq!(index.targets("A").len(), 2);
-        assert_eq!(index.backlinks("B").len(), 2);
+        assert_eq!(index.targets(&page("A")).len(), 2);
+        // Two blocks link to B, but a source is listed once.
+        assert_eq!(
+            index.backlinks("B").iter().collect::<Vec<_>>(),
+            [&page("A")]
+        );
         assert_eq!(index.backlinks("C").len(), 1);
         assert!(index.page_exists("A"));
         assert!(!index.page_exists("a"));
         assert!(!index.page_exists("B"));
 
         let second = Outline::parse("- only [[C]]\n");
-        index.reindex_outline(&"A".into(), &second);
+        index.reindex_outline(&page("A"), &second);
         assert!(index.backlinks("B").is_empty());
         assert_eq!(index.backlinks("C").len(), 1);
-        assert_eq!(index.targets("A").len(), 1);
+        assert_eq!(index.targets(&page("A")).len(), 1);
     }
 
     #[test]
@@ -361,13 +397,70 @@ mod tests {
 
         let index = LinkIndex::rebuild_from(&store).unwrap();
         assert_eq!(index.backlinks("A").len(), 2);
-        assert_eq!(index.backlinks("B").len(), 2);
+        assert_eq!(
+            index.backlinks("B").iter().collect::<Vec<_>>(),
+            [&page("A")]
+        );
         assert_eq!(index.backlinks("C").len(), 2);
-        assert_eq!(index.targets("A").len(), 2);
+        assert_eq!(index.targets(&page("A")).len(), 2);
         assert!(index.page_exists("A"));
         assert!(index.page_exists("B"));
         assert!(index.page_exists("C"));
         assert!(!index.page_exists("Missing"));
+    }
+
+    #[test]
+    fn rebuild_from_indexes_journals_without_listing_them_as_pages() {
+        let tmp = TempDir::new().unwrap();
+        let store = NotesStore::new(tmp.path()).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 7, 23).unwrap();
+        store.write("Target", "- the page itself\n").unwrap();
+        store
+            .write_journal(date, "- [[NSSP]] issue [[Target]]\n")
+            .unwrap();
+
+        let index = LinkIndex::rebuild_from(&store).unwrap();
+        assert_eq!(
+            index.backlinks("Target").iter().collect::<Vec<_>>(),
+            [&TagSource::Journal(date)],
+            "a journal that links a page must be a backlink source",
+        );
+        assert_eq!(index.targets(&TagSource::Journal(date)).len(), 2);
+
+        // Journals must not leak into the page set: it drives missing-page
+        // styling and the `[[` completion list.
+        assert!(!index.page_exists("2026-07-23"));
+        assert_eq!(index.page_names(), vec![SharedString::from("Target")]);
+    }
+
+    #[test]
+    fn same_named_page_and_journal_do_not_purge_each_other() {
+        let mut index = LinkIndex::default();
+        let date = NaiveDate::from_ymd_opt(2026, 7, 23).unwrap();
+        index.reindex_outline(&page("2026-07-23"), &Outline::parse("- [[Target]]\n"));
+        index.reindex_outline(
+            &TagSource::Journal(date),
+            &Outline::parse("- also [[Target]]\n"),
+        );
+
+        assert_eq!(index.backlinks("Target").len(), 2);
+    }
+
+    #[test]
+    fn blocks_linking_to_finds_nested_blocks_and_skips_code() {
+        let outline = Outline::parse(
+            "- intro [[Target]]\n\t- child [[Other]]\n\t\t- deep [[Target]]\n- ```txt\n  [[Target]]\n  ```\n",
+        );
+        let ids = blocks_linking_to(&outline, "Target");
+        let texts: Vec<&str> = ids
+            .iter()
+            .map(|id| outline.get(*id).unwrap_or_default())
+            .collect();
+
+        assert_eq!(texts.len(), 2, "fenced link must not count: {texts:?}");
+        assert!(texts[0].starts_with("intro"));
+        assert!(texts[1].starts_with("deep"));
+        assert!(blocks_linking_to(&outline, "Missing").is_empty());
     }
 
     #[derive(Default)]

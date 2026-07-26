@@ -157,11 +157,10 @@ impl RootView {
     }
 
     #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
+    /// Saves every open page, not just the current one: blocks edited in the
+    /// linked-references section belong to other pages.
     fn save_current(&mut self, _: &SavePage, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
-            return;
-        };
-        let result = cx.update_global::<PageRegistry, _>(|reg, cx| reg.save(&page, cx));
+        let result = cx.update_global::<PageRegistry, _>(|reg, cx| reg.save_all(cx));
         if let Err(err) = result {
             errors::report(format!("save failed: {err}"), cx);
         }
@@ -784,6 +783,61 @@ mod tests {
                 root_focus.contains_focused(window, cx),
                 "focused element must remain beneath RootView",
             );
+        });
+    }
+
+    /// End to end for the reported bug: a journal block referencing a page,
+    /// then opening that page, must show the reference under the page body.
+    #[gpui::test]
+    fn opening_a_page_shows_references_from_a_journal(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+        let today = gpui_notes::journal::today();
+
+        // Write the reference the way the user would: into today's journal.
+        cx.update(|_, cx| {
+            let journal = cx
+                .update_global::<PageRegistry, _>(|reg, cx| reg.open_or_create_journal(today, cx))
+                .unwrap();
+            let first = journal.read(cx).outline().first_block_id().unwrap();
+            journal.update(cx, |page, cx| {
+                page.set_block_text(first, "issue with [[NSSP ETL failures]]", cx);
+            });
+            cx.update_global::<PageRegistry, _>(|reg, cx| reg.save(&journal, cx))
+                .unwrap();
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.open_page(
+                    &OpenPage {
+                        name: "NSSP ETL failures".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let page = cx.global::<CurrentPage>().get().cloned().unwrap();
+            assert_eq!(page.read(cx).name().as_ref(), "NSSP ETL failures");
+            let refs = page
+                .read(cx)
+                .view()
+                .read(cx)
+                .linked_refs()
+                .cloned()
+                .expect("references section mounted under the page body");
+            let groups = refs.read(cx).groups();
+            assert_eq!(
+                groups.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>(),
+                vec![TagSource::Journal(today)],
+                "the journal that links the page must be listed",
+            );
+            assert_eq!(groups[0].1.len(), 1);
         });
     }
 
