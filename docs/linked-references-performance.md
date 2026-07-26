@@ -1,7 +1,8 @@
 # Linked references — performance work
 
-Follow-up to `docs/linked-references.md`. The feature is correct, but opening a
-heavily-referenced page in a real vault slows the app to a crawl.
+Follow-up to the linked-references feature (see the **Linked references** bullet
+in `CLAUDE.md`). The feature is correct, but opening a heavily-referenced page in
+a real vault slows the app to a crawl.
 
 ## Measurements that motivate this
 
@@ -52,8 +53,8 @@ actually have changed:
 the per-keystroke recompute, which is the dominant cost.
 
 Watch out for: the referencing block ids are deliberately *not* stored in
-`LinkIndex` (see `docs/linked-references.md` — ids from `rebuild_from`'s
-throwaway parse do not survive into the opened `Page`), so the cache must be
+`LinkIndex` (see `CLAUDE.md` — ids from `rebuild_from`'s throwaway parse do
+not survive into the opened `Page`), so the cache must be
 keyed on something that is invalidated when a source page's outline changes.
 Observing each open source `Page` entity, or stamping the cache with the source
 outline's revision, are both workable; editing a reference in place must still
