@@ -150,6 +150,11 @@ impl LinkIndex {
 pub fn blocks_linking_to(outline: &Outline, target: &str) -> Vec<BlockId> {
     all_blocks(&outline.roots)
         .into_iter()
+        // A block with no `[[` cannot link anywhere, and the lowering below
+        // is a full markdown parse — by far the expensive part when a page
+        // has hundreds of referencing sources. Survivors still have to be
+        // parsed: a `[[Target]]` inside a ``` fence is not a reference.
+        .filter(|block| block.text.contains("[["))
         .filter(|block| {
             page_links_in_text(&block.text)
                 .iter()

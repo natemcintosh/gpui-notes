@@ -9,8 +9,15 @@
 //! `LinkIndex` only records which sources reference a target; the referencing
 //! block ids are resolved here from the live `Page`, which is what keeps them
 //! from going stale (see `page_links::blocks_linking_to`).
+//!
+//! Resolving them is expensive (it opens and walks every referencing page), so
+//! the grouping is *cached* and rebuilt only when it can have changed: the
+//! `LinkIndex` observer covers the set of sources, and one observer per opened
+//! source page covers the blocks within that source. `render` itself only
+//! walks the cache — it runs on every keystroke anywhere in the window.
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 
 use gpui::{
     div, px, AppContext, BorrowAppContext, Context, ElementId, Entity, InteractiveElement,
@@ -27,33 +34,116 @@ use crate::page_links::{self, LinkIndex};
 use crate::registry::PageRegistry;
 use crate::tags::{source_label, TagSource};
 
+/// How many references are mounted at once, and how many more each "Show
+/// more" click adds. Every reference is a live `OutlineView` plus a
+/// `BlockView` per block and descendant, so an uncapped section on a
+/// heavily-referenced page mounts hundreds of views that all re-render
+/// together.
+const REFS_PER_PAGE: usize = 20;
+
 pub struct LinkedRefsView {
     page: Entity<Page>,
-    /// One subtree view per referencing block, kept across renders so an
-    /// in-progress edit survives. Pruned to the current reference set.
+    /// One subtree view per *visible* referencing block, kept across renders
+    /// so an in-progress edit survives. Pruned to what is on screen.
     refs: HashMap<(TagSource, BlockId), Entity<OutlineView>>,
-    /// The last rendered grouping, in display order.
+    /// The full grouping, in display order. Rebuilt only when invalidated.
     groups: Vec<(TagSource, Vec<BlockId>)>,
+    /// Per-source referencing block ids, so invalidating one source (an edit
+    /// in a reference lands in *its* page) does not re-walk the whole vault.
+    /// A source that failed to open caches an empty list, which is also what
+    /// stops it from re-reporting the error on every rebuild.
+    blocks: HashMap<TagSource, Vec<BlockId>>,
+    /// One observer per opened source page: its outline is the only thing
+    /// that can change that source's block list.
+    source_subs: HashMap<TagSource, Subscription>,
+    needs_rebuild: bool,
+    /// How many references are shown; grows by `REFS_PER_PAGE` per click.
+    shown: usize,
+    #[cfg(test)]
+    rebuilds: usize,
     _link_index_sub: Option<Subscription>,
 }
 
 impl LinkedRefsView {
     pub fn new(page: Entity<Page>, cx: &mut Context<Self>) -> Self {
-        let sub = cx
-            .has_global::<LinkIndex>()
-            .then(|| cx.observe_global::<LinkIndex>(|_, cx| cx.notify()));
+        // The index only decides *which* sources reference this page; the
+        // blocks within a source are covered by its own page observer, so
+        // this leaves the per-source cache alone.
+        let sub = cx.has_global::<LinkIndex>().then(|| {
+            cx.observe_global::<LinkIndex>(|this, cx| {
+                this.needs_rebuild = true;
+                cx.notify();
+            })
+        });
         Self {
             page,
             refs: HashMap::new(),
             groups: Vec::new(),
+            blocks: HashMap::new(),
+            source_subs: HashMap::new(),
+            needs_rebuild: true,
+            shown: REFS_PER_PAGE,
+            #[cfg(test)]
+            rebuilds: 0,
             _link_index_sub: sub,
         }
     }
 
-    /// The references currently on screen, grouped and ordered as rendered.
+    /// Every reference to this page, grouped and ordered for display —
+    /// including the ones beyond the current `REFS_PER_PAGE` cap.
     #[must_use]
     pub fn groups(&self) -> &[(TagSource, Vec<BlockId>)] {
         &self.groups
+    }
+
+    /// How many times the grouping has been recomputed. Backs the regression
+    /// test that editing the current page does not recompute it.
+    #[cfg(test)]
+    #[must_use]
+    pub fn rebuild_count(&self) -> usize {
+        self.rebuilds
+    }
+
+    /// Recomputes `groups` from the index, reusing every per-source block
+    /// list that has not been invalidated.
+    fn rebuild_groups(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
+
+        let sources = self.ordered_sources(cx);
+        let live: HashSet<TagSource> = sources.iter().cloned().collect();
+        self.blocks.retain(|source, _| live.contains(source));
+        self.source_subs.retain(|source, _| live.contains(source));
+
+        self.groups = Vec::new();
+        for source in sources {
+            if !self.blocks.contains_key(&source) {
+                let blocks = self.referencing_blocks(&source, cx);
+                self.blocks.insert(source.clone(), blocks);
+            }
+            let blocks = self.blocks[&source].clone();
+            if !blocks.is_empty() {
+                self.groups.push((source, blocks));
+            }
+        }
+        self.needs_rebuild = false;
+    }
+
+    /// The leading `shown` references, still grouped by source.
+    fn visible_groups(&self) -> Vec<(TagSource, Vec<BlockId>)> {
+        let mut budget = self.shown;
+        let mut visible = Vec::new();
+        for (source, blocks) in &self.groups {
+            if budget == 0 {
+                break;
+            }
+            let take = budget.min(blocks.len());
+            visible.push((source.clone(), blocks[..take].to_vec()));
+            budget -= take;
+        }
+        visible
     }
 
     /// The sources that reference this page, ordered for display: journals
@@ -82,21 +172,41 @@ impl LinkedRefsView {
         sources
     }
 
-    /// Opens `source` through the registry and returns the ids of its blocks
-    /// that link to this page. Both lookups are cached after the first call.
-    fn referencing_blocks(&self, source: &TagSource, cx: &mut Context<Self>) -> Vec<BlockId> {
-        let target = self.page.read(cx).name().clone();
-        let opened = cx.update_global::<PageRegistry, _>(|reg, cx| match source {
+    fn open_source(source: &TagSource, cx: &mut Context<Self>) -> io::Result<Entity<Page>> {
+        cx.update_global::<PageRegistry, _>(|reg, cx| match source {
             TagSource::Page(name) => reg.open(name.as_ref(), cx),
             TagSource::Journal(date) => reg.open_or_create_journal(*date, cx),
-        });
-        match opened {
-            Ok(page) => page_links::blocks_linking_to(page.read(cx).outline(), &target),
+        })
+    }
+
+    /// Opens `source` through the registry and returns the ids of its blocks
+    /// that link to this page, starting to observe the source page so an edit
+    /// there — including one made in a reference row — refreshes the list.
+    fn referencing_blocks(&mut self, source: &TagSource, cx: &mut Context<Self>) -> Vec<BlockId> {
+        let target = self.page.read(cx).name().clone();
+        match Self::open_source(source, cx) {
+            Ok(page) => {
+                self.watch_source(source, &page, cx);
+                page_links::blocks_linking_to(page.read(cx).outline(), &target)
+            }
             Err(err) => {
                 errors::report(format!("open {}: {err}", source_label(source)), cx);
                 Vec::new()
             }
         }
+    }
+
+    fn watch_source(&mut self, source: &TagSource, page: &Entity<Page>, cx: &mut Context<Self>) {
+        if self.source_subs.contains_key(source) {
+            return;
+        }
+        let invalidated = source.clone();
+        let sub = cx.observe(page, move |this, _, cx| {
+            this.blocks.remove(&invalidated);
+            this.needs_rebuild = true;
+            cx.notify();
+        });
+        self.source_subs.insert(source.clone(), sub);
     }
 
     fn ref_view(
@@ -108,15 +218,31 @@ impl LinkedRefsView {
         if let Some(existing) = self.refs.get(&(source.clone(), block_id)) {
             return Some(existing.clone());
         }
-        let page = cx
-            .update_global::<PageRegistry, _>(|reg, cx| match source {
-                TagSource::Page(name) => reg.open(name.as_ref(), cx),
-                TagSource::Journal(date) => reg.open_or_create_journal(*date, cx),
-            })
-            .ok()?;
+        let page = Self::open_source(source, cx).ok()?;
         let view = cx.new(|cx| OutlineView::subtree(page, block_id, cx));
         self.refs.insert((source.clone(), block_id), view.clone());
         Some(view)
+    }
+
+    fn render_show_more(remaining: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("linked-refs-show-more")
+            .w_full()
+            .px_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_size(px(13.))
+            .text_color(theme::accent())
+            .hover(Styled::underline)
+            .debug_selector(|| "linked-refs-show-more".to_string())
+            .child(format!("Show {} more", remaining.min(REFS_PER_PAGE)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.shown += REFS_PER_PAGE;
+                    cx.notify();
+                }),
+            )
     }
 
     fn render_source_label(source: &TagSource, cx: &mut Context<Self>) -> impl IntoElement {
@@ -155,26 +281,21 @@ impl Render for LinkedRefsView {
             return div();
         }
 
-        self.groups = self
-            .ordered_sources(cx)
-            .into_iter()
-            .map(|source| {
-                let blocks = self.referencing_blocks(&source, cx);
-                (source, blocks)
-            })
-            .filter(|(_, blocks)| !blocks.is_empty())
-            .collect();
-        let groups = self.groups.clone();
+        if self.needs_rebuild {
+            self.rebuild_groups(cx);
+        }
+        let groups = self.visible_groups();
 
-        // Drop views for references that have since been edited away, so a
-        // stale subtree cannot linger with an open editor.
+        // Drop views for references that have since been edited away or
+        // scrolled out of the shown set, so a stale subtree cannot linger
+        // with an open editor.
         let live: HashSet<(TagSource, BlockId)> = groups
             .iter()
             .flat_map(|(source, blocks)| blocks.iter().map(|id| (source.clone(), *id)))
             .collect();
         self.refs.retain(|key, _| live.contains(key));
 
-        let count: usize = groups.iter().map(|(_, blocks)| blocks.len()).sum();
+        let count: usize = self.groups.iter().map(|(_, blocks)| blocks.len()).sum();
         if count == 0 {
             return div();
         }
@@ -221,6 +342,10 @@ impl Render for LinkedRefsView {
             }
             section = section.child(group);
         }
+
+        if count > self.shown {
+            section = section.child(Self::render_show_more(count - self.shown, cx));
+        }
         section
     }
 }
@@ -235,7 +360,7 @@ mod tests {
     use crate::tags::TagIndex;
     use crate::{block_view, text_input};
     use chrono::NaiveDate;
-    use gpui::{point, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{point, size, Modifiers, TestAppContext, VisualTestContext};
     use tempfile::TempDir;
 
     const OLDER: (i32, u32, u32) = (2026, 7, 21);
@@ -401,6 +526,120 @@ mod tests {
             let current = cx.global::<CurrentPage>().get().cloned().expect("a page");
             assert_eq!(current.read(cx).name().as_ref(), "2026-07-23");
         });
+    }
+
+    /// The grouping is O(whole vault) to compute, and `render` runs on every
+    /// keystroke anywhere in the window — so editing the page you are looking
+    /// at must not recompute it. Nothing the current page's outline does can
+    /// change who links *to* it until it is saved and reindexed.
+    #[gpui::test]
+    fn editing_the_current_page_does_not_rebuild_the_grouping(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ov, cx) = mount(cx, &tmp);
+        let refs = refs_view(&ov, cx);
+
+        let before = cx.read(|cx| refs.read(cx).rebuild_count());
+        assert!(before > 0, "precondition: the grouping was built once");
+
+        // Focus is precondition setup; typing is the behaviour under test.
+        cx.update(|window, cx| ov.update(cx, |ov, cx| ov.focus_first_block(window, cx)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_input("edited");
+        cx.run_until_parked();
+
+        let page = cx.read(|cx| cx.global::<CurrentPage>().get().cloned().unwrap());
+        assert!(
+            cx.read(|cx| page.read(cx).body().contains("edited")),
+            "precondition: the keystrokes landed in the page",
+        );
+        assert_eq!(
+            cx.read(|cx| refs.read(cx).rebuild_count()),
+            before,
+            "typing on the current page must not recompute the grouping",
+        );
+    }
+
+    /// Mounts `count` journals that each reference `Target`, one block apiece.
+    fn mount_many<'a>(
+        cx: &'a mut TestAppContext,
+        tmp: &TempDir,
+        count: u32,
+    ) -> (Entity<OutlineView>, &'a mut VisualTestContext) {
+        let root = tmp.path().to_path_buf();
+        let (ov, vcx) = cx.add_window_view(move |_window, cx| {
+            text_input::bind_keys(cx);
+            block_view::bind_keys(cx);
+            crate::outline_view::bind_keys(cx);
+
+            let store = NotesStore::new(&root).unwrap();
+            store.write("Target", "- the page itself\n").unwrap();
+            for day in 1..=count {
+                let date = NaiveDate::from_ymd_opt(2026, 7, day).expect("July has 31 days");
+                store
+                    .write_journal(date, &format!("- ref {day} [[Target]]\n"))
+                    .unwrap();
+            }
+
+            cx.set_global(TagIndex::rebuild_from(&store).unwrap());
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            cx.set_global(PageRegistry::new(store));
+            cx.set_global(CurrentPage::default());
+            cx.set_global(LastError::default());
+            cx.set_global(NavHistory::default());
+            set_current_page("Target", cx).unwrap();
+
+            let page = cx.global::<CurrentPage>().get().cloned().unwrap();
+            OutlineView::new(page, cx)
+        });
+        // Tall enough that the whole section paints, so the "Show more" row
+        // is hittable by a real click.
+        vcx.simulate_resize(size(px(900.), px(3000.)));
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.run_until_parked();
+        (ov, vcx)
+    }
+
+    #[gpui::test]
+    fn many_references_mount_only_the_capped_number(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let extra = 5;
+        let (ov, cx) = mount_many(cx, &tmp, u32::try_from(REFS_PER_PAGE).unwrap() + extra);
+        let refs = refs_view(&ov, cx);
+
+        cx.read(|cx| {
+            let view = refs.read(cx);
+            assert_eq!(
+                view.groups().len(),
+                REFS_PER_PAGE + extra as usize,
+                "every reference is grouped, capped or not",
+            );
+            assert_eq!(
+                view.refs.len(),
+                REFS_PER_PAGE,
+                "only the capped number of subtree views is mounted",
+            );
+        });
+
+        let bounds = cx
+            .debug_bounds("linked-refs-show-more")
+            .expect("show-more row painted");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert_eq!(
+                refs.read(cx).refs.len(),
+                REFS_PER_PAGE + extra as usize,
+                "Show more mounts the rest",
+            );
+        });
+        assert!(
+            cx.debug_bounds("linked-refs-show-more").is_none(),
+            "nothing left to show",
+        );
     }
 
     #[gpui::test]
