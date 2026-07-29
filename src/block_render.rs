@@ -6,14 +6,22 @@
 //!
 //! Extensions (see `InlineExtension`) are the single hook for downstream
 //! tokens like `[[PageName]]` (#8), `((block-id))` (#10), `#tag` (#11). They
-//! match byte ranges inside plain-text runs and produce their own elements at
-//! render time.
+//! match byte ranges inside plain-text runs and describe how those ranges look
+//! and what they dispatch when clicked.
+//!
+//! A paragraph renders as *one* shaped text element, not a flex row of spans
+//! per style change. Spans were flex items, and a flex item that has been
+//! measured narrow keeps that width via gpui's text measure cache, so any
+//! block that had to wrap collapsed into a one-character-wide column.
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
-    div, px, AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, px, Action, AnyElement, App, ElementId, FontStyle, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Pixels, Point, Rgba, SharedString,
+    StatefulInteractiveElement, Styled, StyledText, TextLayout, TextRun, TextStyle, UnderlineStyle,
+    Window,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -74,14 +82,43 @@ pub struct ExtensionMatch {
     pub kind: SharedString,
 }
 
+/// What an extension contributes to the shaped paragraph: the text to display
+/// (which need not be the source — `[[Page]]` shows `Page`), how to style it,
+/// and what a click on it should dispatch.
+///
+/// This is deliberately not an element: a paragraph is rendered as one text
+/// element, so an extension styles a *range* of it rather than nesting a view
+/// inside it.
+pub struct InlineRun {
+    pub text: SharedString,
+    pub color: Option<Rgba>,
+    pub background: Option<Rgba>,
+    pub italic: bool,
+    pub action: Option<Box<dyn Action>>,
+}
+
+impl InlineRun {
+    /// Unstyled, inert text — the base every extension refines.
+    #[must_use]
+    pub fn new(text: impl Into<SharedString>) -> Self {
+        Self {
+            text: text.into(),
+            color: None,
+            background: None,
+            italic: false,
+            action: None,
+        }
+    }
+}
+
 /// Hook for downstream token matchers (#8 links, #10 block refs, #11 tags).
 pub trait InlineExtension {
     /// Return non-overlapping byte ranges within `text`. Overlaps across
     /// extensions are resolved by the lowerer — earlier extensions win.
     fn extract(&self, text: &str) -> Vec<ExtensionMatch>;
 
-    /// Render a matched span as an element.
-    fn render(&self, node: &ExtensionNode, window: &mut Window, cx: &mut App) -> AnyElement;
+    /// Describe how a matched span should appear in the shaped paragraph.
+    fn run(&self, node: &ExtensionNode, cx: &mut App) -> InlineRun;
 }
 
 #[must_use]
@@ -344,37 +381,50 @@ pub fn render_block(
 ) -> AnyElement {
     let blocks = lower(text, extensions);
     let mut ctx = RenderCtx {
-        link_counter: 0,
+        paragraph_counter: 0,
         extensions,
     };
     let mut root = div().flex().flex_col().gap_1().text_color(theme::fg());
     for block in blocks {
-        root = root.child(render_block_node(block, &mut ctx, window, cx));
+        root = root.child(render_block_node(
+            block,
+            &mut ctx,
+            RunStyle::default(),
+            window,
+            cx,
+        ));
     }
     root.into_any_element()
 }
 
 struct RenderCtx<'a> {
-    link_counter: usize,
+    /// Distinguishes the paragraphs of one block so each gets a stable
+    /// element id for its click handling.
+    paragraph_counter: usize,
     extensions: &'a [&'a dyn InlineExtension],
 }
 
 fn render_block_node(
     block: BlockNode,
     ctx: &mut RenderCtx<'_>,
+    style: RunStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     match block {
-        BlockNode::Paragraph(children) => render_inlines(children, ctx, window, cx),
+        BlockNode::Paragraph(children) => render_paragraph(children, ctx, style, window, cx),
         BlockNode::Heading { level, children } => {
             let size = heading_size(level);
+            // The font size has to come from the ambient text style — a
+            // `TextRun` carries a family, weight and slant, but no size — so
+            // the wrapper stays. Weight rides along in the runs instead.
+            let heading = RunStyle {
+                bold: true,
+                ..style
+            };
             div()
-                .flex()
-                .flex_wrap()
-                .font_weight(FontWeight::BOLD)
                 .text_size(px(size))
-                .child(render_inlines(children, ctx, window, cx))
+                .child(render_paragraph(children, ctx, heading, window, cx))
                 .into_any_element()
         }
         // A ```calc fence is arithmetic, not source: evaluate it and show the
@@ -397,16 +447,40 @@ fn render_block_node(
                 .border_l_2()
                 .border_color(theme::fg_muted())
                 .pl_2()
-                .text_color(theme::fg_muted())
                 .flex()
                 .flex_col()
                 .gap_1();
+            // Muted has to ride in the runs: a text style set on this wrapper
+            // is pushed after the runs below have already been built.
+            let quoted = RunStyle {
+                color: Some(theme::fg_muted()),
+                ..style
+            };
             for child in children {
-                wrap = wrap.child(render_block_node(child, ctx, window, cx));
+                wrap = wrap.child(render_block_node(child, ctx, quoted, window, cx));
             }
             wrap.into_any_element()
         }
     }
+}
+
+// Every `TextRun` built by `render_block` since the last drain. Lets the
+// colour test assert against exactly what the real render path produced,
+// rather than against a reimplementation of it.
+#[cfg(test)]
+thread_local! {
+    static RECORDED_RUNS: std::cell::RefCell<Vec<TextRun>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn record_runs(runs: &[TextRun]) {
+    RECORDED_RUNS.with(|recorded| recorded.borrow_mut().extend_from_slice(runs));
+}
+
+#[cfg(test)]
+fn take_recorded_runs() -> Vec<TextRun> {
+    RECORDED_RUNS.with(|recorded| recorded.borrow_mut().drain(..).collect())
 }
 
 fn heading_size(level: u8) -> f32 {
@@ -418,79 +492,221 @@ fn heading_size(level: u8) -> f32 {
     }
 }
 
-fn render_inlines(
+/// Styling that an inline node inherits from its ancestors as the paragraph is
+/// flattened. Everything here maps onto a `TextRun` field.
+///
+/// Colour is carried here rather than left to an ancestor's `text_color`,
+/// because runs are built during `render` — before any wrapper div has pushed
+/// its text style — so an inherited colour would silently be gpui's default
+/// (black on this theme's background).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct RunStyle {
+    bold: bool,
+    italic: bool,
+    /// Inside a markdown link: accent-coloured and underlined.
+    link: bool,
+    /// Overrides the theme foreground (blockquotes, missing page links).
+    color: Option<Rgba>,
+}
+
+/// What a click on a text range should do.
+enum ClickTarget {
+    Url(SharedString),
+    Action(Box<dyn Action>),
+}
+
+/// A paragraph flattened into the three things a shaped text element needs:
+/// one string, one `TextRun` per style change, and the byte ranges that
+/// respond to a click.
+///
+/// The whole paragraph is a *single* text element on purpose. Rendering each
+/// span as its own div made every span a shrinkable flex item, and once a span
+/// had been measured narrow, gpui's measure cache kept re-confirming that
+/// width — long blocks collapsed into a one-character-wide column.
+struct Paragraph {
+    text: String,
+    runs: Vec<TextRun>,
+    targets: Vec<(Range<usize>, ClickTarget)>,
+    base: TextStyle,
+}
+
+impl Paragraph {
+    fn new(base: TextStyle) -> Self {
+        Self {
+            text: String::new(),
+            runs: Vec::new(),
+            targets: Vec::new(),
+            base,
+        }
+    }
+
+    /// Appends `text` as one run, returning the byte range it occupies.
+    fn push(
+        &mut self,
+        text: &str,
+        style: RunStyle,
+        tweak: impl FnOnce(&mut TextRun),
+    ) -> Range<usize> {
+        let start = self.text.len();
+        if text.is_empty() {
+            return start..start;
+        }
+        self.text.push_str(text);
+        let mut run = self.base.to_run(text.len());
+        if style.bold {
+            run.font.weight = FontWeight::BOLD;
+        }
+        if style.italic {
+            run.font.style = FontStyle::Italic;
+        }
+        if let Some(color) = style.color {
+            run.color = color.into();
+        }
+        if style.link {
+            run.color = theme::accent().into();
+            run.underline = Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(theme::accent().into()),
+                wavy: false,
+            });
+        }
+        tweak(&mut run);
+        self.runs.push(run);
+        start..self.text.len()
+    }
+
+    fn push_node(&mut self, node: InlineNode, ctx: &RenderCtx<'_>, style: RunStyle, cx: &mut App) {
+        match node {
+            InlineNode::Text { text, style: s } => {
+                let style = RunStyle {
+                    bold: style.bold || s.bold,
+                    italic: style.italic || s.italic,
+                    ..style
+                };
+                self.push(&text, style, |_| {});
+            }
+            InlineNode::Code(text) => {
+                self.push(&text, style, |run| {
+                    run.font.family = "monospace".into();
+                    run.background_color = Some(theme::bg_subtle().into());
+                });
+            }
+            InlineNode::Link { url, children } => {
+                let start = self.text.len();
+                let style = RunStyle {
+                    link: true,
+                    ..style
+                };
+                for child in children {
+                    self.push_node(child, ctx, style, cx);
+                }
+                let range = start..self.text.len();
+                if !range.is_empty() {
+                    self.targets.push((range, ClickTarget::Url(url)));
+                }
+            }
+            InlineNode::Extension(node) => match ctx.extensions.get(node.extension_idx) {
+                Some(ext) => {
+                    let run = ext.run(&node, cx);
+                    let style = RunStyle {
+                        italic: style.italic || run.italic,
+                        color: run.color.or(style.color),
+                        ..style
+                    };
+                    let range = self.push(&run.text, style, |text_run| {
+                        text_run.background_color = run.background.map(Into::into);
+                    });
+                    if let Some(action) = run.action {
+                        if !range.is_empty() {
+                            self.targets.push((range, ClickTarget::Action(action)));
+                        }
+                    }
+                }
+                None => {
+                    self.push(&node.source, style, |_| {});
+                }
+            },
+            InlineNode::SoftBreak => {
+                self.push(" ", style, |_| {});
+            }
+            InlineNode::HardBreak => {
+                self.push("\n", style, |_| {});
+            }
+        }
+    }
+}
+
+/// The byte index under `position`, if it falls inside a clickable range.
+fn target_at(
+    layout: &TextLayout,
+    targets: &[(Range<usize>, ClickTarget)],
+    position: Point<Pixels>,
+) -> Option<usize> {
+    let ix = layout.index_for_position(position).ok()?;
+    targets.iter().position(|(range, _)| range.contains(&ix))
+}
+
+fn render_paragraph(
     nodes: Vec<InlineNode>,
     ctx: &mut RenderCtx<'_>,
+    style: RunStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let mut wrap = div().flex().flex_wrap().min_w_0();
+    // Start from the theme foreground rather than the ambient style: this runs
+    // before `render_block`'s root div applies its text colour.
+    let mut base = window.text_style();
+    base.color = theme::fg().into();
+    let mut paragraph = Paragraph::new(base);
     for node in nodes {
-        wrap = wrap.child(render_inline(node, ctx, window, cx));
+        paragraph.push_node(node, ctx, style, cx);
     }
-    wrap.into_any_element()
-}
 
-fn render_inline(
-    node: InlineNode,
-    ctx: &mut RenderCtx<'_>,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    match node {
-        InlineNode::Text { text, style } => styled_span(text, style),
-        InlineNode::Code(text) => div()
-            .min_w_0()
-            .font_family("monospace")
-            .bg(theme::bg_subtle())
-            .px_1()
-            .rounded_sm()
-            .child(text)
-            .into_any_element(),
-        InlineNode::Link { url, children } => {
-            ctx.link_counter += 1;
-            let id = ElementId::named_usize("md-link", ctx.link_counter);
-            let href = url.clone();
-            let mut wrap = div()
-                .id(id)
-                .min_w_0()
-                .cursor_pointer()
-                .text_color(theme::accent())
-                .underline()
-                .on_click(move |_, _window, cx| {
-                    if href.starts_with("http://") || href.starts_with("https://") {
-                        cx.open_url(&href);
+    #[cfg(test)]
+    record_runs(&paragraph.runs);
+
+    let text = StyledText::new(SharedString::from(paragraph.text)).with_runs(paragraph.runs);
+    let layout = text.layout().clone();
+    let targets: Rc<[(Range<usize>, ClickTarget)]> = paragraph.targets.into();
+
+    ctx.paragraph_counter += 1;
+    div()
+        .id(ElementId::named_usize(
+            "md-paragraph",
+            ctx.paragraph_counter,
+        ))
+        .w_full()
+        .child(text)
+        // Links used to be their own elements, which stopped the press from
+        // reaching `BlockView`. Now the hit test has to do it: without this
+        // the block enters edit mode on mouse-down and this element is gone
+        // before the release that would have completed the click.
+        .on_mouse_down(MouseButton::Left, {
+            let (layout, targets) = (layout.clone(), targets.clone());
+            move |event, window, cx| {
+                if target_at(&layout, &targets, event.position).is_some() {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }
+        })
+        .on_click(move |event, window, cx| {
+            let Some(ix) = target_at(&layout, &targets, event.position()) else {
+                return;
+            };
+            cx.stop_propagation();
+            match &targets[ix].1 {
+                ClickTarget::Url(url) => {
+                    if url.starts_with("http://") || url.starts_with("https://") {
+                        cx.open_url(url);
                     }
-                });
-            for child in children {
-                wrap = wrap.child(render_inline(child, ctx, window, cx));
+                }
+                ClickTarget::Action(action) => {
+                    window.dispatch_action(action.boxed_clone(), cx);
+                }
             }
-            wrap.into_any_element()
-        }
-        InlineNode::Extension(node) => {
-            let ext = ctx.extensions.get(node.extension_idx);
-            match ext {
-                Some(e) => e.render(&node, window, cx),
-                None => styled_span(node.source.to_string(), Style::default()),
-            }
-        }
-        InlineNode::SoftBreak => styled_span(" ".into(), Style::default()),
-        InlineNode::HardBreak => div().w_full().into_any_element(),
-    }
-}
-
-fn styled_span(text: String, style: Style) -> AnyElement {
-    // `min_w_0` overrides flex's `min-width: auto`, which would otherwise pin
-    // the span to its unwrapped text width — the text inside only rewraps once
-    // its container width is definite.
-    let mut d = div().min_w_0().child(SharedString::from(text));
-    if style.bold {
-        d = d.font_weight(FontWeight::BOLD);
-    }
-    if style.italic {
-        d = d.italic();
-    }
-    d.into_any_element()
+        })
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -630,7 +846,7 @@ mod tests {
             out
         }
 
-        fn render(&self, _node: &ExtensionNode, _window: &mut Window, _cx: &mut App) -> AnyElement {
+        fn run(&self, _node: &ExtensionNode, _cx: &mut App) -> InlineRun {
             unreachable!("not used in lower() tests")
         }
     }
@@ -665,7 +881,7 @@ mod tests {
                     kind: "a".into(),
                 }]
             }
-            fn render(&self, _: &ExtensionNode, _: &mut Window, _: &mut App) -> AnyElement {
+            fn run(&self, _: &ExtensionNode, _: &mut App) -> InlineRun {
                 unreachable!()
             }
         }
@@ -676,7 +892,7 @@ mod tests {
                     kind: "b".into(),
                 }]
             }
-            fn render(&self, _: &ExtensionNode, _: &mut Window, _: &mut App) -> AnyElement {
+            fn run(&self, _: &ExtensionNode, _: &mut App) -> InlineRun {
                 unreachable!()
             }
         }
@@ -709,13 +925,20 @@ mod runtime_tests {
 
     use super::*;
     use gpui::{
-        point, size, BorrowAppContext, Context, Entity, Global, Modifiers, Render, TestAppContext,
-        VisualTestContext,
+        point, size, BorrowAppContext, Context, Entity, FocusHandle, Focusable, Global, Hsla,
+        Modifiers, Render, TestAppContext, VisualTestContext,
     };
 
     struct HostView {
         text: SharedString,
         ext: Option<Box<dyn InlineExtension>>,
+        focus_handle: FocusHandle,
+    }
+
+    impl Focusable for HostView {
+        fn focus_handle(&self, _: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
     }
 
     impl Render for HostView {
@@ -728,11 +951,20 @@ mod runtime_tests {
             } else {
                 render_block(&self.text, &[], window, cx)
             };
-            div().size_full().child(
-                // Full width like the outline row, auto height so the wrap
-                // tests can read the rendered block's height back out.
-                div().w_full().debug_selector(|| "block".into()).child(body),
-            )
+            div()
+                .track_focus(&self.focus_handle)
+                .key_context("BlockRenderHost")
+                // An extension contributes an action, so the click lands here
+                // rather than in a handler the extension owns.
+                .on_action(|_: &ExtClicked, _window, cx| {
+                    cx.update_global::<ClickRecorder, _>(|r, _| r.clicks += 1);
+                })
+                .size_full()
+                .child(
+                    // Full width like the outline row, auto height so the wrap
+                    // tests can read the rendered block's height back out.
+                    div().w_full().debug_selector(|| "block".into()).child(body),
+                )
         }
     }
 
@@ -745,9 +977,17 @@ mod runtime_tests {
         let text = SharedString::from(text.to_string());
         let (view, vcx) = cx.add_window_view(move |_window, cx| {
             cx.set_global(ClickRecorder::default());
-            HostView { text, ext }
+            HostView {
+                text,
+                ext,
+                focus_handle: cx.focus_handle(),
+            }
         });
-        vcx.update(|window, _| window.activate_window());
+        vcx.update(|window, cx| {
+            window.activate_window();
+            let handle = view.read(cx).focus_handle.clone();
+            window.focus(&handle, cx);
+        });
         vcx.run_until_parked();
         (view, vcx)
     }
@@ -760,9 +1000,14 @@ mod runtime_tests {
     }
     impl Global for ClickRecorder {}
 
+    /// Dispatched by `CountingExt` so a click on an extension range can be
+    /// observed. Extensions contribute an action, not an element, so the
+    /// handler lives on the host view rather than in the extension.
+    #[derive(Clone, Debug, PartialEq, gpui::Action)]
+    #[action(namespace = gpui_notes_test, no_json)]
+    struct ExtClicked;
+
     /// Always matches the literal string `"X"` as a one-byte extension token.
-    /// The rendered element is large enough to be clickable under
-    /// `NoopTextSystem` (the test platform's text shaper).
     struct CountingExt;
     impl InlineExtension for CountingExt {
         fn extract(&self, text: &str) -> Vec<ExtensionMatch> {
@@ -774,16 +1019,11 @@ mod runtime_tests {
                 .collect()
         }
 
-        fn render(&self, _: &ExtensionNode, _window: &mut Window, _cx: &mut App) -> AnyElement {
-            div()
-                .id("ext-target")
-                .cursor_pointer()
-                .size_full()
-                .child("clickable extension")
-                .on_click(|_, _, cx| {
-                    cx.update_global::<ClickRecorder, _>(|r, _| r.clicks += 1);
-                })
-                .into_any_element()
+        fn run(&self, _: &ExtensionNode, _cx: &mut App) -> InlineRun {
+            InlineRun {
+                action: Some(Box::new(ExtClicked)),
+                ..InlineRun::new("clickable extension")
+            }
         }
     }
 
@@ -867,6 +1107,39 @@ mod runtime_tests {
             heading > 2.,
             "headings should reflow, not clip: {heading} rows",
         );
+    }
+
+    /// Runs are built during `render`, *before* any wrapper div has pushed
+    /// its text style, so a run that leaves its colour to be inherited gets
+    /// gpui's default — black text on this theme's dark background. Every run
+    /// must therefore name a theme colour explicitly.
+    ///
+    /// The runs asserted on here are the ones the real render path produced,
+    /// recorded as it built them.
+    #[gpui::test]
+    fn every_run_carries_a_theme_colour(cx: &mut TestAppContext) {
+        let (_view, cx) = mount(
+            cx,
+            "plain **bold** *italic* `code` [link](https://x.y) X\n\n# heading\n\n> quoted **bold** text\n",
+            Some(Box::new(CountingExt)),
+        );
+        cx.run_until_parked();
+
+        let runs = cx.update(|_, _| take_recorded_runs());
+        assert!(!runs.is_empty(), "expected the render path to build runs");
+
+        let allowed = [
+            Hsla::from(theme::fg()),
+            Hsla::from(theme::fg_muted()),
+            Hsla::from(theme::accent()),
+        ];
+        for run in &runs {
+            assert!(
+                allowed.contains(&run.color),
+                "run {:?} is not a theme colour; an inherited colour renders black",
+                run.color,
+            );
+        }
     }
 
     #[gpui::test]

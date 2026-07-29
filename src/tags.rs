@@ -3,14 +3,11 @@ use std::io;
 use std::sync::LazyLock;
 
 use chrono::NaiveDate;
-use gpui::{
-    div, px, App, BorrowAppContext, ElementId, Global, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
-};
+use gpui::{App, BorrowAppContext, Global, SharedString};
 use regex::Regex;
 
 use crate::block_render::{
-    lower, theme, BlockNode, ExtensionMatch, ExtensionNode, InlineExtension, InlineNode,
+    lower, theme, BlockNode, ExtensionMatch, ExtensionNode, InlineExtension, InlineNode, InlineRun,
 };
 use crate::outline::{Block, BlockId, Outline};
 use crate::page::Page;
@@ -168,43 +165,14 @@ impl InlineExtension for TagExt {
             .collect()
     }
 
-    fn render(
-        &self,
-        node: &ExtensionNode,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> gpui::AnyElement {
-        let display = node.source.trim_start_matches('#').to_string();
-        let tag_name = SharedString::from(display.clone());
-        div()
-            .id(ElementId::Name(SharedString::from(format!(
-                "tag-{display}"
-            ))))
-            .cursor_pointer()
-            .bg(theme::bg_subtle())
-            .text_color(theme::accent())
-            .border_1()
-            .border_color(theme::accent())
-            .rounded_sm()
-            .px_1()
-            .py_0p5()
-            .min_h(px(18.0))
-            .min_w(px(24.0))
-            .child(SharedString::from(display))
-            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            })
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                window.dispatch_action(
-                    Box::new(OpenTag {
-                        name: tag_name.clone(),
-                    }),
-                    cx,
-                );
-            })
-            .into_any_element()
+    fn run(&self, node: &ExtensionNode, _cx: &mut App) -> InlineRun {
+        let name = SharedString::from(node.source.trim_start_matches('#').to_string());
+        InlineRun {
+            color: Some(theme::accent()),
+            background: Some(theme::bg_subtle()),
+            action: Some(Box::new(OpenTag { name: name.clone() })),
+            ..InlineRun::new(name)
+        }
     }
 }
 
@@ -296,8 +264,8 @@ mod tests {
     use super::*;
     use crate::block_render::{lower, render_block, BlockNode};
     use gpui::{
-        point, Context, Entity, FocusHandle, Focusable, Modifiers, Render, TestAppContext,
-        VisualTestContext,
+        div, point, px, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+        Modifiers, ParentElement, Render, Styled, TestAppContext, VisualTestContext, Window,
     };
     use tempfile::TempDir;
 

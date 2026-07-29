@@ -4,14 +4,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::LazyLock;
 
-use gpui::{
-    div, App, BorrowAppContext, ElementId, Global, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
-};
+use gpui::{App, BorrowAppContext, Global, SharedString};
 use regex::Regex;
 
 use crate::block_render::{
-    lower, theme, BlockNode, ExtensionMatch, ExtensionNode, InlineExtension, InlineNode,
+    lower, theme, BlockNode, ExtensionMatch, ExtensionNode, InlineExtension, InlineNode, InlineRun,
 };
 use crate::outline::{Block, BlockId, Outline};
 use crate::page::Page;
@@ -181,37 +178,25 @@ impl InlineExtension for PageLinkExt {
             .collect()
     }
 
-    fn render(&self, node: &ExtensionNode, _window: &mut Window, cx: &mut App) -> gpui::AnyElement {
+    fn run(&self, node: &ExtensionNode, cx: &mut App) -> InlineRun {
         let Some(name) = page_name(&node.source) else {
-            return div().child(node.source.clone()).into_any_element();
+            return InlineRun::new(node.source.clone());
         };
         let name = SharedString::from(name.to_string());
         let exists = cx.has_global::<LinkIndex>() && cx.global::<LinkIndex>().page_exists(&name);
 
-        let mut link = div()
-            .id(ElementId::Name(SharedString::from(format!(
-                "page-link-{name}"
-            ))))
-            .cursor_pointer()
-            .text_color(if exists {
+        // A page that does not exist yet still navigates — following the link
+        // is how it gets created — it is just styled as missing.
+        InlineRun {
+            color: Some(if exists {
                 theme::accent()
             } else {
                 theme::fg_muted()
-            })
-            .hover(Styled::underline)
-            .child(name.clone())
-            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            });
-        if !exists {
-            link = link.italic();
+            }),
+            italic: !exists,
+            action: Some(Box::new(OpenPage { name: name.clone() })),
+            ..InlineRun::new(name)
         }
-        link.on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            window.dispatch_action(Box::new(OpenPage { name: name.clone() }), cx);
-        })
-        .into_any_element()
     }
 }
 
@@ -289,8 +274,8 @@ mod tests {
     use crate::block_render::{render_block, BlockNode};
     use chrono::NaiveDate;
     use gpui::{
-        point, Context, Entity, FocusHandle, Focusable, Modifiers, Render, TestAppContext,
-        VisualTestContext,
+        div, point, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+        Modifiers, ParentElement, Render, Styled, TestAppContext, VisualTestContext, Window,
     };
     use tempfile::TempDir;
 
