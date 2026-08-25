@@ -14,8 +14,7 @@ pub fn today() -> NaiveDate {
 #[must_use]
 pub fn is_journal_name(s: &str) -> bool {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .ok()
-        .is_some_and(|d| d.format("%Y-%m-%d").to_string() == s)
+        .is_ok_and(|d| d.format("%Y-%m-%d").to_string() == s)
 }
 
 /// Opens (creating if necessary) the journal page for `date`, saves any
