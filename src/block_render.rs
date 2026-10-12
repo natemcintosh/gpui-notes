@@ -95,6 +95,9 @@ pub struct InlineRun {
     pub color: Option<Rgba>,
     pub background: Option<Rgba>,
     pub italic: bool,
+    /// Drawn muted on either side of `text` (`[[`/`]]` around a page link),
+    /// and clickable along with it.
+    pub delimiters: Option<(&'static str, &'static str)>,
     pub action: Option<Box<dyn Action>>,
 }
 
@@ -107,6 +110,7 @@ impl InlineRun {
             color: None,
             background: None,
             italic: false,
+            delimiters: None,
             action: None,
         }
     }
@@ -486,7 +490,7 @@ fn record_runs(runs: &[TextRun]) {
 }
 
 #[cfg(test)]
-fn take_recorded_runs() -> Vec<TextRun> {
+pub(crate) fn take_recorded_runs() -> Vec<TextRun> {
     RECORDED_RUNS.with(|recorded| recorded.borrow_mut().drain(..).collect())
 }
 
@@ -514,7 +518,7 @@ struct RunStyle {
     strikethrough: bool,
     /// Inside a markdown link: accent-coloured and underlined.
     link: bool,
-    /// Overrides the theme foreground (blockquotes, missing page links).
+    /// Overrides the theme foreground (blockquotes, page-link brackets).
     color: Option<Rgba>,
 }
 
@@ -630,9 +634,21 @@ impl Paragraph {
                         color: run.color.or(style.color),
                         ..style
                     };
-                    let range = self.push(&run.text, style, |text_run| {
+                    let start = self.text.len();
+                    let delimiter_style = RunStyle {
+                        color: Some(theme::fg_muted()),
+                        ..style
+                    };
+                    if let Some((open, _)) = run.delimiters {
+                        self.push(open, delimiter_style, |_| {});
+                    }
+                    self.push(&run.text, style, |text_run| {
                         text_run.background_color = run.background.map(Into::into);
                     });
+                    if let Some((_, close)) = run.delimiters {
+                        self.push(close, delimiter_style, |_| {});
+                    }
+                    let range = start..self.text.len();
                     if let Some(action) = run.action {
                         if !range.is_empty() {
                             self.targets.push((range, ClickTarget::Action(action)));

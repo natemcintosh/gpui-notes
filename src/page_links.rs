@@ -31,7 +31,7 @@ pub struct OpenPage {
 /// Forward and reverse page-link lookups.
 ///
 /// Page names are case-preserving and case-sensitive. The separate `pages`
-/// set lets the renderer distinguish a missing target without touching disk.
+/// set backs the `[[` completion list without touching disk.
 ///
 /// The reverse map records only *which* sources link to a target, never the
 /// referencing `BlockId`s: ids minted by `rebuild_from`'s throwaway
@@ -72,17 +72,6 @@ impl LinkIndex {
         self.pages.contains(name)
     }
 
-    /// Whether the page or journal that `[[name]]` opens (see `link_target`)
-    /// exists. Every journal on disk has a `forward` entry, even one with no
-    /// links of its own.
-    #[must_use]
-    pub fn link_target_exists(&self, name: &str) -> bool {
-        match link_target(name) {
-            source @ TagSource::Journal(_) => self.forward.contains_key(&source),
-            TagSource::Page(_) => self.page_exists(name),
-        }
-    }
-
     /// Every page name the index knows about, sorted case-insensitively.
     /// Backs the `[[` completion popup, which needs the list on every
     /// keystroke and so cannot afford to re-read the notes directory.
@@ -100,8 +89,8 @@ impl LinkIndex {
     /// Builds an index from every page and journal currently on disk.
     ///
     /// Journals are indexed because they are where most references are
-    /// written; they are deliberately kept out of `pages`, which drives
-    /// missing-page styling and the `[[` completion list.
+    /// written; they are deliberately kept out of `pages`, which drives the
+    /// `[[` completion list.
     ///
     /// # Errors
     /// Returns the first I/O error from listing or reading pages/journals.
@@ -190,23 +179,18 @@ impl InlineExtension for PageLinkExt {
             .collect()
     }
 
-    fn run(&self, node: &ExtensionNode, cx: &mut App) -> InlineRun {
+    fn run(&self, node: &ExtensionNode, _cx: &mut App) -> InlineRun {
         let Some(name) = page_name(&node.source) else {
             return InlineRun::new(node.source.clone());
         };
         let name = SharedString::from(name.to_string());
-        let exists =
-            cx.has_global::<LinkIndex>() && cx.global::<LinkIndex>().link_target_exists(&name);
 
-        // A page that does not exist yet still navigates — following the link
-        // is how it gets created — it is just styled as missing.
+        // Styled like Logseq: blue, with the brackets shown faintly. A page
+        // that does not exist yet looks the same — following the link is how
+        // it gets created.
         InlineRun {
-            color: Some(if exists {
-                theme::accent()
-            } else {
-                theme::fg_muted()
-            }),
-            italic: !exists,
+            color: Some(theme::accent()),
+            delimiters: Some(("[[", "]]")),
             action: Some(Box::new(OpenPage { name: name.clone() })),
             ..InlineRun::new(name)
         }
@@ -297,7 +281,7 @@ mod tests {
     use crate::block_render::{render_block, BlockNode};
     use chrono::NaiveDate;
     use gpui::{
-        div, point, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+        div, point, Context, Entity, FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement,
         Modifiers, ParentElement, Render, Styled, TestAppContext, VisualTestContext, Window,
     };
     use tempfile::TempDir;
@@ -440,8 +424,8 @@ mod tests {
         );
         assert_eq!(index.targets(&TagSource::Journal(date)).len(), 2);
 
-        // Journals must not leak into the page set: it drives missing-page
-        // styling and the `[[` completion list.
+        // Journals must not leak into the page set: it drives the `[[`
+        // completion list.
         assert!(!index.page_exists("2026-07-23"));
         assert_eq!(index.page_names(), vec![SharedString::from("Target")]);
     }
@@ -483,17 +467,6 @@ mod tests {
         // Only Logseq's title form; the on-disk `2026_10_09` is a page name.
         assert_eq!(link_target("2026_10_09"), page("2026_10_09"));
         assert_eq!(link_target("Target"), page("Target"));
-    }
-
-    #[test]
-    fn journal_link_exists_once_the_journal_is_indexed() {
-        let mut index = LinkIndex::default();
-        assert!(!index.link_target_exists("2026-10-09"));
-
-        let date = NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
-        index.reindex_outline(&TagSource::Journal(date), &Outline::parse("- no links\n"));
-        assert!(index.link_target_exists("2026-10-09"));
-        assert!(!index.page_exists("2026-10-09"));
     }
 
     #[derive(Default)]
@@ -557,6 +530,20 @@ mod tests {
         });
         visual.run_until_parked();
         (view, visual)
+    }
+
+    #[gpui::test]
+    fn page_link_renders_blue_between_muted_brackets(cx: &mut TestAppContext) {
+        let (_view, cx) = mount_host(cx, "[[Alpha]]");
+        cx.run_until_parked();
+
+        let runs = cx.update(|_, _| crate::block_render::take_recorded_runs());
+        let styled: Vec<(usize, Hsla)> = runs.iter().map(|r| (r.len, r.color)).collect();
+        let (muted, accent) = (theme::fg_muted().into(), theme::accent().into());
+        assert!(
+            styled.ends_with(&[(2, muted), (5, accent), (2, muted)]),
+            "{styled:?}"
+        );
     }
 
     #[gpui::test]
