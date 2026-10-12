@@ -8,9 +8,9 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    actions, div, px, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window,
+    actions, div, px, relative, App, AppContext, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 use crate::block_render::theme;
@@ -39,6 +39,11 @@ actions!(
 /// `BlockView`'s 1px border and 2px padding).
 const INDENT_PER_LEVEL: Pixels = px(30.0);
 const BULLET_COLUMN_WIDTH: Pixels = px(20.0);
+/// Logseq's vertical rhythm: lines at 1.5× the font size, and single-line
+/// rows 7px further apart than that — this gap plus the `BlockView`'s 2px
+/// padding and 1px border, top and bottom.
+const LINE_HEIGHT: f32 = 1.5;
+const ROW_GAP: Pixels = px(1.0);
 
 /// The outline navigation/operation keys act on the focused-but-viewing
 /// block (#42/#44). The `!editing` guard keeps them from firing while that
@@ -432,7 +437,8 @@ impl Render for OutlineView {
             .flex()
             .flex_col()
             .w_full()
-            .gap_1();
+            .line_height(relative(LINE_HEIGHT))
+            .gap(ROW_GAP);
 
         // Only the page-level view scrolls: a subtree view is rendered inside
         // that scroll container, and nesting a second one would trap the wheel.
@@ -832,6 +838,23 @@ mod tests {
                 .input_entity_for_test()
                 .expect("block should be editing")
         })
+    }
+
+    #[gpui::test]
+    fn rows_match_logseq_vertical_rhythm(cx: &mut TestAppContext) {
+        let (page, _ov, cx) = mount(cx, "- a\n- b\n");
+        cx.run_until_parked();
+        let (a, b) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[1].id)
+        });
+        let mut top = |id: BlockId| {
+            // `debug_bounds` wants a `'static` name; leaking one is fine in a test.
+            let name: &'static str = format!("block-view-{id:?}").leak();
+            cx.debug_bounds(name).expect("block painted").top()
+        };
+        let pitch = top(b) - top(a);
+        assert_eq!(pitch, px(31.), "Logseq steps single-line rows 31px apart");
     }
 
     // ── #44: keyboard navigation and block operations ──────────────────
