@@ -25,3 +25,7 @@ pre:
 
 unblocked:
     nu ./scripts/unblocked-issues.nu
+
+# Reset ~/Desktop/test zone to a fresh copy of the real Logseq graph (~/logseq)
+test-zone:
+    rsync -a --delete --exclude .stfolder ~/logseq/ "$HOME/Desktop/test zone/"
