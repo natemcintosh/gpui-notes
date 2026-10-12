@@ -267,7 +267,7 @@ impl LinkedRefsView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |_, _, _, cx| {
-                    if let Err(err) = history::navigate_to(&target, cx) {
+                    if let Err(err) = history::navigate_to(&target.clone().into(), cx) {
                         errors::report(format!("open {}: {err}", source_label(&target)), cx);
                     }
                 }),

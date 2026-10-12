@@ -59,10 +59,13 @@ pub fn bind_keys(cx: &mut App) {
 ///
 /// `Subtree` views back the linked-references rows: they show one block and
 /// its descendants from some *other* page, are not their own scroll root, and
-/// carry no references section of their own.
+/// carry no references section of their own. `Embedded` views back the days
+/// in journals mode: the whole page, but likewise inside someone else's
+/// scroll container and without references.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OutlineScope {
     Page,
+    Embedded,
     Subtree(BlockId),
 }
 
@@ -97,6 +100,12 @@ impl OutlineView {
         Self::scoped(page, OutlineScope::Subtree(root), cx)
     }
 
+    /// The whole page, rendered inside a parent's scroll container (one day
+    /// of the journals list).
+    pub fn embedded(page: Entity<Page>, cx: &mut Context<Self>) -> Self {
+        Self::scoped(page, OutlineScope::Embedded, cx)
+    }
+
     fn scoped(page: Entity<Page>, scope: OutlineScope, cx: &mut Context<Self>) -> Self {
         let sub = cx.observe(&page, |_, _, cx| cx.notify());
         Self {
@@ -117,7 +126,7 @@ impl OutlineView {
     /// source page.
     fn scoped_roots<'a>(&self, outline: &'a Outline) -> &'a [Block] {
         match self.scope {
-            OutlineScope::Page => &outline.roots,
+            OutlineScope::Page | OutlineScope::Embedded => &outline.roots,
             OutlineScope::Subtree(id) => outline
                 .path_to(id)
                 .map_or(&[][..], |path| block_slice_at(&outline.roots, &path)),
@@ -427,7 +436,7 @@ impl Render for OutlineView {
                 // stay the last child (see below).
                 &self.scroll,
             ),
-            OutlineScope::Subtree(_) => root,
+            OutlineScope::Embedded | OutlineScope::Subtree(_) => root,
         };
 
         for (depth, id) in flat {

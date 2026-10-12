@@ -203,22 +203,62 @@ impl PageRegistry {
     }
 }
 
+/// What the main pane shows. One enum, so "a single page" and "the journals
+/// list" cannot both be current.
+#[derive(Default)]
+enum Shown {
+    #[default]
+    Nothing,
+    /// The scrolling list of journals, today first (`journals_view.rs`).
+    Journals,
+    Page(Entity<Page>),
+}
+
 #[derive(Default)]
 pub struct CurrentPage {
-    current: Option<Entity<Page>>,
+    current: Shown,
 }
 
 impl Global for CurrentPage {}
 
 impl CurrentPage {
+    /// The single page being shown; `None` in journals mode.
     #[must_use]
     pub fn get(&self) -> Option<&Entity<Page>> {
-        self.current.as_ref()
+        match &self.current {
+            Shown::Page(page) => Some(page),
+            Shown::Nothing | Shown::Journals => None,
+        }
     }
 
     pub fn set(&mut self, page: Option<Entity<Page>>) {
-        self.current = page;
+        self.current = page.map_or(Shown::Nothing, Shown::Page);
     }
+
+    #[must_use]
+    pub fn is_journals(&self) -> bool {
+        matches!(self.current, Shown::Journals)
+    }
+
+    pub fn show_journals(&mut self) {
+        self.current = Shown::Journals;
+    }
+}
+
+/// Saves whatever is being navigated away from: the current page, or — in
+/// journals mode, where any of the listed journals may have been edited —
+/// every open page.
+///
+/// # Errors
+/// Returns the first I/O error from saving.
+pub fn save_outgoing(cx: &mut App) -> io::Result<()> {
+    if cx.global::<CurrentPage>().is_journals() {
+        return cx.update_global::<PageRegistry, _>(PageRegistry::save_all);
+    }
+    let Some(outgoing) = cx.global::<CurrentPage>().get().cloned() else {
+        return Ok(());
+    };
+    cx.update_global::<PageRegistry, _>(|reg, cx| reg.save(&outgoing, cx))
 }
 
 /// Picks the next page name to cycle to after `current`, wrapping at the end.
@@ -260,15 +300,12 @@ pub fn save_all_on_quit(cx: &mut App) {
 /// # Errors
 /// Returns any I/O error from saving the outgoing page or opening the incoming one.
 pub fn set_current_page(name: &str, cx: &mut App) -> io::Result<()> {
-    let outgoing = cx.global::<CurrentPage>().current.clone();
+    save_outgoing(cx)?;
     let page = cx.update_global::<PageRegistry, io::Result<Entity<Page>>>(|reg, cx| {
-        if let Some(outgoing) = &outgoing {
-            reg.save(outgoing, cx)?;
-        }
         reg.open_or_create(name, cx)
     })?;
     cx.update_global::<CurrentPage, ()>(|current, _| {
-        current.current = Some(page);
+        current.set(Some(page));
     });
     Ok(())
 }

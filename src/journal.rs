@@ -4,7 +4,7 @@ use chrono::{Local, NaiveDate};
 use gpui::{App, BorrowAppContext, Entity};
 
 use crate::page::Page;
-use crate::registry::{CurrentPage, PageRegistry};
+use crate::registry::{save_outgoing, CurrentPage, PageRegistry};
 
 #[must_use]
 pub fn today() -> NaiveDate {
@@ -31,11 +31,8 @@ pub fn parse_journal_name(s: &str) -> Option<NaiveDate> {
 /// # Errors
 /// Returns any I/O error from saving the outgoing page or opening the journal.
 pub fn open_for_date(date: NaiveDate, cx: &mut App) -> io::Result<Entity<Page>> {
-    let outgoing = cx.global::<CurrentPage>().get().cloned();
+    save_outgoing(cx)?;
     let page = cx.update_global::<PageRegistry, io::Result<Entity<Page>>>(|reg, cx| {
-        if let Some(outgoing) = &outgoing {
-            reg.save(outgoing, cx)?;
-        }
         reg.open_or_create_journal(date, cx)
     })?;
     cx.update_global::<CurrentPage, ()>(|current, _| {
@@ -44,20 +41,50 @@ pub fn open_for_date(date: NaiveDate, cx: &mut App) -> io::Result<Entity<Page>> 
     Ok(page)
 }
 
-/// Opens today's journal. Always re-resolves the local date; do not cache the
-/// returned entity at startup, or the app will stay on yesterday's page after
-/// midnight.
+/// Switches to journals mode (today's journal, then older ones beneath it),
+/// saving whatever was shown before.
 ///
 /// # Errors
-/// Returns any I/O error from saving the outgoing page or opening today's journal.
-pub fn open_today(cx: &mut App) -> io::Result<Entity<Page>> {
-    open_for_date(today(), cx)
+/// Returns any I/O error from saving the outgoing page.
+pub fn open_journals(cx: &mut App) -> io::Result<()> {
+    save_outgoing(cx)?;
+    cx.update_global::<CurrentPage, ()>(|current, _| current.show_journals());
+    Ok(())
+}
+
+/// The dates journals mode lists, newest first: every journal on disk, plus
+/// `today` even before its file exists. Days without a journal are skipped
+/// rather than shown (and created) empty, and future-dated journals are left
+/// out so today stays on top.
+#[must_use]
+pub fn journal_dates_desc(mut on_disk: Vec<NaiveDate>, today: NaiveDate) -> Vec<NaiveDate> {
+    on_disk.retain(|d| *d < today);
+    on_disk.push(today);
+    on_disk.sort_unstable_by(|a, b| b.cmp(a));
+    on_disk.dedup();
+    on_disk
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    fn journal_dates_desc_puts_today_first_and_skips_gaps_and_future() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 10, day).unwrap();
+        let on_disk = vec![d(5), d(13), d(9), d(12), d(10)];
+        assert_eq!(
+            journal_dates_desc(on_disk, d(12)),
+            vec![d(12), d(10), d(9), d(5)],
+        );
+    }
+
+    #[test]
+    fn journal_dates_desc_includes_today_without_a_file() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 10, day).unwrap();
+        assert_eq!(journal_dates_desc(vec![d(1)], d(12)), vec![d(12), d(1)]);
+    }
 
     #[rstest]
     #[case::iso_date("2026-04-18", true)]

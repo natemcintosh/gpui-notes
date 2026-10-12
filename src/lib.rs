@@ -18,6 +18,7 @@ pub mod calc;
 pub mod errors;
 pub mod history;
 pub mod journal;
+pub mod journals_view;
 pub mod linked_refs;
 pub mod outline;
 pub mod outline_view;

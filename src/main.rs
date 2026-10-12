@@ -8,8 +8,9 @@ use gpui::{
 use gpui_notes::block_view;
 use gpui_notes::cmd_key;
 use gpui_notes::errors::{self, LastError};
-use gpui_notes::history::{self, NavHistory};
+use gpui_notes::history::{self, NavHistory, NavTarget};
 use gpui_notes::journal;
+use gpui_notes::journals_view::JournalsView;
 use gpui_notes::outline_view;
 use gpui_notes::page::Page;
 use gpui_notes::page_links::{self, LinkIndex, OpenPage};
@@ -102,6 +103,9 @@ impl OverlayMode {
 struct RootView {
     focus_handle: FocusHandle,
     shortcut_bar: Entity<ShortcutBar>,
+    /// Kept across mode switches so back/forward returns to the same days
+    /// and scroll position.
+    journals: Entity<JournalsView>,
     overlay: OverlayMode,
     _current_observer: Subscription,
     _tag_observer: Subscription,
@@ -119,6 +123,7 @@ impl RootView {
         Self {
             focus_handle: cx.focus_handle(),
             shortcut_bar: cx.new(|cx| ShortcutBar::new(window, cx)),
+            journals: cx.new(JournalsView::new),
             overlay: OverlayMode::None,
             _current_observer: current_observer,
             _tag_observer: tag_observer,
@@ -146,7 +151,14 @@ impl RootView {
                 window.focus(&self.focus_handle, cx);
             }
             OverlayMode::None => {
-                if let Some(page) = cx.global::<CurrentPage>().get().cloned() {
+                if cx.global::<CurrentPage>().is_journals() {
+                    let focused = self
+                        .journals
+                        .update(cx, |journals, cx| journals.focus_today(window, cx));
+                    if !focused {
+                        window.focus(&self.focus_handle, cx);
+                    }
+                } else if let Some(page) = cx.global::<CurrentPage>().get().cloned() {
                     let view = page.read(cx).view().clone();
                     view.update(cx, |view, cx| view.focus_first_block(window, cx));
                 } else {
@@ -167,9 +179,10 @@ impl RootView {
     }
 
     fn jump_to_today(&mut self, _: &JumpToToday, window: &mut Window, cx: &mut Context<Self>) {
-        // Resolve the date fresh on every press, per `journal::open_today`.
-        if let Err(err) = history::navigate_to(&TagSource::Journal(journal::today()), cx) {
-            errors::report(format!("open today's journal failed: {err}"), cx);
+        // Journals mode lists today first, and `park_focus` scrolls it back
+        // to the top.
+        if let Err(err) = history::navigate_to(&NavTarget::Journals, cx) {
+            errors::report(format!("open journals failed: {err}"), cx);
             return;
         }
         self.overlay = OverlayMode::None;
@@ -191,7 +204,7 @@ impl RootView {
         let Some(next) = pick_next(&names, current.as_ref()) else {
             return;
         };
-        if let Err(err) = history::navigate_to(&TagSource::Page(next.clone()), cx) {
+        if let Err(err) = history::navigate_to(&TagSource::Page(next.clone()).into(), cx) {
             errors::report(format!("open {next:?} failed: {err}"), cx);
             return;
         }
@@ -200,14 +213,14 @@ impl RootView {
     }
 
     fn open_tag(&mut self, action: &OpenTag, window: &mut Window, cx: &mut Context<Self>) {
-        Self::reindex_current_page(cx);
+        self.reindex_current_page(cx);
         self.overlay = OverlayMode::TagResults(action.name.clone());
         self.park_focus(window, cx);
         cx.notify();
     }
 
     fn open_page(&mut self, action: &OpenPage, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(err) = history::navigate_to(&page_links::link_target(&action.name), cx) {
+        if let Err(err) = history::navigate_to(&page_links::link_target(&action.name).into(), cx) {
             errors::report(format!("open {:?} failed: {err}", action.name), cx);
             return;
         }
@@ -447,7 +460,7 @@ impl RootView {
             PageEntry::Page(name) => TagSource::Page(name.clone()),
             PageEntry::Journal(date) => TagSource::Journal(*date),
         };
-        if let Err(err) = history::navigate_to(&target, cx) {
+        if let Err(err) = history::navigate_to(&target.into(), cx) {
             errors::report(format!("page picker: open failed: {err}"), cx);
         }
         self.close_picker(window, cx);
@@ -459,7 +472,19 @@ impl RootView {
         cx.notify();
     }
 
-    fn reindex_current_page(cx: &mut Context<Self>) {
+    fn reindex_current_page(&self, cx: &mut Context<Self>) {
+        if cx.global::<CurrentPage>().is_journals() {
+            let pages: Vec<(TagSource, Entity<Page>)> = self
+                .journals
+                .read(cx)
+                .pages()
+                .map(|(date, page)| (TagSource::Journal(date), page.clone()))
+                .collect();
+            for (source, page) in &pages {
+                tags::reindex_global_for_page(page, source, cx);
+            }
+            return;
+        }
         let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
             return;
         };
@@ -469,7 +494,7 @@ impl RootView {
     }
 
     fn open_tag_hit(&mut self, source: &TagSource, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(err) = history::navigate_to(source, cx) {
+        if let Err(err) = history::navigate_to(&source.clone().into(), cx) {
             errors::report(format!("open tag result failed: {err}"), cx);
             return;
         }
@@ -520,6 +545,9 @@ impl RootView {
             OverlayMode::PagePicker { .. } => ("page picker input", "not applicable"),
             OverlayMode::TagResults(_) | OverlayMode::ShortcutsHelp { .. } => {
                 ("root", "not applicable")
+            }
+            OverlayMode::None if cx.global::<CurrentPage>().is_journals() => {
+                self.journals.read(cx).debug_focus_status(window, cx)
             }
             OverlayMode::None => {
                 let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
@@ -582,21 +610,22 @@ impl Render for RootView {
             .gap_2();
         root.text_style().font_fallbacks = Some(text_input::emoji_font_fallbacks());
 
-        let Some(page) = current else {
-            return root
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(theme::header_fg())
-                        .child("No page open."),
-                )
-                .child(self.shortcut_bar.clone());
-        };
-
-        let (name, dirty, view) = {
-            let p = page.read(cx);
-            (p.name().clone(), p.dirty(), p.view().clone())
-        };
+        let (name, dirty, view): (SharedString, bool, gpui::AnyView) =
+            if cx.global::<CurrentPage>().is_journals() {
+                ("Journals".into(), false, self.journals.clone().into())
+            } else if let Some(page) = current {
+                let p = page.read(cx);
+                (p.name().clone(), p.dirty(), p.view().clone().into())
+            } else {
+                return root
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(theme::header_fg())
+                            .child("No page open."),
+                    )
+                    .child(self.shortcut_bar.clone());
+            };
         let active_tag = self.overlay.tag_name().cloned();
         let header_text = if let Some(tag) = active_tag.as_ref() {
             format!("#{}", tag.as_ref())
@@ -620,7 +649,7 @@ impl Render for RootView {
             root = root.child(Self::render_error_line(message, cx));
         }
 
-        // `OutlineView` owns its own scroll container (it needs the handle on
+        // `OutlineView` and `JournalsView` own their scroll containers (it needs the handle on
         // the element whose children are the block rows); tag results get one
         // here.
         let body = if let Some(tag) = active_tag {
@@ -704,7 +733,7 @@ fn main() {
         save_all_on_quit(cx);
         // Deliberately not `navigate_to`: the first page is not a history
         // entry, so the back stack starts empty.
-        journal::open_today(cx).expect("open today's journal");
+        journal::open_journals(cx).expect("open journals");
 
         let bounds = Bounds::centered(None, size(px(640.0), px(420.0)), cx);
         cx.open_window(
@@ -1346,7 +1375,7 @@ mod tests {
 
     /// Ctrl-. opens today's journal and clears any overlay.
     #[gpui::test]
-    fn transition_ctrl_dot_jumps_to_today(cx: &mut TestAppContext) {
+    fn transition_ctrl_dot_opens_journals(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let (root, cx) = mount_root(cx, &tmp);
 
@@ -1361,9 +1390,7 @@ mod tests {
 
         cx.read(|cx| {
             assert!(root.read(cx).overlay().is_none(), "shortcuts cleared");
-            let current = cx.global::<CurrentPage>().get().unwrap();
-            // The journal name is the ISO date, not "Home".
-            assert_ne!(current.read(cx).name().as_ref(), "Home");
+            assert!(cx.global::<CurrentPage>().is_journals());
         });
     }
 
@@ -1742,14 +1769,14 @@ mod tests {
     // must stay distinguishable through a round trip.
     // ────────────────────────────────────────────────────────────────────
 
+    /// The current page's name, or `"Journals"` in journals mode.
     fn current_page_name(cx: &mut VisualTestContext) -> String {
         cx.read(|cx| {
-            cx.global::<CurrentPage>()
-                .get()
-                .unwrap()
-                .read(cx)
-                .name()
-                .to_string()
+            let current = cx.global::<CurrentPage>();
+            if current.is_journals() {
+                return "Journals".to_string();
+            }
+            current.get().unwrap().read(cx).name().to_string()
         })
     }
 
@@ -1818,14 +1845,13 @@ mod tests {
         // A fresh navigation while Tagged sits on the forward stack.
         cx.simulate_keystrokes("ctrl-.");
         cx.run_until_parked();
-        let journal = current_page_name(cx);
-        assert_ne!(journal, "Home");
+        assert_eq!(current_page_name(cx), "Journals");
 
         cx.simulate_keystrokes("alt-right");
         cx.run_until_parked();
         assert_eq!(
             current_page_name(cx),
-            journal,
+            "Journals",
             "forward must be dead after a new navigation",
         );
     }
@@ -1859,17 +1885,16 @@ mod tests {
         assert_eq!(current_page_name(cx), "Tagged");
     }
 
-    /// Guards the `PageKey::Page` vs `PageKey::Journal` distinction (#40): a
-    /// journal's display name is an ISO date, and going back from it must
-    /// return to the page, not to a page named after that date.
+    /// Journals mode is a history entry like any page: going back from it
+    /// returns to the page it was opened from.
     #[gpui::test]
-    fn back_from_journal_returns_to_page(cx: &mut TestAppContext) {
+    fn back_from_journals_returns_to_page(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let (_root, cx) = mount_root(cx, &tmp);
 
         cx.simulate_keystrokes("ctrl-.");
         cx.run_until_parked();
-        assert_ne!(current_page_name(cx), "Home");
+        assert_eq!(current_page_name(cx), "Journals");
 
         cx.simulate_keystrokes("alt-left");
         cx.run_until_parked();
@@ -1911,5 +1936,155 @@ mod tests {
                 "the editor must still hold focus after alt-left; body: {body:?}",
             );
         });
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Journals mode.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Writes a journal `days_ago` days before today with `blocks` blocks.
+    fn write_journal(tmp: &TempDir, days_ago: i64, blocks: usize) -> chrono::NaiveDate {
+        let date = journal::today() - chrono::Duration::days(days_ago);
+        let body = (0..blocks)
+            .map(|i| format!("- {date} block {i}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let dir = tmp.path().join("journals");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{}.md", date.format("%Y_%m_%d"))), body).unwrap();
+        date
+    }
+
+    fn loaded_journal_dates(
+        root: &Entity<RootView>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<chrono::NaiveDate> {
+        cx.read(|cx| {
+            root.read(cx)
+                .journals
+                .read(cx)
+                .pages()
+                .map(|(date, _)| date)
+                .collect()
+        })
+    }
+
+    /// Today first (created, since it has no file yet), then only the journals
+    /// that exist, newest first: the empty days between are neither shown nor
+    /// written to disk.
+    #[gpui::test]
+    fn journals_mode_lists_today_then_existing_journals_newest_first(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let older = write_journal(&tmp, 5, 1);
+        let newer = write_journal(&tmp, 2, 1);
+        let (root, cx) = mount_root(cx, &tmp);
+
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
+
+        let today = journal::today();
+        assert_eq!(loaded_journal_dates(&root, cx), vec![today, newer, older]);
+        let files = std::fs::read_dir(tmp.path().join("journals"))
+            .unwrap()
+            .count();
+        assert_eq!(files, 3, "only today's journal is created");
+    }
+
+    /// Days arrive `DAYS_PER_LOAD` at a time, and scrolling toward the end of
+    /// the list loads the next batch.
+    #[gpui::test]
+    fn journals_mode_loads_more_days_on_scroll(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        // Tall days, so the first batch overflows the window by more than
+        // the load-ahead margin and loading stops there.
+        for days_ago in 1..=12 {
+            write_journal(&tmp, days_ago, 80);
+        }
+        let (root, cx) = mount_root(cx, &tmp);
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+        assert_eq!(
+            loaded_journal_dates(&root, cx).len(),
+            gpui_notes::journals_view::DAYS_PER_LOAD,
+        );
+
+        let viewport = cx.update(|window, _| window.viewport_size());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: point(viewport.width / 2., viewport.height / 2.),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        let dates = loaded_journal_dates(&root, cx);
+        assert!(
+            dates.len() > gpui_notes::journals_view::DAYS_PER_LOAD,
+            "scrolling to the end loads more, got {}",
+            dates.len(),
+        );
+        assert!(dates.is_sorted_by(|a, b| a > b), "still newest first");
+    }
+
+    /// Short days that leave the window unfilled keep loading without a
+    /// scroll, since there may be nothing to scroll yet.
+    #[gpui::test]
+    fn journals_mode_keeps_loading_until_the_window_is_filled(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        for days_ago in 1..=6 {
+            write_journal(&tmp, days_ago, 1);
+        }
+        let (root, cx) = mount_root(cx, &tmp);
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+        assert_eq!(loaded_journal_dates(&root, cx).len(), 7);
+    }
+
+    /// An edit to any listed journal is saved when navigating away, not just
+    /// one to today's.
+    #[gpui::test]
+    fn leaving_journals_mode_saves_edited_journals(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let yesterday = write_journal(&tmp, 1, 1);
+        let (root, cx) = mount_root(cx, &tmp);
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let (_, page) = root
+                .read(cx)
+                .journals
+                .read(cx)
+                .pages()
+                .find(|(date, _)| *date == yesterday)
+                .map(|(date, page)| (date, page.clone()))
+                .unwrap();
+            let first = page.read(cx).outline().first_block_id().unwrap();
+            page.update(cx, |page, cx| page.set_block_text(first, "edited", cx));
+        });
+
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+
+        let file = tmp
+            .path()
+            .join(format!("journals/{}.md", yesterday.format("%Y_%m_%d")));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "- edited\n");
+    }
+
+    #[gpui::test]
+    fn back_returns_to_journals_mode(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+        assert_ne!(current_page_name(cx), "Journals");
+
+        cx.simulate_keystrokes("alt-left");
+        cx.run_until_parked();
+        assert_eq!(current_page_name(cx), "Journals");
     }
 }

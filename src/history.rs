@@ -6,16 +6,30 @@ use crate::journal;
 use crate::registry::{set_current_page, CurrentPage, PageRegistry};
 use crate::tags::TagSource;
 
-/// Browser-style back/forward stacks over page identities.
+/// Somewhere the main pane can show.
 ///
-/// Entries are `TagSource`, not `Entity<Page>`: the registry keys pages by
-/// name-or-date, and a page literally named `2026-07-13` is a different page
-/// from that date's journal (#40). Storing the identity keeps that distinction
-/// through a round trip.
+/// A single page is a `TagSource`, not an `Entity<Page>`: the registry keys
+/// pages by name-or-date, and a page literally named `2026-07-13` is a
+/// different page from that date's journal (#40). Storing the identity keeps
+/// that distinction through a round trip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NavTarget {
+    /// Journals mode: today's journal with older ones beneath it.
+    Journals,
+    Page(TagSource),
+}
+
+impl From<TagSource> for NavTarget {
+    fn from(source: TagSource) -> Self {
+        Self::Page(source)
+    }
+}
+
+/// Browser-style back/forward stacks over `NavTarget`s.
 #[derive(Default)]
 pub struct NavHistory {
-    back: Vec<TagSource>,
-    forward: Vec<TagSource>,
+    back: Vec<NavTarget>,
+    forward: Vec<NavTarget>,
 }
 
 impl Global for NavHistory {}
@@ -24,7 +38,7 @@ impl NavHistory {
     /// Records a move to a new page: `outgoing` becomes the back target and the
     /// forward stack is dropped, since the branch it described is no longer
     /// reachable.
-    pub fn record(&mut self, outgoing: Option<TagSource>) {
+    pub fn record(&mut self, outgoing: Option<NavTarget>) {
         if let Some(outgoing) = outgoing {
             self.back.push(outgoing);
         }
@@ -32,27 +46,27 @@ impl NavHistory {
     }
 
     #[must_use]
-    pub fn peek(&self, direction: NavigationDirection) -> Option<&TagSource> {
+    pub fn peek(&self, direction: NavigationDirection) -> Option<&NavTarget> {
         self.stack(direction).last()
     }
 
     /// Completes a back/forward move: drops the entry that was just navigated
     /// to and pushes the page it replaced onto the opposite stack.
-    pub fn commit(&mut self, direction: NavigationDirection, outgoing: Option<TagSource>) {
+    pub fn commit(&mut self, direction: NavigationDirection, outgoing: Option<NavTarget>) {
         self.stack_mut(direction).pop();
         if let Some(outgoing) = outgoing {
             self.stack_mut(opposite(direction)).push(outgoing);
         }
     }
 
-    fn stack(&self, direction: NavigationDirection) -> &Vec<TagSource> {
+    fn stack(&self, direction: NavigationDirection) -> &Vec<NavTarget> {
         match direction {
             NavigationDirection::Back => &self.back,
             NavigationDirection::Forward => &self.forward,
         }
     }
 
-    fn stack_mut(&mut self, direction: NavigationDirection) -> &mut Vec<TagSource> {
+    fn stack_mut(&mut self, direction: NavigationDirection) -> &mut Vec<NavTarget> {
         match direction {
             NavigationDirection::Back => &mut self.back,
             NavigationDirection::Forward => &mut self.forward,
@@ -75,7 +89,7 @@ fn opposite(direction: NavigationDirection) -> NavigationDirection {
 ///
 /// # Errors
 /// Returns any I/O error from saving the outgoing page or opening `target`.
-pub fn navigate_to(target: &TagSource, cx: &mut App) -> io::Result<()> {
+pub fn navigate_to(target: &NavTarget, cx: &mut App) -> io::Result<()> {
     let outgoing = current_target(cx);
     // Opened unconditionally: re-opening the page you are already on still
     // flushes it to disk, and dropping that would silently lose the save.
@@ -103,17 +117,23 @@ pub fn go(direction: NavigationDirection, cx: &mut App) -> io::Result<bool> {
     Ok(true)
 }
 
-/// The one place that maps a navigation target onto the two open primitives.
-fn open(target: &TagSource, cx: &mut App) -> io::Result<()> {
+/// The one place that maps a navigation target onto the open primitives.
+fn open(target: &NavTarget, cx: &mut App) -> io::Result<()> {
     match target {
-        TagSource::Page(name) => set_current_page(name.as_ref(), cx),
-        TagSource::Journal(date) => journal::open_for_date(*date, cx).map(|_| ()),
+        NavTarget::Journals => journal::open_journals(cx),
+        NavTarget::Page(TagSource::Page(name)) => set_current_page(name.as_ref(), cx),
+        NavTarget::Page(TagSource::Journal(date)) => journal::open_for_date(*date, cx).map(|_| ()),
     }
 }
 
-fn current_target(cx: &mut App) -> Option<TagSource> {
+fn current_target(cx: &mut App) -> Option<NavTarget> {
+    if cx.global::<CurrentPage>().is_journals() {
+        return Some(NavTarget::Journals);
+    }
     let page = cx.global::<CurrentPage>().get().cloned()?;
-    Some(cx.update_global::<PageRegistry, TagSource>(|reg, cx| reg.source_for_page(&page, cx)))
+    let source =
+        cx.update_global::<PageRegistry, TagSource>(|reg, cx| reg.source_for_page(&page, cx));
+    Some(source.into())
 }
 
 #[cfg(test)]
@@ -122,8 +142,8 @@ mod tests {
     use chrono::NaiveDate;
     use rstest::rstest;
 
-    fn page(name: &str) -> TagSource {
-        TagSource::Page(name.to_string().into())
+    fn page(name: &str) -> NavTarget {
+        TagSource::Page(name.to_string().into()).into()
     }
 
     #[test]
@@ -196,7 +216,7 @@ mod tests {
     fn journal_and_page_targets_are_distinct_entries() {
         let date = NaiveDate::from_ymd_opt(2026, 7, 13).unwrap();
         let mut history = NavHistory::default();
-        history.record(Some(TagSource::Journal(date)));
+        history.record(Some(TagSource::Journal(date).into()));
         assert_ne!(
             history.peek(NavigationDirection::Back),
             Some(&page("2026-07-13"))
