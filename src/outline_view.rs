@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use gpui::{
     actions, div, px, relative, App, AppContext, Context, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
+    StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 use crate::block_render::theme;
@@ -44,6 +44,12 @@ const BULLET_COLUMN_WIDTH: Pixels = px(20.0);
 /// padding and 1px border, top and bottom.
 const LINE_HEIGHT: f32 = 1.5;
 const ROW_GAP: Pixels = px(1.0);
+/// The bullet dot sits on the centre of a block's first line of body text:
+/// the `BlockView`'s 1px border and 2px padding, plus half a 24px line.
+const BULLET_CENTER_Y: f32 = 15.0;
+const BULLET_SIZE: f32 = 6.0;
+/// How sharply a thread turns from its parent's column into a bullet.
+const THREAD_RADIUS: Pixels = px(8.0);
 
 /// The outline navigation/operation keys act on the focused-but-viewing
 /// block (#42/#44). The `!editing` guard keeps them from firing while that
@@ -97,6 +103,9 @@ pub struct OutlineView {
     /// Built on first render (not in `new`: `Page::new` constructs its view
     /// from `cx.entity()` before the page itself exists). `Page` scope only.
     linked_refs: Option<Entity<LinkedRefsView>>,
+    /// The block the last render threaded to, so tests can see what was drawn.
+    #[cfg(test)]
+    rendered_active: Option<BlockId>,
     _page_sub: Subscription,
 }
 
@@ -127,6 +136,8 @@ impl OutlineView {
             block_subs: HashMap::new(),
             scroll: ScrollHandle::new(),
             linked_refs: None,
+            #[cfg(test)]
+            rendered_active: None,
             _page_sub: sub,
         }
     }
@@ -257,6 +268,14 @@ impl OutlineView {
         })
     }
 
+    /// The block holding focus, whether viewing or editing — the end of the
+    /// highlighted thread.
+    fn active_block_id(&self, window: &Window, cx: &App) -> Option<BlockId> {
+        self.blocks
+            .iter()
+            .find_map(|(id, bv)| bv.read(cx).holds_focus(window, cx).then_some(*id))
+    }
+
     /// Move focus `delta` steps through the visible (collapse-respecting)
     /// flattened order. Clamps at both ends.
     fn move_focus(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -385,6 +404,128 @@ fn flatten_visible(roots: &[Block]) -> Vec<(usize, BlockId)> {
     out
 }
 
+/// What one row draws of the thread that joins the active block to each of
+/// its ancestors, Logseq-style: down from the parent's bullet, through any
+/// rows in between, then a curve into the child's bullet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RowThread {
+    /// This block is the active one or one of its ancestors.
+    on_path: bool,
+    /// The thread comes down its parent's column and turns into this bullet.
+    enters: bool,
+    /// The thread leaves this bullet downward, toward a child on the path.
+    leaves: bool,
+    /// The thread passes straight through this row in that depth's column.
+    passes: Option<usize>,
+}
+
+/// One `RowThread` per entry of `flat` (a `flatten_visible` result). All
+/// default when `active` is `None` or not on screen.
+fn thread_rows(flat: &[(usize, BlockId)], active: Option<BlockId>) -> Vec<RowThread> {
+    let mut rows = vec![RowThread::default(); flat.len()];
+    let Some(active) = active.and_then(|a| flat.iter().position(|&(_, id)| id == a)) else {
+        return rows;
+    };
+    rows[active].on_path = true;
+    // Walking back from a block, the first shallower row is its parent;
+    // everything before that is a sibling's subtree the thread runs past.
+    let mut child = active;
+    for row in (0..active).rev() {
+        let depth = flat[child].0;
+        if depth == 0 {
+            break;
+        }
+        if flat[row].0 < depth {
+            rows[child].enters = true;
+            rows[row].leaves = true;
+            rows[row].on_path = true;
+            child = row;
+        } else {
+            rows[row].passes = Some(depth - 1);
+        }
+    }
+    rows
+}
+
+/// The x of the bullet centre for blocks at `depth`, from the row's left edge.
+#[allow(clippy::cast_precision_loss)]
+fn bullet_x(depth: usize) -> Pixels {
+    INDENT_PER_LEVEL * depth as f32 + BULLET_COLUMN_WIDTH / 2.
+}
+
+/// A 1px vertical line centred on `depth`'s bullet column, from `top` to the
+/// row's bottom — and on across the gap into the next row.
+fn vertical_line(depth: usize, top: Pixels, color: gpui::Rgba) -> gpui::Div {
+    div()
+        .absolute()
+        .left(bullet_x(depth) - px(0.5))
+        .top(top)
+        .bottom(-ROW_GAP)
+        .w(px(1.0))
+        .bg(color)
+}
+
+/// One outline row: indent, the bullet with its guides and thread, and the
+/// block itself.
+fn thread_row(depth: usize, thread: RowThread, bv: Entity<BlockView>) -> gpui::Div {
+    #[allow(clippy::cast_precision_loss)]
+    let indent = INDENT_PER_LEVEL * depth as f32;
+    // Faint guides down every ancestor's column, then the active
+    // thread over them. Both paint before the bullet so it covers
+    // their ends.
+    let guides = (0..depth).map(|d| vertical_line(d, px(0.), theme::thread_guide()));
+    let passes = thread
+        .passes
+        .map(|d| vertical_line(d, px(0.), theme::accent()));
+    let leaves = thread
+        .leaves
+        .then(|| vertical_line(depth, px(BULLET_CENTER_Y), theme::accent()));
+    let enters = thread.enters.then(|| {
+        // An L from the parent's column into this bullet: its left and
+        // bottom borders, rounded at the corner, the bottom border
+        // centred on the bullet.
+        div()
+            .absolute()
+            .left(bullet_x(depth - 1) - px(0.5))
+            .top(-ROW_GAP)
+            .w(INDENT_PER_LEVEL - px(BULLET_SIZE / 2.))
+            .h(ROW_GAP + px(BULLET_CENTER_Y + 0.5))
+            .border_l_1()
+            .border_b_1()
+            .border_color(theme::accent())
+            .rounded_bl(THREAD_RADIUS)
+    });
+    let bullet_color = if thread.on_path {
+        theme::accent()
+    } else {
+        theme::fg_muted()
+    };
+    div()
+        .relative()
+        .flex()
+        .flex_row()
+        .w_full()
+        .max_w(theme::CONTENT_MAX_WIDTH)
+        .mx_auto()
+        .min_w_0()
+        .items_start()
+        .pl(indent)
+        .children(guides)
+        .children(passes)
+        .children(leaves)
+        .children(enters)
+        .child(
+            div()
+                .w(BULLET_COLUMN_WIDTH)
+                .flex_none()
+                .flex()
+                .justify_center()
+                .pt(px(BULLET_CENTER_Y - BULLET_SIZE / 2.))
+                .child(div().size(px(BULLET_SIZE)).rounded_full().bg(bullet_color)),
+        )
+        .child(bv)
+}
+
 fn collect_all_ids(blocks: &[Block], out: &mut HashSet<BlockId>) {
     for b in blocks {
         out.insert(b.id);
@@ -451,30 +592,15 @@ impl Render for OutlineView {
             OutlineScope::Embedded | OutlineScope::Subtree(_) => root,
         };
 
-        for (depth, id) in flat {
+        let active = self.active_block_id(window, cx);
+        #[cfg(test)]
+        {
+            self.rendered_active = active;
+        }
+        let threads = thread_rows(&flat, active);
+        for ((depth, id), thread) in flat.into_iter().zip(threads) {
             let bv = self.get_or_create(id, window, cx);
-            #[allow(clippy::cast_precision_loss)]
-            let indent = INDENT_PER_LEVEL * depth as f32;
-            let row = div()
-                .flex()
-                .flex_row()
-                .w_full()
-                .max_w(theme::CONTENT_MAX_WIDTH)
-                .mx_auto()
-                .min_w_0()
-                .items_start()
-                .pl(indent)
-                .child(
-                    div()
-                        .w(BULLET_COLUMN_WIDTH)
-                        .flex_none()
-                        .flex()
-                        .justify_center()
-                        .text_color(theme::fg_muted())
-                        .child(SharedString::from("•")),
-                )
-                .child(bv);
-            root = root.child(row);
+            root = root.child(thread_row(depth, thread, bv));
         }
 
         if self.scope == OutlineScope::Page {
@@ -503,6 +629,83 @@ mod tests {
 
     struct TestPage(Entity<Page>);
     impl gpui::Global for TestPage {}
+
+    /// `flatten_visible` rows of an outline with blocks at these depths.
+    fn flat_of(depths: &[usize]) -> Vec<(usize, BlockId)> {
+        let mut body = String::new();
+        for &d in depths {
+            body.push_str(&"\t".repeat(d));
+            body.push_str("- x\n");
+        }
+        let flat = flatten_visible(&Outline::parse(&body).roots);
+        assert_eq!(flat.iter().map(|&(d, _)| d).collect::<Vec<_>>(), depths);
+        flat
+    }
+
+    #[test]
+    fn thread_joins_each_ancestor_to_the_next_through_rows_between() {
+        // a / a1 / a1x / a2 / a2y — active a2y.
+        let flat = flat_of(&[0, 1, 2, 1, 2]);
+        let rows = thread_rows(&flat, Some(flat[4].1));
+        let none = RowThread::default();
+        assert_eq!(
+            rows,
+            vec![
+                RowThread {
+                    on_path: true,
+                    leaves: true,
+                    ..none
+                },
+                // a1's subtree sits between a and a2: the thread runs past
+                // it in a's column.
+                RowThread {
+                    passes: Some(0),
+                    ..none
+                },
+                RowThread {
+                    passes: Some(0),
+                    ..none
+                },
+                RowThread {
+                    on_path: true,
+                    enters: true,
+                    leaves: true,
+                    ..none
+                },
+                RowThread {
+                    on_path: true,
+                    enters: true,
+                    ..none
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn thread_stops_at_a_root_and_ignores_later_rows() {
+        // a / b / b1 / c — active b: a root, so only its bullet lights up.
+        let flat = flat_of(&[0, 0, 1, 0]);
+        let rows = thread_rows(&flat, Some(flat[1].1));
+        let none = RowThread::default();
+        assert_eq!(
+            rows,
+            vec![
+                none,
+                RowThread {
+                    on_path: true,
+                    ..none
+                },
+                none,
+                none
+            ]
+        );
+    }
+
+    #[test]
+    fn no_thread_without_an_active_block() {
+        let flat = flat_of(&[0, 1]);
+        assert_eq!(thread_rows(&flat, None), vec![RowThread::default(); 2]);
+    }
 
     /// Mount an `OutlineView` for `body` as the window root and activate the
     /// window. Same shape as `block_view::tests::mount` — focus and event
@@ -1070,6 +1273,28 @@ mod tests {
                  clamped={clamped_x:?}, destination={destination_x:?}",
             );
         });
+    }
+
+    #[gpui::test]
+    fn thread_follows_a_vertical_edit_move_on_the_same_frame(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n\t- b\n\t- c\n");
+        let (b, c) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (
+                outline.roots[0].children[0].id,
+                outline.roots[0].children[1].id,
+            )
+        });
+
+        focus_block(cx, &ov, c);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| ov.read(cx).rendered_active), Some(c));
+
+        // The move mounts b's editor and focuses it in one go: the render
+        // that follows must already thread to b, not wait for another frame.
+        cx.simulate_keystrokes("up");
+        assert_eq!(cx.read(|cx| ov.read(cx).rendered_active), Some(b));
     }
 
     #[gpui::test]

@@ -165,6 +165,12 @@ pub fn accent() -> Rgba {
     rgb(0x66b2ff)
 }
 
+/// The faint line down each parent's bullet column, beside its children.
+#[must_use]
+pub fn thread_guide() -> Rgba {
+    overlay_border()
+}
+
 #[must_use]
 pub fn heading_rule() -> Rgba {
     overlay_border()

@@ -145,6 +145,17 @@ impl BlockView {
         matches!(self.mode, BlockMode::Editing { .. })
     }
 
+    /// Whether this block or its editor holds focus. Compares focus handles
+    /// directly rather than using `contains_focused`, which walks the last
+    /// *rendered* frame — an editor mounted and focused since then isn't in
+    /// it yet.
+    #[must_use]
+    pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.is_focused(window)
+            || matches!(&self.mode, BlockMode::Editing { input, .. }
+                if input.focus_handle(cx).is_focused(window))
+    }
+
     pub(crate) fn begin_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.begin_editing_with_placement(None, window, cx);
     }
