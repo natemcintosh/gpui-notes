@@ -533,15 +533,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn page_link_renders_blue_between_muted_brackets(cx: &mut TestAppContext) {
+    fn page_link_renders_blue_between_dim_brackets(cx: &mut TestAppContext) {
         let (_view, cx) = mount_host(cx, "[[Alpha]]");
         cx.run_until_parked();
 
         let runs = cx.update(|_, _| crate::block_render::take_recorded_runs());
         let styled: Vec<(usize, Hsla)> = runs.iter().map(|r| (r.len, r.color)).collect();
-        let (muted, accent) = (theme::fg_muted().into(), theme::accent().into());
+        let (dim, accent) = (theme::link_bracket().into(), theme::accent().into());
         assert!(
-            styled.ends_with(&[(2, muted), (5, accent), (2, muted)]),
+            styled.ends_with(&[(2, dim), (5, accent), (2, dim)]),
             "{styled:?}"
         );
     }

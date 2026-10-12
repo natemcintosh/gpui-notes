@@ -95,7 +95,7 @@ pub struct InlineRun {
     pub color: Option<Rgba>,
     pub background: Option<Rgba>,
     pub italic: bool,
-    /// Drawn muted on either side of `text` (`[[`/`]]` around a page link),
+    /// Drawn dim on either side of `text` (`[[`/`]]` around a page link),
     /// and clickable along with it.
     pub delimiters: Option<(&'static str, &'static str)>,
     pub action: Option<Box<dyn Action>>,
@@ -636,7 +636,7 @@ impl Paragraph {
                     };
                     let start = self.text.len();
                     let delimiter_style = RunStyle {
-                        color: Some(theme::fg_muted()),
+                        color: Some(theme::link_bracket()),
                         ..style
                     };
                     if let Some((open, _)) = run.delimiters {

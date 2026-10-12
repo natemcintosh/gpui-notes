@@ -165,6 +165,12 @@ pub fn accent() -> Rgba {
     rgb(0x66b2ff)
 }
 
+/// The `[[`/`]]` around a page link: dimmer than `fg_muted`, like Logseq.
+#[must_use]
+pub fn link_bracket() -> Rgba {
+    rgb(0x5c5c5c)
+}
+
 /// The faint line down each parent's bullet column, beside its children.
 #[must_use]
 pub fn thread_guide() -> Rgba {
