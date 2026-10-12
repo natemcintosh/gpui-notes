@@ -11,8 +11,9 @@ alias u := unblocked
 build:
     cargo build --release
 
+# Run against the ~/Desktop/logseq-test-zone copy (see `just test-zone`)
 run:
-    cargo run --release
+    GPUI_NOTES_ROOT="$HOME/Desktop/logseq-test-zone" cargo run --release
 
 test:
     cargo nextest run --no-fail-fast
@@ -26,6 +27,6 @@ pre:
 unblocked:
     nu ./scripts/unblocked-issues.nu
 
-# Reset ~/Desktop/test zone to a fresh copy of the real Logseq graph (~/logseq)
+# Reset ~/Desktop/logseq-test-zone to a fresh copy of the real Logseq graph (~/logseq)
 test-zone:
-    rsync -a --delete --exclude .stfolder ~/logseq/ "$HOME/Desktop/test zone/"
+    rsync -a --delete --exclude .stfolder ~/logseq/ "$HOME/Desktop/logseq-test-zone/"
