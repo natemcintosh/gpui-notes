@@ -11,8 +11,8 @@ alias u := unblocked
 build:
     cargo build --release
 
-# Run against the ~/Desktop/logseq-test-zone copy (see `just test-zone`)
-run:
+# Refresh ~/Desktop/logseq-test-zone from ~/logseq, then run against it
+run: test-zone
     GPUI_NOTES_ROOT="$HOME/Desktop/logseq-test-zone" cargo run --release
 
 test:
