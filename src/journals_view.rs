@@ -205,6 +205,8 @@ impl Render for JournalsView {
                 .flex_col()
                 .flex_none()
                 .w_full()
+                .max_w(theme::CONTENT_MAX_WIDTH)
+                .mx_auto()
                 .gap_3()
                 .pb_8()
                 .child(title)

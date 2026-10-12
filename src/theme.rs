@@ -6,7 +6,11 @@
 
 use std::sync::OnceLock;
 
-use gpui::{rgb, rgba, App, Rgba, SharedString};
+use gpui::{px, rgb, rgba, App, Pixels, Rgba, SharedString};
+
+/// Widest the note column grows; wider windows centre it. Matches Logseq's
+/// `--ls-main-content-max-width`.
+pub const CONTENT_MAX_WIDTH: Pixels = px(810.);
 
 /// The app-wide UI font family.
 ///

@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{
     actions, div, px, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement, Render, ScrollHandle, SharedString,
+    IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
@@ -33,6 +33,12 @@ actions!(
         DeleteBackward
     ]
 );
+
+/// Logseq's geometry: each nesting level steps 30px right, and a block's
+/// text starts 23px past its bullet column's left edge (this column plus the
+/// `BlockView`'s 1px border and 2px padding).
+const INDENT_PER_LEVEL: Pixels = px(30.0);
+const BULLET_COLUMN_WIDTH: Pixels = px(20.0);
 
 /// The outline navigation/operation keys act on the focused-but-viewing
 /// block (#42/#44). The `!editing` guard keeps them from firing while that
@@ -442,18 +448,22 @@ impl Render for OutlineView {
         for (depth, id) in flat {
             let bv = self.get_or_create(id, window, cx);
             #[allow(clippy::cast_precision_loss)]
-            let indent = px(16.0) * depth as f32;
+            let indent = INDENT_PER_LEVEL * depth as f32;
             let row = div()
                 .flex()
                 .flex_row()
                 .w_full()
+                .max_w(theme::CONTENT_MAX_WIDTH)
+                .mx_auto()
                 .min_w_0()
                 .items_start()
                 .pl(indent)
                 .child(
                     div()
-                        .w(px(14.0))
+                        .w(BULLET_COLUMN_WIDTH)
                         .flex_none()
+                        .flex()
+                        .justify_center()
                         .text_color(theme::fg_muted())
                         .child(SharedString::from("•")),
                 )
@@ -466,7 +476,13 @@ impl Render for OutlineView {
             let refs = self
                 .linked_refs
                 .get_or_insert_with(|| cx.new(|cx| LinkedRefsView::new(page, cx)));
-            root = root.child(refs.clone());
+            root = root.child(
+                div()
+                    .w_full()
+                    .max_w(theme::CONTENT_MAX_WIDTH)
+                    .mx_auto()
+                    .child(refs.clone()),
+            );
         }
         root
     }
