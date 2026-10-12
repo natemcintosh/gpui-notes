@@ -13,13 +13,13 @@ use crate::block_render::{
 use crate::journal;
 use crate::outline::{Block, BlockId, Outline};
 use crate::page::Page;
+use crate::source::NoteSource;
 use crate::store::NotesStore;
-use crate::tags::TagSource;
 
 static PAGE_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\[([^\[\]\n]+?)\]\]").expect("page-link regex is valid"));
 
-static EMPTY_BACKLINKS: LazyLock<BTreeSet<TagSource>> = LazyLock::new(BTreeSet::new);
+static EMPTY_BACKLINKS: LazyLock<BTreeSet<NoteSource>> = LazyLock::new(BTreeSet::new);
 static EMPTY_TARGETS: LazyLock<HashSet<SharedString>> = LazyLock::new(HashSet::new);
 
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
@@ -40,10 +40,10 @@ pub struct OpenPage {
 /// (`blocks_linking_to`).
 #[derive(Default)]
 pub struct LinkIndex {
-    reverse: HashMap<String, BTreeSet<TagSource>>,
-    /// Keyed by `TagSource` rather than by display name so that a page named
+    reverse: HashMap<String, BTreeSet<NoteSource>>,
+    /// Keyed by `NoteSource` rather than by display name so that a page named
     /// `2026-07-23` cannot purge the reverse entries of that date's journal.
-    forward: BTreeMap<TagSource, HashSet<SharedString>>,
+    forward: BTreeMap<NoteSource, HashSet<SharedString>>,
     pages: HashSet<String>,
 }
 
@@ -51,19 +51,19 @@ impl Global for LinkIndex {}
 
 impl LinkIndex {
     /// Replaces all indexed links for `page` with its current outline.
-    pub fn reindex_page(&mut self, page: &Page, source: &TagSource) {
+    pub fn reindex_page(&mut self, page: &Page, source: &NoteSource) {
         self.reindex_outline(source, page.outline());
     }
 
     /// Returns the sources that link to `target`.
     #[must_use]
-    pub fn backlinks(&self, target: &str) -> &BTreeSet<TagSource> {
+    pub fn backlinks(&self, target: &str) -> &BTreeSet<NoteSource> {
         self.reverse.get(target).unwrap_or(&EMPTY_BACKLINKS)
     }
 
     /// Returns the unique page names referenced by `source`.
     #[must_use]
-    pub fn targets(&self, source: &TagSource) -> &HashSet<SharedString> {
+    pub fn targets(&self, source: &NoteSource) -> &HashSet<SharedString> {
         self.forward.get(source).unwrap_or(&EMPTY_TARGETS)
     }
 
@@ -98,17 +98,17 @@ impl LinkIndex {
         let mut index = Self::default();
         for name in store.list()? {
             let body = store.read(&name)?;
-            let source = TagSource::Page(SharedString::from(name));
+            let source = NoteSource::Page(SharedString::from(name));
             index.reindex_outline(&source, &Outline::parse(&body));
         }
         for date in store.list_journals()? {
             let body = store.read_journal(date)?;
-            index.reindex_outline(&TagSource::Journal(date), &Outline::parse(&body));
+            index.reindex_outline(&NoteSource::Journal(date), &Outline::parse(&body));
         }
         Ok(index)
     }
 
-    fn reindex_outline(&mut self, source: &TagSource, outline: &Outline) {
+    fn reindex_outline(&mut self, source: &NoteSource, outline: &Outline) {
         // The forward map identifies exactly which reverse entries can contain
         // this source, avoiding a sweep over unrelated targets.
         if let Some(old_targets) = self.forward.remove(source) {
@@ -135,7 +135,7 @@ impl LinkIndex {
             }
         }
 
-        if let TagSource::Page(name) = source {
+        if let NoteSource::Page(name) = source {
             self.pages.insert(name.to_string());
         }
         self.forward.insert(source.clone(), targets);
@@ -200,15 +200,15 @@ impl InlineExtension for PageLinkExt {
 /// What `[[name]]` opens. A journal title (`[[2026-10-09]]`) opens that date's
 /// journal, as in Logseq; anything else is a regular page.
 #[must_use]
-pub fn link_target(name: &str) -> TagSource {
+pub fn link_target(name: &str) -> NoteSource {
     journal::parse_journal_name(name).map_or_else(
-        || TagSource::Page(SharedString::from(name.to_string())),
-        TagSource::Journal,
+        || NoteSource::Page(SharedString::from(name.to_string())),
+        NoteSource::Journal,
     )
 }
 
 /// Refreshes the global index after a page or journal is opened, created, or saved.
-pub fn reindex_global_for_page(page: &gpui::Entity<Page>, source: &TagSource, cx: &mut App) {
+pub fn reindex_global_for_page(page: &gpui::Entity<Page>, source: &NoteSource, cx: &mut App) {
     if !cx.has_global::<LinkIndex>() {
         return;
     }
@@ -356,8 +356,8 @@ mod tests {
         );
     }
 
-    fn page(name: &str) -> TagSource {
-        TagSource::Page(SharedString::from(name.to_string()))
+    fn page(name: &str) -> NoteSource {
+        NoteSource::Page(SharedString::from(name.to_string()))
     }
 
     #[test]
@@ -419,10 +419,10 @@ mod tests {
         let index = LinkIndex::rebuild_from(&store).unwrap();
         assert_eq!(
             index.backlinks("Target").iter().collect::<Vec<_>>(),
-            [&TagSource::Journal(date)],
+            [&NoteSource::Journal(date)],
             "a journal that links a page must be a backlink source",
         );
-        assert_eq!(index.targets(&TagSource::Journal(date)).len(), 2);
+        assert_eq!(index.targets(&NoteSource::Journal(date)).len(), 2);
 
         // Journals must not leak into the page set: it drives the `[[`
         // completion list.
@@ -436,7 +436,7 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 7, 23).unwrap();
         index.reindex_outline(&page("2026-07-23"), &Outline::parse("- [[Target]]\n"));
         index.reindex_outline(
-            &TagSource::Journal(date),
+            &NoteSource::Journal(date),
             &Outline::parse("- also [[Target]]\n"),
         );
 
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn journal_title_links_target_the_journal() {
         let date = NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
-        assert_eq!(link_target("2026-10-09"), TagSource::Journal(date));
+        assert_eq!(link_target("2026-10-09"), NoteSource::Journal(date));
         // Only Logseq's title form; the on-disk `2026_10_09` is a page name.
         assert_eq!(link_target("2026_10_09"), page("2026_10_09"));
         assert_eq!(link_target("Target"), page("Target"));

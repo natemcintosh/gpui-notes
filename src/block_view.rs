@@ -21,9 +21,8 @@ use gpui::{
 use crate::block_render::{render_block, theme};
 use crate::outline::BlockId;
 use crate::page::Page;
-use crate::page_completion::{self, CompletionKind, CompletionState};
+use crate::page_completion::{self, CompletionState};
 use crate::page_links::{LinkIndex, PageLinkExt};
-use crate::tags::{TagExt, TagIndex};
 use crate::text_input::{
     PendingVerticalPlacement, TextInput, TextInputEvent, VerticalDirection, VerticalMovementOutcome,
 };
@@ -68,7 +67,7 @@ pub enum BlockMode {
     Viewing,
     Editing {
         input: Entity<TextInput>,
-        /// The `[[Page]]` / `#tag` popup, when the caret sits in a completion
+        /// The `[[Page]]` popup, when the caret sits in a completion
         /// site. It lives inside `Editing` so "popup open on a block that
         /// isn't being edited" is unrepresentable and every exit path closes
         /// it for free.
@@ -296,7 +295,7 @@ impl BlockView {
             .then(|| page_completion::trigger_at(&content, selection.start))
             .flatten()
             .and_then(|trigger| {
-                let names = Self::completion_names(trigger.kind, cx);
+                let names = Self::completion_names(cx);
                 CompletionState::new(&trigger, &names)
             })
             .map(|mut state| {
@@ -320,25 +319,12 @@ impl BlockView {
         }
     }
 
-    /// The names offered for `kind`. Both indexes are optional globals — tests
-    /// that don't seed them still get the "New page/tag" row.
-    fn completion_names(kind: CompletionKind, cx: &App) -> Vec<SharedString> {
-        match kind {
-            CompletionKind::Page => cx
-                .try_global::<LinkIndex>()
-                .map(LinkIndex::page_names)
-                .unwrap_or_default(),
-            CompletionKind::Tag => cx
-                .try_global::<TagIndex>()
-                .map(|index| {
-                    index
-                        .all_tags()
-                        .into_iter()
-                        .map(|summary| summary.display)
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }
+    /// The page names offered. The index is an optional global — tests that
+    /// don't seed it still get the "New page" row.
+    fn completion_names(cx: &App) -> Vec<SharedString> {
+        cx.try_global::<LinkIndex>()
+            .map(LinkIndex::page_names)
+            .unwrap_or_default()
     }
 
     /// Dismisses the popup. Returns whether there was one to dismiss, which is
@@ -375,7 +361,7 @@ impl BlockView {
         let content = input.read(cx).content().clone();
         // Swallow the auto-paired `]]` so accepting yields `[[Name]]` rather
         // than `[[Name]]]]`.
-        if state.kind == CompletionKind::Page && content[range.end..].starts_with("]]") {
+        if content[range.end..].starts_with("]]") {
             range.end += 2;
         }
         let caret = insertion.len();
@@ -598,9 +584,7 @@ impl Render for BlockView {
                     .into_any_element()
             } else {
                 let page_link_ext = PageLinkExt;
-                let tag_ext = TagExt;
-                let extensions: [&dyn crate::block_render::InlineExtension; 2] =
-                    [&page_link_ext, &tag_ext];
+                let extensions: [&dyn crate::block_render::InlineExtension; 1] = [&page_link_ext];
                 render_block(&text, &extensions, window, cx)
             }
         };
@@ -765,10 +749,9 @@ mod tests {
         (page, bv, vcx)
     }
 
-    /// Like `mount`, but seeds the two completion indexes so the `[[` and `#`
-    /// popups have something to offer: pages `ruff` and `rust`, and the tags
-    /// found in `#ruff #rustup`.
-    fn mount_with_indexes<'a>(
+    /// Like `mount`, but seeds the link index so the `[[` popup has something
+    /// to offer: pages `ruff` and `rust`.
+    fn mount_with_index<'a>(
         cx: &'a mut TestAppContext,
         body: &str,
     ) -> (
@@ -784,17 +767,12 @@ mod tests {
             let mut link_index = LinkIndex::default();
             for name in ["ruff", "rust"] {
                 let indexed = cx.new(|cx| Page::new(name.into(), "", cx));
-                link_index
-                    .reindex_page(indexed.read(cx), &crate::tags::TagSource::Page(name.into()));
+                link_index.reindex_page(
+                    indexed.read(cx),
+                    &crate::source::NoteSource::Page(name.into()),
+                );
             }
             cx.set_global(link_index);
-
-            let mut tag_index = TagIndex::default();
-            tag_index.reindex_page(
-                &crate::tags::TagSource::Page("tagged".into()),
-                &crate::outline::Outline::parse("- #ruff #rustup\n"),
-            );
-            cx.set_global(tag_index);
 
             let page = cx.new(|cx| Page::new("foo".into(), &body, cx));
             let block_id = page.read(cx).outline().first_block_id().unwrap();
@@ -815,7 +793,7 @@ mod tests {
         Entity<BlockView>,
         &mut gpui::VisualTestContext,
     ) {
-        let (page, bv, cx) = mount_with_indexes(cx, "- \n");
+        let (page, bv, cx) = mount_with_index(cx, "- \n");
         focus_block(cx, &bv);
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -991,28 +969,6 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn hash_opens_tag_completion_and_enter_inserts_the_tag(cx: &mut TestAppContext) {
-        let (_page, bv, cx) = edit_empty_block(cx);
-
-        cx.simulate_input("see #ru");
-        cx.run_until_parked();
-        cx.read(|cx| {
-            assert_eq!(
-                bv.read(cx).completion_labels_for_test(),
-                Some(vec!["ruff".into(), "rustup".into(), "New tag: ru".into()]),
-            );
-        });
-
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        assert_eq!(
-            block_text(cx, &bv),
-            "see #ruff",
-            "a tag is spliced in bare, with no closing delimiter",
-        );
-    }
-
     /// A click on a popup row must not first blur the `TextInput` — the blur
     /// listener would `end_editing` and drop the popup before the click ever
     /// reached its handler.
@@ -1035,7 +991,7 @@ mod tests {
 
     #[gpui::test]
     fn a_caret_parked_inside_an_existing_link_does_not_add_brackets(cx: &mut TestAppContext) {
-        let (_page, bv, cx) = mount_with_indexes(cx, "- [[ruff]]\n");
+        let (_page, bv, cx) = mount_with_index(cx, "- [[ruff]]\n");
         focus_block(cx, &bv);
         cx.simulate_keystrokes("enter home right right");
         cx.run_until_parked();
@@ -1281,21 +1237,6 @@ mod tests {
             assert!(
                 input_focus.is_focused(window),
                 "TextInput must hold focus after the click",
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn clicking_tag_chip_does_not_enter_editing(cx: &mut TestAppContext) {
-        let (_page, bv, cx) = mount(cx, "- #tag tag tag\n");
-
-        cx.simulate_click(point(px(8.0), px(10.0)), Modifiers::default());
-        cx.run_until_parked();
-
-        cx.read(|cx| {
-            assert!(
-                !bv.read(cx).is_editing(),
-                "tag mouse-down should not bubble into block editing",
             );
         });
     }

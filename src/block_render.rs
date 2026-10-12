@@ -5,7 +5,7 @@
 //! the markdown parser are ignored — outline composition owns bullet nesting.
 //!
 //! Extensions (see `InlineExtension`) are the single hook for downstream
-//! tokens like `[[PageName]]` (#8), `((block-id))` (#10), `#tag` (#11). They
+//! tokens like `[[PageName]]` (#8) and `((block-id))` (#10). They
 //! match byte ranges inside plain-text runs and describe how those ranges look
 //! and what they dispatch when clicked.
 //!
@@ -116,7 +116,7 @@ impl InlineRun {
     }
 }
 
-/// Hook for downstream token matchers (#8 links, #10 block refs, #11 tags).
+/// Hook for downstream token matchers (#8 links, #10 block refs).
 pub trait InlineExtension {
     /// Return non-overlapping byte ranges within `text`. Overlaps across
     /// extensions are resolved by the lowerer — earlier extensions win.

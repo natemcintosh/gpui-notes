@@ -32,7 +32,7 @@ use crate::outline_view::OutlineView;
 use crate::page::Page;
 use crate::page_links::{self, LinkIndex};
 use crate::registry::PageRegistry;
-use crate::tags::{source_label, TagSource};
+use crate::source::{source_label, NoteSource};
 
 /// How many references are mounted at once, and how many more each "Show
 /// more" click adds. Every reference is a live `OutlineView` plus a
@@ -45,17 +45,17 @@ pub struct LinkedRefsView {
     page: Entity<Page>,
     /// One subtree view per *visible* referencing block, kept across renders
     /// so an in-progress edit survives. Pruned to what is on screen.
-    refs: HashMap<(TagSource, BlockId), Entity<OutlineView>>,
+    refs: HashMap<(NoteSource, BlockId), Entity<OutlineView>>,
     /// The full grouping, in display order. Rebuilt only when invalidated.
-    groups: Vec<(TagSource, Vec<BlockId>)>,
+    groups: Vec<(NoteSource, Vec<BlockId>)>,
     /// Per-source referencing block ids, so invalidating one source (an edit
     /// in a reference lands in *its* page) does not re-walk the whole vault.
     /// A source that failed to open caches an empty list, which is also what
     /// stops it from re-reporting the error on every rebuild.
-    blocks: HashMap<TagSource, Vec<BlockId>>,
+    blocks: HashMap<NoteSource, Vec<BlockId>>,
     /// One observer per opened source page: its outline is the only thing
     /// that can change that source's block list.
-    source_subs: HashMap<TagSource, Subscription>,
+    source_subs: HashMap<NoteSource, Subscription>,
     needs_rebuild: bool,
     /// How many references are shown; grows by `REFS_PER_PAGE` per click.
     shown: usize,
@@ -92,7 +92,7 @@ impl LinkedRefsView {
     /// Every reference to this page, grouped and ordered for display —
     /// including the ones beyond the current `REFS_PER_PAGE` cap.
     #[must_use]
-    pub fn groups(&self) -> &[(TagSource, Vec<BlockId>)] {
+    pub fn groups(&self) -> &[(NoteSource, Vec<BlockId>)] {
         &self.groups
     }
 
@@ -113,7 +113,7 @@ impl LinkedRefsView {
         }
 
         let sources = self.ordered_sources(cx);
-        let live: HashSet<TagSource> = sources.iter().cloned().collect();
+        let live: HashSet<NoteSource> = sources.iter().cloned().collect();
         self.blocks.retain(|source, _| live.contains(source));
         self.source_subs.retain(|source, _| live.contains(source));
 
@@ -132,7 +132,7 @@ impl LinkedRefsView {
     }
 
     /// The leading `shown` references, still grouped by source.
-    fn visible_groups(&self) -> Vec<(TagSource, Vec<BlockId>)> {
+    fn visible_groups(&self) -> Vec<(NoteSource, Vec<BlockId>)> {
         let mut budget = self.shown;
         let mut visible = Vec::new();
         for (source, blocks) in &self.groups {
@@ -147,16 +147,16 @@ impl LinkedRefsView {
     }
 
     /// The sources that reference this page, ordered for display: journals
-    /// newest first, then pages alphabetically. `TagSource`'s derived `Ord`
+    /// newest first, then pages alphabetically. `NoteSource`'s derived `Ord`
     /// sorts the other way around, hence the explicit comparator.
-    fn ordered_sources(&self, cx: &mut Context<Self>) -> Vec<TagSource> {
+    fn ordered_sources(&self, cx: &mut Context<Self>) -> Vec<NoteSource> {
         let target = self.page.read(cx).name().clone();
         let own_source = {
             let page = self.page.clone();
-            cx.update_global::<PageRegistry, TagSource>(|reg, cx| reg.source_for_page(&page, cx))
+            cx.update_global::<PageRegistry, NoteSource>(|reg, cx| reg.source_for_page(&page, cx))
         };
 
-        let mut sources: Vec<TagSource> = cx
+        let mut sources: Vec<NoteSource> = cx
             .global::<LinkIndex>()
             .backlinks(&target)
             .iter()
@@ -164,25 +164,25 @@ impl LinkedRefsView {
             .cloned()
             .collect();
         sources.sort_by(|a, b| match (a, b) {
-            (TagSource::Journal(a), TagSource::Journal(b)) => b.cmp(a),
-            (TagSource::Journal(_), TagSource::Page(_)) => std::cmp::Ordering::Less,
-            (TagSource::Page(_), TagSource::Journal(_)) => std::cmp::Ordering::Greater,
-            (TagSource::Page(a), TagSource::Page(b)) => a.cmp(b),
+            (NoteSource::Journal(a), NoteSource::Journal(b)) => b.cmp(a),
+            (NoteSource::Journal(_), NoteSource::Page(_)) => std::cmp::Ordering::Less,
+            (NoteSource::Page(_), NoteSource::Journal(_)) => std::cmp::Ordering::Greater,
+            (NoteSource::Page(a), NoteSource::Page(b)) => a.cmp(b),
         });
         sources
     }
 
-    fn open_source(source: &TagSource, cx: &mut Context<Self>) -> io::Result<Entity<Page>> {
+    fn open_source(source: &NoteSource, cx: &mut Context<Self>) -> io::Result<Entity<Page>> {
         cx.update_global::<PageRegistry, _>(|reg, cx| match source {
-            TagSource::Page(name) => reg.open(name.as_ref(), cx),
-            TagSource::Journal(date) => reg.open_or_create_journal(*date, cx),
+            NoteSource::Page(name) => reg.open(name.as_ref(), cx),
+            NoteSource::Journal(date) => reg.open_or_create_journal(*date, cx),
         })
     }
 
     /// Opens `source` through the registry and returns the ids of its blocks
     /// that link to this page, starting to observe the source page so an edit
     /// there — including one made in a reference row — refreshes the list.
-    fn referencing_blocks(&mut self, source: &TagSource, cx: &mut Context<Self>) -> Vec<BlockId> {
+    fn referencing_blocks(&mut self, source: &NoteSource, cx: &mut Context<Self>) -> Vec<BlockId> {
         let target = self.page.read(cx).name().clone();
         match Self::open_source(source, cx) {
             Ok(page) => {
@@ -196,7 +196,7 @@ impl LinkedRefsView {
         }
     }
 
-    fn watch_source(&mut self, source: &TagSource, page: &Entity<Page>, cx: &mut Context<Self>) {
+    fn watch_source(&mut self, source: &NoteSource, page: &Entity<Page>, cx: &mut Context<Self>) {
         if self.source_subs.contains_key(source) {
             return;
         }
@@ -211,7 +211,7 @@ impl LinkedRefsView {
 
     fn ref_view(
         &mut self,
-        source: &TagSource,
+        source: &NoteSource,
         block_id: BlockId,
         cx: &mut Context<Self>,
     ) -> Option<Entity<OutlineView>> {
@@ -245,7 +245,7 @@ impl LinkedRefsView {
             )
     }
 
-    fn render_source_label(source: &TagSource, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_source_label(source: &NoteSource, cx: &mut Context<Self>) -> impl IntoElement {
         let label = source_label(source);
         let target = source.clone();
         div()
@@ -289,7 +289,7 @@ impl Render for LinkedRefsView {
         // Drop views for references that have since been edited away or
         // scrolled out of the shown set, so a stale subtree cannot linger
         // with an open editor.
-        let live: HashSet<(TagSource, BlockId)> = groups
+        let live: HashSet<(NoteSource, BlockId)> = groups
             .iter()
             .flat_map(|(source, blocks)| blocks.iter().map(|id| (source.clone(), *id)))
             .collect();
@@ -357,7 +357,6 @@ mod tests {
     use crate::history::NavHistory;
     use crate::registry::{set_current_page, CurrentPage};
     use crate::store::NotesStore;
-    use crate::tags::TagIndex;
     use crate::{block_view, text_input};
     use chrono::NaiveDate;
     use gpui::{point, size, Modifiers, TestAppContext, VisualTestContext};
@@ -396,7 +395,6 @@ mod tests {
                 .write_journal(date(OLDER), "- earlier [[Target]]\n")
                 .unwrap();
 
-            cx.set_global(TagIndex::rebuild_from(&store).unwrap());
             cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
@@ -432,13 +430,13 @@ mod tests {
 
         cx.read(|cx| {
             let groups = refs.read(cx).groups();
-            let sources: Vec<TagSource> = groups.iter().map(|(s, _)| s.clone()).collect();
+            let sources: Vec<NoteSource> = groups.iter().map(|(s, _)| s.clone()).collect();
             assert_eq!(
                 sources,
                 vec![
-                    TagSource::Journal(date(NEWER)),
-                    TagSource::Journal(date(OLDER)),
-                    TagSource::Page("Elsewhere".into()),
+                    NoteSource::Journal(date(NEWER)),
+                    NoteSource::Journal(date(OLDER)),
+                    NoteSource::Page("Elsewhere".into()),
                 ],
                 "journals newest first, then pages",
             );
@@ -480,7 +478,10 @@ mod tests {
         let refs = refs_view(&ov, cx);
 
         cx.read(|cx| {
-            assert_eq!(refs.read(cx).groups()[0].0, TagSource::Journal(date(NEWER)));
+            assert_eq!(
+                refs.read(cx).groups()[0].0,
+                NoteSource::Journal(date(NEWER))
+            );
         });
 
         // The production trigger is a click on the block, so drive the click.
@@ -582,7 +583,6 @@ mod tests {
                     .unwrap();
             }
 
-            cx.set_global(TagIndex::rebuild_from(&store).unwrap());
             cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
@@ -650,7 +650,6 @@ mod tests {
             let store = NotesStore::new(&root).unwrap();
             store.write("Target", "- links to [[Target]]\n").unwrap();
             cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
-            cx.set_global(TagIndex::rebuild_from(&store).unwrap());
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());

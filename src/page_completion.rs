@@ -1,13 +1,12 @@
-//! Inline completion model for `[[Page]]` links and `#tags`.
+//! Inline completion model for `[[Page]]` links.
 //!
 //! This module is pure: it maps a buffer plus a caret offset onto a list of
 //! candidate names, and knows what text to splice back in when one is accepted.
 //! `BlockView` owns the state, drives it from the editor's notifications, and
 //! renders the popup — see `block_view.rs`.
 //!
-//! The trigger scanners deliberately mirror the render-time matchers so the
-//! popup never offers a completion that would fail to parse as a link or tag:
-//! `PAGE_LINK_RE` in `page_links.rs` and `TAG_RE` in `tags.rs`.
+//! The trigger scanner deliberately mirrors `PAGE_LINK_RE` in `page_links.rs`
+//! so the popup never offers a completion that would fail to parse as a link.
 
 use std::ops::Range;
 
@@ -17,19 +16,12 @@ use gpui::SharedString;
 /// container, so it is capped rather than clipped.
 const MAX_ROWS: usize = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompletionKind {
-    Page,
-    Tag,
-}
-
 /// An open completion site in the buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trigger {
-    pub kind: CompletionKind,
-    /// Byte range covering the sigil (`[[` or `#`) through the caret.
+    /// Byte range covering the `[[` through the caret.
     pub range: Range<usize>,
-    /// The text typed after the sigil.
+    /// The text typed after the `[[`.
     pub query: String,
 }
 
@@ -38,8 +30,8 @@ pub struct Trigger {
 pub enum Candidate {
     /// A name that already exists in the index.
     Existing(SharedString),
-    /// The literal query, offered so a link can point at a page or tag that
-    /// does not exist yet.
+    /// The literal query, offered so a link can point at a page that does not
+    /// exist yet.
     New(SharedString),
 }
 
@@ -51,15 +43,9 @@ impl Candidate {
     }
 }
 
-/// Scans backwards from `caret` for an open completion sigil. A page link wins
-/// over a tag when both match, so a `#` typed inside `[[…]]` keeps completing
-/// the page name.
+/// Scans backwards from `caret` for an unclosed `[[`.
 #[must_use]
 pub fn trigger_at(text: &str, caret: usize) -> Option<Trigger> {
-    page_trigger(text, caret).or_else(|| tag_trigger(text, caret))
-}
-
-fn page_trigger(text: &str, caret: usize) -> Option<Trigger> {
     let before = text.get(..caret)?;
     let start = before.rfind("[[")?;
     let query = &before[start + 2..];
@@ -69,32 +55,6 @@ fn page_trigger(text: &str, caret: usize) -> Option<Trigger> {
         return None;
     }
     Some(Trigger {
-        kind: CompletionKind::Page,
-        range: start..caret,
-        query: query.to_string(),
-    })
-}
-
-fn tag_trigger(text: &str, caret: usize) -> Option<Trigger> {
-    let before = text.get(..caret)?;
-    let start = before.rfind('#')?;
-    let query = &before[start + 1..];
-    if !query
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/'))
-    {
-        return None;
-    }
-    // `TAG_RE` only recognizes a `#` at the start of the text or after one of
-    // these separators; completing elsewhere would produce a dead tag.
-    let preceded_ok = before[..start].chars().next_back().is_none_or(|ch| {
-        ch.is_whitespace() || matches!(ch, '(' | ',' | '.' | ':' | ';' | '!' | '?' | '-')
-    });
-    if !preceded_ok {
-        return None;
-    }
-    Some(Trigger {
-        kind: CompletionKind::Tag,
         range: start..caret,
         query: query.to_string(),
     })
@@ -135,7 +95,6 @@ pub fn candidates(query: &str, names: &[SharedString]) -> Vec<Candidate> {
 /// highlighted row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionState {
-    pub kind: CompletionKind,
     pub range: Range<usize>,
     pub candidates: Vec<Candidate>,
     pub selected: usize,
@@ -148,7 +107,6 @@ impl CompletionState {
     pub fn new(trigger: &Trigger, names: &[SharedString]) -> Option<Self> {
         let candidates = candidates(&trigger.query, names);
         (!candidates.is_empty()).then(|| Self {
-            kind: trigger.kind,
             range: trigger.range.clone(),
             candidates,
             selected: 0,
@@ -177,10 +135,7 @@ impl CompletionState {
     #[must_use]
     pub fn insertion(&self) -> Option<String> {
         let name = self.candidates.get(self.selected)?.name();
-        Some(match self.kind {
-            CompletionKind::Page => format!("[[{name}]]"),
-            CompletionKind::Tag => format!("#{name}"),
-        })
+        Some(format!("[[{name}]]"))
     }
 
     /// Label for row `index`, as shown in the popup.
@@ -188,13 +143,7 @@ impl CompletionState {
     pub fn label(&self, index: usize) -> Option<SharedString> {
         Some(match self.candidates.get(index)? {
             Candidate::Existing(name) => name.clone(),
-            Candidate::New(name) => {
-                let noun = match self.kind {
-                    CompletionKind::Page => "page",
-                    CompletionKind::Tag => "tag",
-                };
-                SharedString::from(format!("New {noun}: {name}"))
-            }
+            Candidate::New(name) => SharedString::from(format!("New page: {name}")),
         })
     }
 }
@@ -218,29 +167,22 @@ mod tests {
     }
 
     #[rstest]
-    #[case::open_link("[[ru|", Some((CompletionKind::Page, 0, "ru")))]
-    #[case::auto_paired("[[ru|]]", Some((CompletionKind::Page, 0, "ru")))]
-    #[case::empty_query("[[|]]", Some((CompletionKind::Page, 0, "")))]
+    #[case::open_link("[[ru|", Some((0, "ru")))]
+    #[case::auto_paired("[[ru|]]", Some((0, "ru")))]
+    #[case::empty_query("[[|]]", Some((0, "")))]
     #[case::closed_link("[[a]] x|", None)]
-    #[case::second_link("[[a]] [[b|", Some((CompletionKind::Page, 6, "b")))]
+    #[case::second_link("[[a]] [[b|", Some((6, "b")))]
     #[case::newline_in_query("[[a\nb|", None)]
-    #[case::page_beats_tag("[[a #b|", Some((CompletionKind::Page, 0, "a #b")))]
-    #[case::tag("#ta|g", Some((CompletionKind::Tag, 0, "ta")))]
-    #[case::bare_tag_sigil("#|", Some((CompletionKind::Tag, 0, "")))]
-    #[case::tag_after_space("see #ru|", Some((CompletionKind::Tag, 4, "ru")))]
-    #[case::tag_without_boundary("x#tag|", None)]
-    #[case::tag_with_space_in_query("#a b|", None)]
+    #[case::hash_inside_link("[[a #b|", Some((0, "a #b")))]
+    #[case::hash("see #ru|", None)]
+    #[case::caret_inside_heading_marker("#|# h2", None)]
     #[case::no_sigil("plain text|", None)]
-    fn trigger_scanning(
-        #[case] marked: &str,
-        #[case] expected: Option<(CompletionKind, usize, &str)>,
-    ) {
+    fn trigger_scanning(#[case] marked: &str, #[case] expected: Option<(usize, &str)>) {
         let found = scan(marked);
         match expected {
             None => assert_eq!(found, None, "{marked} must not open a popup"),
-            Some((kind, start, query)) => {
+            Some((start, query)) => {
                 let found = found.expect("expected a trigger");
-                assert_eq!(found.kind, kind);
                 assert_eq!(found.range.start, start);
                 assert_eq!(found.query, query);
             }
@@ -306,30 +248,25 @@ mod tests {
     #[test]
     fn an_empty_query_with_no_names_offers_nothing() {
         let trigger = Trigger {
-            kind: CompletionKind::Page,
             range: 0..2,
             query: String::new(),
         };
         assert_eq!(CompletionState::new(&trigger, &[]), None);
     }
 
-    #[rstest]
-    #[case::page(CompletionKind::Page, "[[Rust Language]]")]
-    #[case::tag(CompletionKind::Tag, "#Rust Language")]
-    fn insertion_wraps_the_selected_name(#[case] kind: CompletionKind, #[case] expected: &str) {
+    #[test]
+    fn insertion_wraps_the_selected_name() {
         let state = CompletionState {
-            kind,
             range: 0..2,
             candidates: vec![Candidate::Existing("Rust Language".into())],
             selected: 0,
         };
-        assert_eq!(state.insertion().as_deref(), Some(expected));
+        assert_eq!(state.insertion().as_deref(), Some("[[Rust Language]]"));
     }
 
     #[test]
     fn selection_wraps_in_both_directions() {
         let mut state = CompletionState {
-            kind: CompletionKind::Page,
             range: 0..2,
             candidates: vec![
                 Candidate::Existing("a".into()),
@@ -348,13 +285,12 @@ mod tests {
     }
 
     #[test]
-    fn the_new_row_is_labelled_by_kind() {
+    fn the_new_row_is_labelled() {
         let state = CompletionState {
-            kind: CompletionKind::Tag,
-            range: 0..1,
+            range: 0..2,
             candidates: vec![Candidate::New("todo".into())],
             selected: 0,
         };
-        assert_eq!(state.label(0), Some("New tag: todo".into()));
+        assert_eq!(state.label(0), Some("New page: todo".into()));
     }
 }

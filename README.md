@@ -9,7 +9,7 @@ A Rust + [GPUI](https://www.gpui.rs/) note-taking app inspired by [Logseq](https
 - **Outliner / block-based editing** — every line is a collapsible, nestable bullet block.
 - **Bidirectional page links & backlinks** — `[[Page Name]]` syntax auto-creates pages; each page shows references back to it.
 - **Block references** — `((block-id))` transcludes a specific block; edits sync everywhere it appears.
-- **`#tags`** for categorizing blocks and pages. (No plan to support Logseq's `key:: value` property syntax.)
+- No `#tags` — use `[[Page]]` links instead. (No plan to support Logseq's `key:: value` property syntax either.)
 - **Local-first plain-markdown storage** — notes are saved as plain `.md` files on disk, syncable via Git, Dropbox, iCloud, or any other file sync.
 
 Not currently planned (may be revisited later): graph view, query blocks, task states, flashcards, PDF annotation, whiteboards, and a plugin ecosystem.

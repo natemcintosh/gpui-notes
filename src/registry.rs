@@ -6,8 +6,8 @@ use gpui::{App, AppContext, BorrowAppContext, Entity, Global, SharedString};
 
 use crate::page::Page;
 use crate::page_links;
+use crate::source::NoteSource;
 use crate::store::NotesStore;
-use crate::tags::{self, TagSource};
 
 /// Cache key for open pages. A regular page literally named `2026-07-13`
 /// and that date's journal are distinct pages living in different
@@ -21,10 +21,10 @@ enum PageKey {
 }
 
 impl PageKey {
-    fn source(&self) -> TagSource {
+    fn source(&self) -> NoteSource {
         match self {
-            Self::Page(name) => TagSource::Page(name.clone()),
-            Self::Journal(date) => TagSource::Journal(*date),
+            Self::Page(name) => NoteSource::Page(name.clone()),
+            Self::Journal(date) => NoteSource::Journal(*date),
         }
     }
 
@@ -155,7 +155,6 @@ impl PageRegistry {
         }
         page.update(cx, Page::mark_saved);
         let source = key.source();
-        tags::reindex_global_for_page(page, &source, cx);
         page_links::reindex_global_for_page(page, &source, cx);
         Ok(())
     }
@@ -186,9 +185,9 @@ impl PageRegistry {
     }
 
     #[must_use]
-    pub fn source_for_page(&self, page: &Entity<Page>, cx: &App) -> TagSource {
+    pub fn source_for_page(&self, page: &Entity<Page>, cx: &App) -> NoteSource {
         self.key_for(page).map_or_else(
-            || TagSource::Page(page.read(cx).name().clone()),
+            || NoteSource::Page(page.read(cx).name().clone()),
             |key| key.source(),
         )
     }
@@ -197,7 +196,6 @@ impl PageRegistry {
         let source = key.source();
         let page = cx.new(|cx| Page::new(key.display_name(), body, cx));
         self.open.insert(key, page.clone());
-        tags::reindex_global_for_page(&page, &source, cx);
         page_links::reindex_global_for_page(&page, &source, cx);
         page
     }
@@ -315,7 +313,6 @@ mod tests {
     use super::*;
     use crate::page::PageEvent;
     use crate::page_links::LinkIndex;
-    use crate::tags::TagIndex;
     use gpui::TestAppContext;
     use tempfile::TempDir;
 
@@ -417,30 +414,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn open_and_save_refresh_tag_index(cx: &mut TestAppContext) {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-
-        cx.update(|cx| {
-            cx.set_global(TagIndex::default());
-            let store = NotesStore::new(&root).unwrap();
-            store.write("foo", "- old #stale\n").unwrap();
-            let mut reg = PageRegistry::new(store);
-
-            let page = reg.open("foo", cx).unwrap();
-            assert_eq!(cx.global::<TagIndex>().blocks_for_tag("stale").len(), 1);
-
-            let first = page.read(cx).outline().first_block_id().unwrap();
-            page.update(cx, |p, cx| p.set_block_text(first, "new #fresh", cx));
-            reg.save(&page, cx).unwrap();
-
-            let index = cx.global::<TagIndex>();
-            assert_eq!(index.blocks_for_tag("stale"), []);
-            assert_eq!(index.blocks_for_tag("fresh").len(), 1);
-        });
-    }
-
-    #[gpui::test]
     fn open_create_and_save_refresh_link_index(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
@@ -486,7 +459,7 @@ mod tests {
                     .backlinks("Target")
                     .iter()
                     .collect::<Vec<_>>(),
-                [&TagSource::Journal(date)],
+                [&NoteSource::Journal(date)],
             );
 
             let first = journal.read(cx).outline().first_block_id().unwrap();

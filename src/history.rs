@@ -4,11 +4,11 @@ use gpui::{App, BorrowAppContext, Global, NavigationDirection};
 
 use crate::journal;
 use crate::registry::{set_current_page, CurrentPage, PageRegistry};
-use crate::tags::TagSource;
+use crate::source::NoteSource;
 
 /// Somewhere the main pane can show.
 ///
-/// A single page is a `TagSource`, not an `Entity<Page>`: the registry keys
+/// A single page is a `NoteSource`, not an `Entity<Page>`: the registry keys
 /// pages by name-or-date, and a page literally named `2026-07-13` is a
 /// different page from that date's journal (#40). Storing the identity keeps
 /// that distinction through a round trip.
@@ -16,11 +16,11 @@ use crate::tags::TagSource;
 pub enum NavTarget {
     /// Journals mode: today's journal with older ones beneath it.
     Journals,
-    Page(TagSource),
+    Page(NoteSource),
 }
 
-impl From<TagSource> for NavTarget {
-    fn from(source: TagSource) -> Self {
+impl From<NoteSource> for NavTarget {
+    fn from(source: NoteSource) -> Self {
         Self::Page(source)
     }
 }
@@ -121,8 +121,8 @@ pub fn go(direction: NavigationDirection, cx: &mut App) -> io::Result<bool> {
 fn open(target: &NavTarget, cx: &mut App) -> io::Result<()> {
     match target {
         NavTarget::Journals => journal::open_journals(cx),
-        NavTarget::Page(TagSource::Page(name)) => set_current_page(name.as_ref(), cx),
-        NavTarget::Page(TagSource::Journal(date)) => journal::open_for_date(*date, cx).map(|_| ()),
+        NavTarget::Page(NoteSource::Page(name)) => set_current_page(name.as_ref(), cx),
+        NavTarget::Page(NoteSource::Journal(date)) => journal::open_for_date(*date, cx).map(|_| ()),
     }
 }
 
@@ -132,7 +132,7 @@ fn current_target(cx: &mut App) -> Option<NavTarget> {
     }
     let page = cx.global::<CurrentPage>().get().cloned()?;
     let source =
-        cx.update_global::<PageRegistry, TagSource>(|reg, cx| reg.source_for_page(&page, cx));
+        cx.update_global::<PageRegistry, NoteSource>(|reg, cx| reg.source_for_page(&page, cx));
     Some(source.into())
 }
 
@@ -143,7 +143,7 @@ mod tests {
     use rstest::rstest;
 
     fn page(name: &str) -> NavTarget {
-        TagSource::Page(name.to_string().into()).into()
+        NoteSource::Page(name.to_string().into()).into()
     }
 
     #[test]
@@ -216,7 +216,7 @@ mod tests {
     fn journal_and_page_targets_are_distinct_entries() {
         let date = NaiveDate::from_ymd_opt(2026, 7, 13).unwrap();
         let mut history = NavHistory::default();
-        history.record(Some(TagSource::Journal(date).into()));
+        history.record(Some(NoteSource::Journal(date).into()));
         assert_ne!(
             history.peek(NavigationDirection::Back),
             Some(&page("2026-07-13"))
