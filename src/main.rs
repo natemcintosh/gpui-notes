@@ -12,7 +12,7 @@ use gpui_notes::history::{self, NavHistory};
 use gpui_notes::journal;
 use gpui_notes::outline_view;
 use gpui_notes::page::Page;
-use gpui_notes::page_links::{LinkIndex, OpenPage};
+use gpui_notes::page_links::{self, LinkIndex, OpenPage};
 use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
 use gpui_notes::registry::{pick_next, save_all_on_quit, CurrentPage, PageRegistry};
 use gpui_notes::shortcut_bar::{ShortcutBar, ShortcutOverlay};
@@ -207,7 +207,7 @@ impl RootView {
     }
 
     fn open_page(&mut self, action: &OpenPage, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(err) = history::navigate_to(&TagSource::Page(action.name.clone()), cx) {
+        if let Err(err) = history::navigate_to(&page_links::link_target(&action.name), cx) {
             errors::report(format!("open {:?} failed: {err}", action.name), cx);
             return;
         }
@@ -874,6 +874,46 @@ mod tests {
             assert_eq!(current.read(cx).name().as_ref(), "Tagged");
             assert!(root.read(cx).overlay().is_none());
         });
+    }
+
+    /// Logseq writes journal links as the title (`[[2026-10-09]]`) while the
+    /// file is `journals/2026_10_09.md`; clicking one must open the journal,
+    /// not create `pages/2026-10-09.md`.
+    #[gpui::test]
+    fn clicking_journal_title_link_opens_the_journal(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("journals")).unwrap();
+        std::fs::write(tmp.path().join("journals/2026_10_09.md"), "- that day\n").unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+
+        let first = cx.update(|_, cx| {
+            let home = cx.global::<CurrentPage>().get().cloned().unwrap();
+            let first = home.read(cx).outline().first_block_id().unwrap();
+            home.update(cx, |page, cx| {
+                page.set_block_text(first, "[[2026-10-09]]", cx);
+            });
+            first
+        });
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds(format!("block-view-{first:?}").leak())
+            .expect("home block painted");
+        cx.simulate_click(
+            point(bounds.origin.x + px(8.0), bounds.center().y),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
+        cx.read(|cx| {
+            let current = cx.global::<CurrentPage>().get().cloned().unwrap();
+            let source = cx.global::<PageRegistry>().source_for_page(&current, cx);
+            assert_eq!(source, TagSource::Journal(date));
+            assert_eq!(current.read(cx).name().as_ref(), "2026-10-09");
+            assert!(current.read(cx).body().contains("that day"));
+        });
+        assert!(!tmp.path().join("pages/2026-10-09.md").exists());
     }
 
     #[gpui::test]

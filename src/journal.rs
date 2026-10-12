@@ -13,8 +13,16 @@ pub fn today() -> NaiveDate {
 
 #[must_use]
 pub fn is_journal_name(s: &str) -> bool {
+    parse_journal_name(s).is_some()
+}
+
+/// The date a journal title names, if `s` is exactly a journal title
+/// (`YYYY-MM-DD`, matching Logseq's `:journal/page-title-format "yyyy-MM-dd"`).
+#[must_use]
+pub fn parse_journal_name(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .is_ok_and(|d| d.format("%Y-%m-%d").to_string() == s)
+        .ok()
+        .filter(|d| d.format("%Y-%m-%d").to_string() == s)
 }
 
 /// Opens (creating if necessary) the journal page for `date`, saves any

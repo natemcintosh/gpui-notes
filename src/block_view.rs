@@ -624,7 +624,11 @@ impl Render for BlockView {
             "BlockView"
         };
 
+        let block_id = self.block_id;
         div()
+            // A name for tests to click; `debug_selector` compiles away
+            // outside them.
+            .debug_selector(move || format!("block-view-{block_id:?}"))
             .track_focus(&self.focus_handle)
             .key_context(key_context)
             .on_action(cx.listener(|this, _: &BeginEditing, window, cx| {

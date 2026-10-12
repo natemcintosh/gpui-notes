@@ -10,6 +10,7 @@ use regex::Regex;
 use crate::block_render::{
     lower, theme, BlockNode, ExtensionMatch, ExtensionNode, InlineExtension, InlineNode, InlineRun,
 };
+use crate::journal;
 use crate::outline::{Block, BlockId, Outline};
 use crate::page::Page;
 use crate::store::NotesStore;
@@ -69,6 +70,17 @@ impl LinkIndex {
     #[must_use]
     pub fn page_exists(&self, name: &str) -> bool {
         self.pages.contains(name)
+    }
+
+    /// Whether the page or journal that `[[name]]` opens (see `link_target`)
+    /// exists. Every journal on disk has a `forward` entry, even one with no
+    /// links of its own.
+    #[must_use]
+    pub fn link_target_exists(&self, name: &str) -> bool {
+        match link_target(name) {
+            source @ TagSource::Journal(_) => self.forward.contains_key(&source),
+            TagSource::Page(_) => self.page_exists(name),
+        }
     }
 
     /// Every page name the index knows about, sorted case-insensitively.
@@ -183,7 +195,8 @@ impl InlineExtension for PageLinkExt {
             return InlineRun::new(node.source.clone());
         };
         let name = SharedString::from(name.to_string());
-        let exists = cx.has_global::<LinkIndex>() && cx.global::<LinkIndex>().page_exists(&name);
+        let exists =
+            cx.has_global::<LinkIndex>() && cx.global::<LinkIndex>().link_target_exists(&name);
 
         // A page that does not exist yet still navigates — following the link
         // is how it gets created — it is just styled as missing.
@@ -198,6 +211,16 @@ impl InlineExtension for PageLinkExt {
             ..InlineRun::new(name)
         }
     }
+}
+
+/// What `[[name]]` opens. A journal title (`[[2026-10-09]]`) opens that date's
+/// journal, as in Logseq; anything else is a regular page.
+#[must_use]
+pub fn link_target(name: &str) -> TagSource {
+    journal::parse_journal_name(name).map_or_else(
+        || TagSource::Page(SharedString::from(name.to_string())),
+        TagSource::Journal,
+    )
 }
 
 /// Refreshes the global index after a page or journal is opened, created, or saved.
@@ -451,6 +474,26 @@ mod tests {
         assert!(texts[0].starts_with("intro"));
         assert!(texts[1].starts_with("deep"));
         assert_eq!(blocks_linking_to(&outline, "Missing"), []);
+    }
+
+    #[test]
+    fn journal_title_links_target_the_journal() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
+        assert_eq!(link_target("2026-10-09"), TagSource::Journal(date));
+        // Only Logseq's title form; the on-disk `2026_10_09` is a page name.
+        assert_eq!(link_target("2026_10_09"), page("2026_10_09"));
+        assert_eq!(link_target("Target"), page("Target"));
+    }
+
+    #[test]
+    fn journal_link_exists_once_the_journal_is_indexed() {
+        let mut index = LinkIndex::default();
+        assert!(!index.link_target_exists("2026-10-09"));
+
+        let date = NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
+        index.reindex_outline(&TagSource::Journal(date), &Outline::parse("- no links\n"));
+        assert!(index.link_target_exists("2026-10-09"));
+        assert!(!index.page_exists("2026-10-09"));
     }
 
     #[derive(Default)]
