@@ -4,6 +4,8 @@
 //! through view implementations. Callers use semantic names rather than raw
 //! RGB values.
 
+use std::sync::OnceLock;
+
 use gpui::{rgb, rgba, App, Rgba, SharedString};
 
 /// The app-wide UI font family.
@@ -33,11 +35,45 @@ fn pick_ui_font(installed: &[String]) -> SharedString {
         "Ubuntu",
         "DejaVu Sans",
     ];
-    CANDIDATES
-        .into_iter()
-        .find(|candidate| installed.iter().any(|name| name == candidate))
-        .unwrap_or(".SystemUIFont")
-        .into()
+    first_installed(&CANDIDATES, installed).unwrap_or(".SystemUIFont".into())
+}
+
+/// The family for inline code and code blocks.
+///
+/// gpui hands the family name straight to the platform text system, which
+/// does not resolve CSS generics like `"monospace"` — the lookup fails and
+/// code silently renders in the proportional fallback font. Resolved once and
+/// cached, since inline code asks for it on every render.
+#[must_use]
+pub fn mono_font_family(cx: &App) -> SharedString {
+    static MONO: OnceLock<SharedString> = OnceLock::new();
+    MONO.get_or_init(|| {
+        if cfg!(target_os = "macos") {
+            "Menlo".into()
+        } else {
+            pick_mono_font(&cx.text_system().all_font_names())
+        }
+    })
+    .clone()
+}
+
+fn pick_mono_font(installed: &[String]) -> SharedString {
+    const CANDIDATES: [&str; 6] = [
+        "Adwaita Mono",
+        "Noto Sans Mono",
+        "DejaVu Sans Mono",
+        "Ubuntu Mono",
+        "Liberation Mono",
+        "Source Code Pro",
+    ];
+    first_installed(&CANDIDATES, installed).unwrap_or("monospace".into())
+}
+
+fn first_installed(candidates: &[&'static str], installed: &[String]) -> Option<SharedString> {
+    candidates
+        .iter()
+        .find(|candidate| installed.iter().any(|name| name == *candidate))
+        .map(|&name| name.into())
 }
 
 #[must_use]
@@ -126,6 +162,11 @@ pub fn accent() -> Rgba {
 }
 
 #[must_use]
+pub fn heading_rule() -> Rgba {
+    overlay_border()
+}
+
+#[must_use]
 pub fn code_bg() -> Rgba {
     window_bg()
 }
@@ -194,5 +235,11 @@ mod tests {
     fn falls_back_to_system_ui_font_when_no_candidate_installed() {
         let installed = vec!["Comic Sans MS".to_string()];
         assert_eq!(pick_ui_font(&installed).as_ref(), ".SystemUIFont");
+    }
+
+    #[test]
+    fn picks_installed_mono_font_over_generic() {
+        let installed = vec!["Liberation Mono".to_string(), "Noto Sans".to_string()];
+        assert_eq!(pick_mono_font(&installed).as_ref(), "Liberation Mono");
     }
 }

@@ -393,10 +393,10 @@ fn call(name: &str, args: &[f64]) -> Result<f64, String> {
 //
 // ponytail: re-evaluated every render; memoize on block text if a large page
 // ever stutters.
-pub fn render(body: &str, _window: &mut Window, _cx: &mut App) -> AnyElement {
+pub fn render(body: &str, _window: &mut Window, cx: &mut App) -> AnyElement {
     let mut root = div()
         .bg(theme::code_bg())
-        .font_family("monospace")
+        .font_family(theme::mono_font_family(cx))
         .p_2()
         .rounded_sm()
         .flex()

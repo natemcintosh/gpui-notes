@@ -20,8 +20,8 @@ use std::rc::Rc;
 use gpui::{
     div, px, Action, AnyElement, App, ElementId, FontStyle, FontWeight, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Pixels, Point, Rgba, SharedString,
-    StatefulInteractiveElement, Styled, StyledText, TextLayout, TextRun, TextStyle, UnderlineStyle,
-    Window,
+    StatefulInteractiveElement, StrikethroughStyle, Styled, StyledText, TextLayout, TextRun,
+    TextStyle, UnderlineStyle, Window,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -35,6 +35,7 @@ pub use crate::theme;
 pub struct Style {
     pub bold: bool,
     pub italic: bool,
+    pub strikethrough: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +125,7 @@ pub trait InlineExtension {
 #[must_use]
 #[allow(clippy::too_many_lines)] // Event dispatch is a flat state machine; splitting hurts readability.
 pub fn lower(text: &str, extensions: &[&dyn InlineExtension]) -> Vec<BlockNode> {
-    let options = Options::empty();
+    let options = Options::ENABLE_STRIKETHROUGH;
     let parser = Parser::new_ext(text, options);
 
     let mut blocks: Vec<BlockNode> = Vec::new();
@@ -172,6 +173,7 @@ pub fn lower(text: &str, extensions: &[&dyn InlineExtension]) -> Vec<BlockNode> 
                 }
                 Tag::Emphasis => push_style(&mut style_stack, |s| s.italic = true),
                 Tag::Strong => push_style(&mut style_stack, |s| s.bold = true),
+                Tag::Strikethrough => push_style(&mut style_stack, |s| s.strikethrough = true),
                 Tag::Link { dest_url, .. } => {
                     inline_stack.push(Vec::new());
                     inline_ctx.push(InlineCtx::Link(SharedString::from(dest_url.into_string())));
@@ -215,7 +217,7 @@ pub fn lower(text: &str, extensions: &[&dyn InlineExtension]) -> Vec<BlockNode> 
                         );
                     }
                 }
-                TagEnd::Emphasis | TagEnd::Strong => {
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                     style_stack.pop();
                     if style_stack.is_empty() {
                         style_stack.push(Style::default());
@@ -422,9 +424,14 @@ fn render_block_node(
                 bold: true,
                 ..style
             };
-            div()
-                .text_size(px(size))
-                .child(render_paragraph(children, ctx, heading, window, cx))
+            let wrap = div().text_size(px(size));
+            // h1 and h2 get a rule beneath them, as in most markdown renderers.
+            let wrap = if level <= 2 {
+                wrap.pb_1().border_b_1().border_color(theme::heading_rule())
+            } else {
+                wrap
+            };
+            wrap.child(render_paragraph(children, ctx, heading, window, cx))
                 .into_any_element()
         }
         // A ```calc fence is arithmetic, not source: evaluate it and show the
@@ -437,7 +444,7 @@ fn render_block_node(
         BlockNode::CodeBlock { lang: _, text } => div()
             .bg(theme::code_bg())
             .text_color(theme::fg())
-            .font_family("monospace")
+            .font_family(theme::mono_font_family(cx))
             .p_2()
             .rounded_sm()
             .child(text)
@@ -485,10 +492,10 @@ fn take_recorded_runs() -> Vec<TextRun> {
 
 fn heading_size(level: u8) -> f32 {
     match level {
-        1 => 22.0,
-        2 => 19.0,
-        3 => 17.0,
-        _ => 15.0,
+        1 => 30.0,
+        2 => 24.0,
+        3 => 19.0,
+        _ => 16.0,
     }
 }
 
@@ -500,9 +507,11 @@ fn heading_size(level: u8) -> f32 {
 /// its text style — so an inherited colour would silently be gpui's default
 /// (black on this theme's background).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // Independent flags, each one `TextRun` attribute.
 struct RunStyle {
     bold: bool,
     italic: bool,
+    strikethrough: bool,
     /// Inside a markdown link: accent-coloured and underlined.
     link: bool,
     /// Overrides the theme foreground (blockquotes, missing page links).
@@ -570,6 +579,13 @@ impl Paragraph {
                 wavy: false,
             });
         }
+        // After the colour overrides, so the line matches the text it strikes.
+        if style.strikethrough {
+            run.strikethrough = Some(StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(run.color),
+            });
+        }
         tweak(&mut run);
         self.runs.push(run);
         start..self.text.len()
@@ -581,13 +597,14 @@ impl Paragraph {
                 let style = RunStyle {
                     bold: style.bold || s.bold,
                     italic: style.italic || s.italic,
+                    strikethrough: style.strikethrough || s.strikethrough,
                     ..style
                 };
                 self.push(&text, style, |_| {});
             }
             InlineNode::Code(text) => {
                 self.push(&text, style, |run| {
-                    run.font.family = "monospace".into();
+                    run.font.family = theme::mono_font_family(cx);
                     run.background_color = Some(theme::bg_subtle().into());
                 });
             }
@@ -734,8 +751,30 @@ mod tests {
     fn styled(text: &str, bold: bool, italic: bool) -> InlineNode {
         InlineNode::Text {
             text: text.into(),
-            style: Style { bold, italic },
+            style: Style {
+                bold,
+                italic,
+                strikethrough: false,
+            },
         }
+    }
+
+    #[test]
+    fn double_tilde_is_strikethrough() {
+        let inlines = paragraph(lower_no_ext("a ~~b~~"));
+        assert_eq!(
+            inlines,
+            vec![
+                plain("a "),
+                InlineNode::Text {
+                    text: "b".into(),
+                    style: Style {
+                        strikethrough: true,
+                        ..Style::default()
+                    },
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1139,6 +1178,23 @@ mod runtime_tests {
                 "run {:?} is not a theme colour; an inherited colour renders black",
                 run.color,
             );
+        }
+    }
+
+    #[gpui::test]
+    fn strikethrough_run_is_struck_in_its_own_colour(cx: &mut TestAppContext) {
+        let (_view, cx) = mount(cx, "keep ~~gone~~", None);
+        cx.run_until_parked();
+
+        let runs = cx.update(|_, _| take_recorded_runs());
+        assert!(runs.iter().any(|r| r.strikethrough.is_some()));
+        // `keep ` is 5 bytes, `gone` is 4: only the latter is struck.
+        for run in &runs {
+            let struck = run.strikethrough.as_ref().map(|s| s.color);
+            match run.len {
+                4 => assert_eq!(struck, Some(Some(run.color))),
+                _ => assert_eq!(struck, None, "{run:?}"),
+            }
         }
     }
 
