@@ -32,6 +32,9 @@ impl Block {
 
 #[derive(Clone, Debug, Default)]
 pub struct Outline {
+    /// Lines before the first bullet (Logseq page properties such as
+    /// `title::`), kept verbatim so a save writes them back.
+    pub preamble: String,
     pub roots: Vec<Block>,
 }
 
@@ -60,7 +63,10 @@ fn parse_bullet_line(line: &str) -> Option<(usize, usize, String)> {
     if marker != '-' && marker != '*' {
         return None;
     }
-    let after = it.next()?;
+    let Some(after) = it.next() else {
+        // A bare marker is an empty block; Logseq writes these as `-`.
+        return Some((indent, indent + 2, String::new()));
+    };
     if after != ' ' && after != '\t' {
         return None;
     }
@@ -73,29 +79,45 @@ fn is_fence(text: &str) -> bool {
     text.trim_start().starts_with("```")
 }
 
-/// A line that is not a new bullet but belongs to the block whose text starts
-/// at `text_col`: it is indented at least that deep, and — outside a fence —
-/// does not itself look like a bullet. Returns the line with `text_col`
-/// columns of leading whitespace stripped.
-fn continuation_line(line: &str, text_col: usize, in_fence: bool) -> Option<String> {
-    if line.trim().is_empty() {
-        // Blank lines are structural spacing outside a fence, content inside one.
-        return in_fence.then(String::new);
-    }
-    let (width, _) = leading_indent(line);
-    if width < text_col || (!in_fence && parse_bullet_line(line).is_some()) {
-        return None;
-    }
+/// `line` with up to `cols` columns of leading whitespace removed.
+fn strip_indent(line: &str, cols: usize) -> &str {
     let mut consumed = 0;
     let mut bytes = 0;
     for b in line.bytes() {
-        if consumed >= text_col {
+        if consumed >= cols {
             break;
         }
-        consumed += if b == b'\t' { 2 } else { 1 };
+        match b {
+            b' ' => consumed += 1,
+            b'\t' => consumed += 2,
+            _ => break,
+        }
         bytes += 1;
     }
-    Some(line[bytes..].to_string())
+    &line[bytes..]
+}
+
+/// Appends `(indent, text_col, text)` from `parse_bullet_line` under the
+/// right parent and returns the new block's `(text_col, in_fence)`.
+fn push_bullet(
+    roots: &mut Vec<Block>,
+    path: &mut Vec<(usize, usize)>,
+    (indent, text_col, text): (usize, usize, String),
+) -> (usize, bool) {
+    while let Some(&(top_indent, _)) = path.last() {
+        if top_indent >= indent {
+            path.pop();
+        } else {
+            break;
+        }
+    }
+    let in_fence = is_fence(&text);
+    let parent_indices: Vec<usize> = path.iter().map(|(_, i)| *i).collect();
+    let parent = children_mut(roots, &parent_indices);
+    let idx = parent.len();
+    parent.push(Block::new(text));
+    path.push((indent, idx));
+    (text_col, in_fence)
 }
 
 /// The block most recently pushed by `parse`, addressed by its parse `path`.
@@ -114,8 +136,13 @@ fn children_mut<'a>(roots: &'a mut Vec<Block>, path: &[usize]) -> &'a mut Vec<Bl
 }
 
 impl Outline {
+    /// Every line of `input` lands somewhere — a save rewrites the whole
+    /// file from the outline, so a dropped line is deleted from disk. Lines
+    /// before the first bullet are the preamble; after it, any line that does
+    /// not start a new block continues the most recent one.
     #[must_use]
     pub fn parse(input: &str) -> Self {
+        let mut preamble = String::new();
         let mut roots: Vec<Block> = Vec::new();
         // Stack of (indent_width, child_index_in_parent) describing the path from the
         // root to the most recent block. `path.len()` is the nesting level.
@@ -124,43 +151,49 @@ impl Outline {
         // The block currently accepting continuation lines: its text column,
         // and whether a fence it opened is still unclosed.
         let mut open: Option<(usize, bool)> = None;
+        // Blank lines are held back until the block continues, so a blank
+        // between two paragraphs of a block is kept while one between blocks
+        // is just spacing.
+        let mut pending_blanks = 0;
 
         for line in input.lines() {
-            if let Some((text_col, in_fence)) = open {
-                if let Some(rest) = continuation_line(line, text_col, in_fence) {
+            let bullet = parse_bullet_line(line);
+            let Some((text_col, in_fence)) = open else {
+                if let Some(bullet) = bullet {
+                    open = Some(push_bullet(&mut roots, &mut path, bullet));
+                } else {
+                    preamble.push_str(line);
+                    preamble.push('\n');
+                }
+                continue;
+            };
+
+            // Inside a fence, a line at the block's depth is code even if it
+            // looks like a bullet; a shallower bullet still ends the block.
+            let in_code = in_fence && leading_indent(line).0 >= text_col;
+            match bullet.filter(|_| !in_code) {
+                Some(bullet) => {
+                    pending_blanks = 0;
+                    open = Some(push_bullet(&mut roots, &mut path, bullet));
+                }
+                None if line.trim().is_empty() => pending_blanks += 1,
+                None => {
+                    let rest = strip_indent(line, text_col);
                     if let Some(block) = last_block_mut(&mut roots, &path) {
-                        block.text.push('\n');
-                        block.text.push_str(&rest);
-                        if is_fence(&rest) {
-                            open = Some((text_col, !in_fence));
+                        for _ in 0..=pending_blanks {
+                            block.text.push('\n');
                         }
-                        continue;
+                        block.text.push_str(rest);
+                    }
+                    pending_blanks = 0;
+                    if is_fence(rest) {
+                        open = Some((text_col, !in_fence));
                     }
                 }
             }
-
-            let Some((indent, text_col, text)) = parse_bullet_line(line) else {
-                continue;
-            };
-            open = Some((text_col, is_fence(&text)));
-
-            while let Some(&(top_indent, _)) = path.last() {
-                if top_indent >= indent {
-                    path.pop();
-                } else {
-                    break;
-                }
-            }
-
-            let block = Block::new(text);
-            let parent_indices: Vec<usize> = path.iter().map(|(_, i)| *i).collect();
-            let parent = children_mut(&mut roots, &parent_indices);
-            let idx = parent.len();
-            parent.push(block);
-            path.push((indent, idx));
         }
 
-        Outline { roots }
+        Outline { preamble, roots }
     }
 
     #[must_use]
@@ -172,8 +205,14 @@ impl Outline {
             for b in blocks {
                 let mut lines = b.text.split('\n');
                 out.push_str(&text_col[2..]);
-                out.push_str("- ");
-                out.push_str(lines.next().unwrap_or_default());
+                // An empty first line is a bare `-`, as Logseq writes it.
+                let first = lines.next().unwrap_or_default();
+                if first.is_empty() {
+                    out.push('-');
+                } else {
+                    out.push_str("- ");
+                    out.push_str(first);
+                }
                 out.push('\n');
                 for line in lines {
                     if !line.is_empty() {
@@ -185,7 +224,7 @@ impl Outline {
                 walk(out, &b.children, depth + 1);
             }
         }
-        let mut out = String::new();
+        let mut out = self.preamble.clone();
         walk(&mut out, &self.roots, 0);
         out
     }
@@ -409,16 +448,101 @@ mod tests {
     }
 
     #[test]
-    fn non_bullet_lines_are_ignored() {
+    fn non_bullet_lines_are_preserved() {
         let o = Outline::parse("preamble\n- a\nnot a bullet\n- b\n");
         assert_eq!(o.roots.len(), 2);
+        assert_eq!(o.roots[0].text, "a\nnot a bullet");
+        assert_eq!(o.roots[1].text, "b");
+        assert_eq!(o.serialize(), "preamble\n- a\n  not a bullet\n- b\n");
+    }
+
+    #[test]
+    fn bare_dash_is_an_empty_block_that_keeps_its_children() {
+        let o = Outline::parse("- a\n-\n\t- kid\n- b\n");
+        assert_eq!(o.roots.len(), 3);
+        assert_eq!(o.roots[1].text, "");
+        assert_eq!(o.roots[1].children.len(), 1);
+        assert_eq!(o.roots[1].children[0].text, "kid");
+        assert!(o.roots[0].children.is_empty());
+    }
+
+    #[test]
+    fn page_properties_before_the_first_bullet_roundtrip() {
+        let src = "title:: Foo\nalias:: bar\n\n- a\n";
+        assert_eq!(Outline::parse(src).serialize(), src);
+    }
+
+    #[test]
+    fn shallow_fence_close_still_closes_the_fence() {
+        let o = Outline::parse("- ```py\n  def f():\n ```\n- next\n");
+        assert_eq!(o.roots.len(), 2);
+        assert_eq!(o.roots[0].text, "```py\ndef f():\n```");
+        assert_eq!(o.roots[1].text, "next");
+    }
+
+    #[test]
+    fn unclosed_fence_ends_at_a_shallower_bullet() {
+        let o = Outline::parse("- ```\n  code\n- next\n");
+        assert_eq!(o.roots.len(), 2);
+        assert_eq!(o.roots[0].text, "```\ncode");
+    }
+
+    #[test]
+    fn blank_line_between_paragraphs_of_a_block_is_kept() {
+        let o = Outline::parse("- one\n\n  two\n- b\n");
+        assert_eq!(o.roots[0].text, "one\n\ntwo");
+    }
+
+    #[test]
+    fn blank_lines_between_blocks_are_spacing() {
+        let o = Outline::parse("- a\n\n- b\n\n");
         assert_eq!(o.roots[0].text, "a");
         assert_eq!(o.roots[1].text, "b");
+        assert_eq!(o.serialize(), "- a\n- b\n");
+    }
+
+    #[test]
+    fn shallow_continuation_line_joins_the_block() {
+        let o = Outline::parse("  - a\n b\n");
+        assert_eq!(o.roots[0].text, "a\nb");
+    }
+
+    fn content_lines(src: &str) -> Vec<String> {
+        src.lines()
+            .map(|l| l.trim().trim_start_matches(['-', '*']).trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// Every edit rewrites the whole file from the parsed outline, so any
+    /// line `parse` drops is deleted from disk on the next keystroke.
+    #[rstest]
+    #[case::bare_dash_with_children("- a\n-\n\t- kid\n- b\n")]
+    #[case::preamble("title:: Foo\ntags:: x, y\n\n- a\n  - b\n")]
+    #[case::only_prose("just a paragraph\nand another\n")]
+    #[case::shallow_fence("- ```py\n  def f():\n      return 1\n ```\n- next\n")]
+    #[case::shallow_prose("- a\n b\nc\n- d\n")]
+    #[case::properties("- parent\n  collapsed:: true\n  - kid\n    id:: 64a0\n")]
+    #[case::star_and_tabs("*\ta\n\t*\tb\n\t\t-\n")]
+    fn parse_serialize_preserves_content(#[case] src: &str) {
+        let out = Outline::parse(src).serialize();
+        assert_eq!(
+            content_lines(&out),
+            content_lines(src),
+            "lost content: {out:?}"
+        );
+        assert_eq!(Outline::parse(&out).serialize(), out, "not idempotent");
     }
 
     #[test]
     fn roundtrip_canonical_forms() {
-        for src in ["- a\n", "- a\n- b\n", "- a\n  - b\n    - c\n- d\n"] {
+        for src in [
+            "- a\n",
+            "- a\n- b\n",
+            "- a\n  - b\n    - c\n- d\n",
+            "-\n",
+            "- a\n-\n  - kid\n",
+        ] {
             let o = Outline::parse(src);
             assert_eq!(o.serialize(), src, "roundtrip failed for {src:?}");
         }
