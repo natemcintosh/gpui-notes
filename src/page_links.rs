@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(texts.len(), 2, "fenced link must not count: {texts:?}");
         assert!(texts[0].starts_with("intro"));
         assert!(texts[1].starts_with("deep"));
-        assert!(blocks_linking_to(&outline, "Missing").is_empty());
+        assert_eq!(blocks_linking_to(&outline, "Missing"), []);
     }
 
     #[derive(Default)]

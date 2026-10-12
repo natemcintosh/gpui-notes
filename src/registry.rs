@@ -398,7 +398,7 @@ mod tests {
             reg.save(&page, cx).unwrap();
 
             let index = cx.global::<TagIndex>();
-            assert!(index.blocks_for_tag("stale").is_empty());
+            assert_eq!(index.blocks_for_tag("stale"), []);
             assert_eq!(index.blocks_for_tag("fresh").len(), 1);
         });
     }

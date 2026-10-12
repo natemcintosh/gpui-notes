@@ -372,7 +372,7 @@ mod tests {
 
         let new = Outline::parse("- keep #stay\n");
         index.reindex_page(&source, &new);
-        assert!(index.blocks_for_tag("gone").is_empty());
+        assert_eq!(index.blocks_for_tag("gone"), []);
         assert_eq!(index.blocks_for_tag("stay").len(), 1);
     }
 
