@@ -2,7 +2,7 @@
 // When bumping the pinned gpui rev (see Cargo.toml), diff against that file
 // first — the IME and Element APIs drift frequently on HEAD.
 
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{ops::Range, rc::Rc};
 
 use gpui::FontFallbacks;
 use gpui::{
@@ -878,7 +878,38 @@ struct TextElement {
     input: Entity<TextInput>,
 }
 
-type MeasuredLine = Rc<RefCell<Option<(Vec<WrappedLine>, Pixels)>>>;
+/// Everything needed to shape the text, carried from `request_layout` to
+/// `prepaint`. Taffy calls the measure closure several times per frame at
+/// different widths (min/max-content probes as well as the final one) and
+/// may answer the final query from its cache, so the lines from whichever
+/// call ran last can belong to the wrong width. `prepaint` therefore shapes
+/// again at the width the element was actually given.
+struct ShapeRequest {
+    text: SharedString,
+    runs: Vec<TextRun>,
+    font_size: Pixels,
+    line_height: Pixels,
+    soft_wrap: bool,
+}
+
+impl ShapeRequest {
+    /// One `WrappedLine` per `\n`-separated logical line, each independently
+    /// soft-wrapped at `wrap_width`.
+    fn shape(&self, wrap_width: Option<Pixels>, window: &Window) -> Vec<WrappedLine> {
+        window
+            .text_system()
+            .shape_text(
+                self.text.clone(),
+                self.font_size,
+                &self.runs,
+                wrap_width,
+                None,
+            )
+            .expect("text shaping should succeed")
+            .into_iter()
+            .collect()
+    }
+}
 
 struct PrepaintState {
     layout: Option<CachedLayout>,
@@ -894,7 +925,7 @@ impl IntoElement for TextElement {
 }
 
 impl Element for TextElement {
-    type RequestLayoutState = MeasuredLine;
+    type RequestLayoutState = Rc<ShapeRequest>;
     type PrepaintState = PrepaintState;
 
     fn id(&self) -> Option<ElementId> {
@@ -967,15 +998,21 @@ impl Element for TextElement {
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line_height = window.line_height();
-        let measured: MeasuredLine = Rc::default();
-        let measured_for_layout = measured.clone();
+        let request = Rc::new(ShapeRequest {
+            text: display_text,
+            runs,
+            font_size,
+            line_height: window.line_height(),
+            soft_wrap: layout_mode == LayoutMode::SoftWrapped,
+        });
+        let request_for_layout = request.clone();
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         let layout_id = window.request_measured_layout(
             style,
             move |known_dimensions, available_space, window, _cx| {
-                let wrap_width = if layout_mode == LayoutMode::SoftWrapped {
+                let request = &request_for_layout;
+                let wrap_width = if request.soft_wrap {
                     known_dimensions.width.or(match available_space.width {
                         AvailableSpace::Definite(width) => Some(width),
                         _ => None,
@@ -983,29 +1020,21 @@ impl Element for TextElement {
                 } else {
                     None
                 };
-                // One `WrappedLine` per `\n`-separated logical line, each
-                // independently soft-wrapped. The element is as wide as its
-                // widest line and as tall as all of them stacked.
-                let lines: Vec<WrappedLine> = window
-                    .text_system()
-                    .shape_text(display_text.clone(), font_size, &runs, wrap_width, None)
-                    .expect("text shaping should succeed")
-                    .into_iter()
-                    .collect();
-                let measured_size = lines.iter().fold(size(px(0.), px(0.)), |acc, line| {
-                    let line_size = line.size(line_height);
-                    size(
-                        acc.width.max(line_size.width),
-                        acc.height + line_size.height,
-                    )
-                });
-                measured_for_layout
-                    .borrow_mut()
-                    .replace((lines, line_height));
-                measured_size
+                // The element is as wide as its widest line and as tall as all
+                // of them stacked.
+                request
+                    .shape(wrap_width, window)
+                    .iter()
+                    .fold(size(px(0.), px(0.)), |acc, line| {
+                        let line_size = line.size(request.line_height);
+                        size(
+                            acc.width.max(line_size.width),
+                            acc.height + line_size.height,
+                        )
+                    })
             },
         );
-        (layout_id, measured)
+        (layout_id, request)
     }
 
     fn prepaint(
@@ -1013,14 +1042,12 @@ impl Element for TextElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        measured: &mut Self::RequestLayoutState,
-        _: &mut Window,
+        request: &mut Self::RequestLayoutState,
+        window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let (shaped, line_height) = measured
-            .borrow_mut()
-            .take()
-            .expect("measured text layout should be available during prepaint");
+        let line_height = request.line_height;
+        let shaped = request.shape(request.soft_wrap.then_some(bounds.size.width), window);
         let mut start = 0;
         let mut first_row = 0;
         let lines: Vec<LineLayout> = shaped
@@ -1156,7 +1183,10 @@ impl Render for TextInput {
             .when(single_line, |el| el.line_height(px(28.)))
             .text_size(px(16.))
             .child(
+                // Flex, not block: see the note on `BlockView`'s root.
                 div()
+                    .flex()
+                    .flex_col()
                     .w_full()
                     .when(single_line, |el| el.min_h(px(28. + 4. * 2.)).p(px(4.)))
                     .bg(theme::input_bg())

@@ -654,6 +654,12 @@ impl Render for BlockView {
             .on_action(cx.listener(|this, _: &MoveCaretDown, _, cx| {
                 this.move_caret_vertical(VerticalDirection::Down, cx);
             }))
+            // A flex column, not gpui's default block display: taffy sizes a
+            // block container by fully laying out its children at max-content
+            // width, and that layout can survive into the frame, painting the
+            // editor unwrapped past the column.
+            .flex()
+            .flex_col()
             .flex_1()
             .min_w_0()
             .min_h(px(20.0))
