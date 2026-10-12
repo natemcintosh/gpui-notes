@@ -120,6 +120,50 @@ fn push_bullet(
     (text_col, in_fence)
 }
 
+/// A Logseq property line, `key:: value` (the value may be empty).
+fn is_property(line: &str) -> bool {
+    line.trim_start()
+        .split_once("::")
+        .is_some_and(|(key, value)| {
+            !key.is_empty()
+                && !key.contains(char::is_whitespace)
+                && (value.is_empty() || value.starts_with(char::is_whitespace))
+        })
+}
+
+/// Splits the lines before the first bullet into the leading page properties
+/// (and blank lines), kept verbatim, and any text after them, which becomes
+/// the page's first block so it can be seen and edited.
+fn split_preamble(mut preamble: String) -> (String, Option<String>) {
+    let mut props_end = 0;
+    for line in preamble.split_inclusive('\n') {
+        if !(line.trim().is_empty() || is_property(line)) {
+            break;
+        }
+        props_end += line.len();
+    }
+    let mut prose: Vec<&str> = preamble[props_end..].lines().collect();
+    while prose.last().is_some_and(|line| line.trim().is_empty()) {
+        prose.pop();
+    }
+    if prose.is_empty() {
+        return (preamble, None);
+    }
+    let prose = prose.join("\n");
+    preamble.truncate(props_end);
+    (preamble, Some(prose))
+}
+
+/// Moves any text after the page properties out of `preamble` into a first
+/// block at column 0, so bullets indented under it become its children.
+fn fold_preamble(preamble: &mut String, roots: &mut Vec<Block>, path: &mut Vec<(usize, usize)>) {
+    let (props, prose) = split_preamble(std::mem::take(preamble));
+    *preamble = props;
+    if let Some(prose) = prose {
+        push_bullet(roots, path, (0, 2, prose));
+    }
+}
+
 /// The block most recently pushed by `parse`, addressed by its parse `path`.
 fn last_block_mut<'a>(roots: &'a mut Vec<Block>, path: &[(usize, usize)]) -> Option<&'a mut Block> {
     let (&(_, last), parents) = path.split_last()?;
@@ -137,9 +181,10 @@ fn children_mut<'a>(roots: &'a mut Vec<Block>, path: &[usize]) -> &'a mut Vec<Bl
 
 impl Outline {
     /// Every line of `input` lands somewhere — a save rewrites the whole
-    /// file from the outline, so a dropped line is deleted from disk. Lines
-    /// before the first bullet are the preamble; after it, any line that does
-    /// not start a new block continues the most recent one.
+    /// file from the outline, so a dropped line is deleted from disk. Page
+    /// properties before the first bullet are the preamble, and any other
+    /// text there is the first block; after the first bullet, any line that
+    /// does not start a new block continues the most recent one.
     #[must_use]
     pub fn parse(input: &str) -> Self {
         let mut preamble = String::new();
@@ -160,6 +205,7 @@ impl Outline {
             let bullet = parse_bullet_line(line);
             let Some((text_col, in_fence)) = open else {
                 if let Some(bullet) = bullet {
+                    fold_preamble(&mut preamble, &mut roots, &mut path);
                     open = Some(push_bullet(&mut roots, &mut path, bullet));
                 } else {
                     preamble.push_str(line);
@@ -193,7 +239,37 @@ impl Outline {
             }
         }
 
+        if open.is_none() {
+            fold_preamble(&mut preamble, &mut roots, &mut path);
+        }
         Outline { preamble, roots }
+    }
+
+    /// Re-parses one block's text the way a reload would. A line in it that
+    /// looks like a bullet (outside a fence) can only be stored as a child
+    /// block, so it becomes one now, ahead of the block's existing children as
+    /// it would be in the file. Returns whether anything moved.
+    pub fn split_bullet_lines(&mut self, id: BlockId) -> bool {
+        let Some(path) = self.path_to(id) else {
+            return false;
+        };
+        let Some((&last, parent_path)) = path.split_last() else {
+            return false;
+        };
+        let block = &mut children_mut(&mut self.roots, parent_path)[last];
+        let alone = Outline {
+            preamble: String::new(),
+            roots: vec![Block::new(block.text.clone())],
+        };
+        let mut reparsed = Outline::parse(&alone.serialize()).roots;
+        if reparsed.len() != 1 || reparsed[0].children.is_empty() {
+            return false;
+        }
+        let root = reparsed.remove(0);
+        block.text = root.text;
+        let existing = std::mem::replace(&mut block.children, root.children);
+        block.children.extend(existing);
+        true
     }
 
     #[must_use]
@@ -449,11 +525,83 @@ mod tests {
 
     #[test]
     fn non_bullet_lines_are_preserved() {
-        let o = Outline::parse("preamble\n- a\nnot a bullet\n- b\n");
+        let o = Outline::parse("intro\n- a\nnot a bullet\n- b\n");
+        assert_eq!(o.roots.len(), 3);
+        assert_eq!(o.roots[0].text, "intro");
+        assert_eq!(o.roots[1].text, "a\nnot a bullet");
+        assert_eq!(o.roots[2].text, "b");
+        assert_eq!(o.serialize(), "- intro\n- a\n  not a bullet\n- b\n");
+    }
+
+    #[test]
+    fn prose_before_the_first_bullet_becomes_the_first_block() {
+        let o = Outline::parse("Some intro\n\nmore intro\n\n- a\n");
+        assert_eq!(o.preamble, "");
         assert_eq!(o.roots.len(), 2);
-        assert_eq!(o.roots[0].text, "a\nnot a bullet");
-        assert_eq!(o.roots[1].text, "b");
-        assert_eq!(o.serialize(), "preamble\n- a\n  not a bullet\n- b\n");
+        assert_eq!(o.roots[0].text, "Some intro\n\nmore intro");
+        assert_eq!(o.roots[1].text, "a");
+    }
+
+    #[test]
+    fn bullets_indented_under_leading_prose_are_its_children() {
+        let o = Outline::parse("# Heading\n\t- child\n- sibling\n");
+        assert_eq!(o.roots.len(), 2);
+        assert_eq!(o.roots[0].text, "# Heading");
+        assert_eq!(o.roots[0].children[0].text, "child");
+        assert_eq!(o.roots[1].text, "sibling");
+    }
+
+    #[test]
+    fn page_without_bullets_is_one_editable_block() {
+        let o = Outline::parse("just a paragraph\nand another\n");
+        assert_eq!(o.roots.len(), 1);
+        assert_eq!(o.roots[0].text, "just a paragraph\nand another");
+        assert_eq!(o.serialize(), "- just a paragraph\n  and another\n");
+    }
+
+    #[test]
+    fn properties_stay_in_the_preamble_and_prose_after_them_is_a_block() {
+        let o = Outline::parse("title:: Foo\ntags::\n\nIntro\n- a\n");
+        assert_eq!(o.preamble, "title:: Foo\ntags::\n\n");
+        assert_eq!(o.roots[0].text, "Intro");
+        assert_eq!(o.serialize(), "title:: Foo\ntags::\n\n- Intro\n- a\n");
+    }
+
+    #[test]
+    fn split_bullet_lines_turns_typed_bullets_into_children() {
+        let mut o = Outline::parse("- a\n  - existing\n");
+        let a = by_text(&o, "a");
+        assert!(o.set_text(a, "a\nmore\n- b\n  - c\n- d"));
+        assert!(o.split_bullet_lines(a));
+        assert_eq!(o.get(a), Some("a\nmore"));
+        let children: Vec<&str> = o.roots[0]
+            .children
+            .iter()
+            .map(|b| b.text.as_str())
+            .collect();
+        assert_eq!(children, ["b", "d", "existing"]);
+        assert_eq!(o.roots[0].children[0].children[0].text, "c");
+        assert_eq!(
+            o.serialize(),
+            Outline::parse(&o.serialize()).serialize(),
+            "what is shown is what reloads",
+        );
+    }
+
+    #[test]
+    fn split_bullet_lines_leaves_fenced_bullets_alone() {
+        let mut o = Outline::parse("- ```\n  - code\n  ```\n");
+        let id = o.roots[0].id;
+        assert!(!o.split_bullet_lines(id));
+        assert_eq!(o.get(id), Some("```\n- code\n```"));
+    }
+
+    #[test]
+    fn split_bullet_lines_without_bullets_is_a_noop() {
+        let mut o = Outline::parse("- a\n  b\n");
+        let id = o.roots[0].id;
+        assert!(!o.split_bullet_lines(id));
+        assert_eq!(o.get(id), Some("a\nb"));
     }
 
     #[test]

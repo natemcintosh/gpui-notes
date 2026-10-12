@@ -453,6 +453,7 @@ impl BlockView {
         let block_id = self.block_id;
         let new_id = self.page.update(cx, |p, cx| {
             p.set_block_text(block_id, text, cx);
+            p.split_bullet_lines(block_id, cx);
             p.insert_block_after(block_id, "", cx)
         });
         cx.notify();
@@ -467,8 +468,10 @@ impl BlockView {
         };
         let text = input.read(cx).content().to_string();
         let block_id = self.block_id;
-        self.page
-            .update(cx, |p, cx| p.set_block_text(block_id, text, cx));
+        self.page.update(cx, |p, cx| {
+            p.set_block_text(block_id, text, cx);
+            p.split_bullet_lines(block_id, cx);
+        });
         cx.notify();
     }
 }
@@ -1156,6 +1159,44 @@ mod tests {
                 Some("```calc\n2 * 3\n```")
             );
             assert_eq!(outline.serialize(), "- ```calc\n  2 * 3\n  ```\n");
+        });
+    }
+
+    /// A typed `- ` line can only be stored as a child block, so finishing the
+    /// edit makes it one now rather than after the next reload.
+    #[gpui::test]
+    fn escape_turns_a_typed_bullet_line_into_a_child(cx: &mut TestAppContext) {
+        let (page, bv, cx) = mount(cx, "- a\n  b\n");
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter enter");
+        cx.simulate_input("- c");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            assert_eq!(outline.get(bv.read(cx).block_id), Some("a\nb"));
+            assert_eq!(outline.roots[0].children.len(), 1);
+            assert_eq!(outline.roots[0].children[0].text, "c");
+            assert_eq!(outline.serialize(), "- a\n  b\n  - c\n");
+        });
+    }
+
+    #[gpui::test]
+    fn shift_enter_splits_typed_bullets_before_adding_the_sibling(cx: &mut TestAppContext) {
+        let (page, bv, cx) = mount(cx, "- a\n  b\n");
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter enter");
+        cx.simulate_input("- c");
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert_eq!(
+                page.read(cx).outline().serialize(),
+                "- a\n  b\n  - c\n-\n",
+                "the typed bullet is a child and the new sibling follows the block",
+            );
         });
     }
 

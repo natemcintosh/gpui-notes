@@ -129,6 +129,11 @@ impl Page {
         self.apply_outline_edit(cx, |o| o.move_down(id))
     }
 
+    /// Called when an edit of `id` ends; see `Outline::split_bullet_lines`.
+    pub fn split_bullet_lines(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
+        self.apply_outline_edit(cx, |o| o.split_bullet_lines(id))
+    }
+
     /// Deletes the block (and its subtree) from the outline.
     pub fn delete_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
         self.apply_outline_edit(cx, |o| o.delete(id).is_some())
