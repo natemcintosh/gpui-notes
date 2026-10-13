@@ -21,6 +21,7 @@ actions!(
     text_input,
     [
         Backspace,
+        DeleteWordLeft,
         Delete,
         Left,
         Right,
@@ -461,6 +462,21 @@ impl TextInput {
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         let (new_content, new_selection) = apply_backspace(&self.content, self.selection.range());
+        if new_content.as_str() == self.content.as_ref() {
+            window.play_system_bell();
+            return;
+        }
+        self.apply_edit(new_content, new_selection, cx);
+    }
+
+    fn delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (new_content, new_selection) =
+            apply_delete_word_left(&self.content, self.selection.range());
         if new_content.as_str() == self.content.as_ref() {
             window.play_system_bell();
             return;
@@ -1154,6 +1170,7 @@ impl Render for TextInput {
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
+            .on_action(cx.listener(Self::delete_word_left))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
@@ -1337,6 +1354,8 @@ pub fn bind_keys(cx: &mut App) {
 
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
+        KeyBinding::new("ctrl-backspace", DeleteWordLeft, Some("TextInput")),
+        KeyBinding::new("alt-backspace", DeleteWordLeft, Some("TextInput")),
         KeyBinding::new("delete", Delete, Some("TextInput")),
         KeyBinding::new("enter", Submit, Some("TextInput")),
         KeyBinding::new("shift-enter", SubmitNow, Some("TextInput")),
@@ -1433,6 +1452,17 @@ fn apply_backspace(content: &str, selection: Range<usize>) -> (String, Range<usi
             return (content.to_string(), selection);
         }
         apply_replace(content, prev..selection.end, "")
+    } else {
+        apply_replace(content, selection, "")
+    }
+}
+
+/// Delete from the caret back to the start of the previous word, or just the
+/// selection when there is one.
+fn apply_delete_word_left(content: &str, selection: Range<usize>) -> (String, Range<usize>) {
+    if selection.is_empty() {
+        let start = previous_word_start(content, selection.start);
+        apply_replace(content, start..selection.end, "")
     } else {
         apply_replace(content, selection, "")
     }
@@ -1668,6 +1698,38 @@ mod tests {
                 "selection shrinks to its anchor, then grows past it",
             );
             assert!(!input.selection.is_reversed());
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_and_alt_backspace_delete_the_previous_word(cx: &mut TestAppContext) {
+        let (input, cx) = mount_input(cx, "one two  three");
+
+        cx.simulate_keystrokes("end ctrl-backspace");
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.content().as_ref(), "one two  ");
+            assert_eq!(input.selected_range(), 9..9);
+        });
+
+        cx.simulate_keystrokes("alt-backspace");
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            assert_eq!(
+                input.content().as_ref(),
+                "one ",
+                "trailing spaces go with the word before them",
+            );
+        });
+
+        cx.simulate_keystrokes("home shift-right ctrl-backspace");
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            assert_eq!(
+                input.content().as_ref(),
+                "ne ",
+                "a selection is deleted as-is"
+            );
         });
     }
 
