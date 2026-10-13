@@ -36,6 +36,10 @@ actions!(
         End,
         SelectHome,
         SelectEnd,
+        DocumentStart,
+        DocumentEnd,
+        SelectDocumentStart,
+        SelectDocumentEnd,
         Paste,
         Cut,
         Copy,
@@ -445,18 +449,44 @@ impl TextInput {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
+        self.move_to(line_start(&self.content, self.selection.head), cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.content.len(), cx);
+        self.move_to(line_end(&self.content, self.selection.head), cx);
     }
 
     fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(0, cx);
+        self.select_to(line_start(&self.content, self.selection.head), cx);
     }
 
     fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(line_end(&self.content, self.selection.head), cx);
+    }
+
+    fn document_start(&mut self, _: &DocumentStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn document_end(&mut self, _: &DocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.content.len(), cx);
+    }
+
+    fn select_document_start(
+        &mut self,
+        _: &SelectDocumentStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(0, cx);
+    }
+
+    fn select_document_end(
+        &mut self,
+        _: &SelectDocumentEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_to(self.content.len(), cx);
     }
 
@@ -1185,6 +1215,10 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_home))
             .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::document_start))
+            .on_action(cx.listener(Self::document_end))
+            .on_action(cx.listener(Self::select_document_start))
+            .on_action(cx.listener(Self::select_document_end))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
@@ -1330,26 +1364,26 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-e", End, Some("TextInput")),
         KeyBinding::new("home", Home, Some("TextInput")),
         KeyBinding::new("end", End, Some("TextInput")),
-        KeyBinding::new("cmd-up", Home, Some("TextInput")),
-        KeyBinding::new("cmd-down", End, Some("TextInput")),
-        KeyBinding::new("cmd-home", Home, Some("TextInput")),
-        KeyBinding::new("cmd-end", End, Some("TextInput")),
+        KeyBinding::new("cmd-up", DocumentStart, Some("TextInput")),
+        KeyBinding::new("cmd-down", DocumentEnd, Some("TextInput")),
+        KeyBinding::new("cmd-home", DocumentStart, Some("TextInput")),
+        KeyBinding::new("cmd-end", DocumentEnd, Some("TextInput")),
         KeyBinding::new("ctrl-shift-a", SelectHome, Some("TextInput")),
         KeyBinding::new("ctrl-shift-e", SelectEnd, Some("TextInput")),
         KeyBinding::new("shift-home", SelectHome, Some("TextInput")),
         KeyBinding::new("shift-end", SelectEnd, Some("TextInput")),
-        KeyBinding::new("cmd-shift-up", SelectHome, Some("TextInput")),
-        KeyBinding::new("cmd-shift-down", SelectEnd, Some("TextInput")),
-        KeyBinding::new("cmd-shift-home", SelectHome, Some("TextInput")),
-        KeyBinding::new("cmd-shift-end", SelectEnd, Some("TextInput")),
+        KeyBinding::new("cmd-shift-up", SelectDocumentStart, Some("TextInput")),
+        KeyBinding::new("cmd-shift-down", SelectDocumentEnd, Some("TextInput")),
+        KeyBinding::new("cmd-shift-home", SelectDocumentStart, Some("TextInput")),
+        KeyBinding::new("cmd-shift-end", SelectDocumentEnd, Some("TextInput")),
     ]);
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     cx.bind_keys([
-        KeyBinding::new("ctrl-home", Home, Some("TextInput")),
-        KeyBinding::new("ctrl-end", End, Some("TextInput")),
-        KeyBinding::new("ctrl-shift-home", SelectHome, Some("TextInput")),
-        KeyBinding::new("ctrl-shift-end", SelectEnd, Some("TextInput")),
+        KeyBinding::new("ctrl-home", DocumentStart, Some("TextInput")),
+        KeyBinding::new("ctrl-end", DocumentEnd, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-home", SelectDocumentStart, Some("TextInput")),
+        KeyBinding::new("ctrl-shift-end", SelectDocumentEnd, Some("TextInput")),
     ]);
 
     cx.bind_keys([
@@ -1386,6 +1420,18 @@ fn next_grapheme_boundary(content: &str, offset: usize) -> usize {
         .grapheme_indices(true)
         .find_map(|(index, _)| (index > offset).then_some(index))
         .unwrap_or(content.len())
+}
+
+/// Start of the hard line (`\n`-delimited) containing `offset`.
+fn line_start(content: &str, offset: usize) -> usize {
+    content[..offset].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// End of the hard line containing `offset`, before its `\n`.
+fn line_end(content: &str, offset: usize) -> usize {
+    content[offset..]
+        .find('\n')
+        .map_or(content.len(), |i| offset + i)
 }
 
 fn character_left_target(content: &str, selection: Selection) -> usize {
@@ -1485,6 +1531,23 @@ mod tests {
     use super::*;
     use gpui::{size, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext};
     use rstest::rstest;
+
+    #[rstest]
+    #[case::single_line("abc", 1, 0, 3)]
+    #[case::second_line("ab\ncd", 4, 3, 5)]
+    #[case::first_line("ab\ncd", 1, 0, 2)]
+    #[case::at_newline("ab\ncd", 2, 0, 2)]
+    #[case::start_of_line("ab\ncd", 3, 3, 5)]
+    #[case::empty_middle_line("a\n\nb", 2, 2, 2)]
+    fn line_bounds(
+        #[case] content: &str,
+        #[case] offset: usize,
+        #[case] start: usize,
+        #[case] end: usize,
+    ) {
+        assert_eq!(line_start(content, offset), start);
+        assert_eq!(line_end(content, offset), end);
+    }
 
     #[rstest]
     #[case::ascii("abc", 1, 0, 2)]
@@ -1698,6 +1761,38 @@ mod tests {
                 "selection shrinks to its anchor, then grows past it",
             );
             assert!(!input.selection.is_reversed());
+        });
+    }
+
+    /// Home/End stay on the current line of a multi-line buffer.
+    #[gpui::test]
+    fn home_and_end_move_within_the_current_line(cx: &mut TestAppContext) {
+        let (input, cx) = mount_input(cx, "Here's a thing\n\nand some other stuff");
+        let third_line = "Here's a thing\n\n".len();
+
+        cx.simulate_keystrokes("home");
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.selected_range(), third_line..third_line);
+        });
+
+        cx.simulate_keystrokes("right shift-end");
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            assert_eq!(
+                input.selected_range(),
+                third_line + 1..input.content().len()
+            );
+        });
+
+        cx.simulate_keystrokes("left left left end");
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            assert_eq!(
+                input.selected_range(),
+                third_line - 1..third_line - 1,
+                "End on the blank line stays put",
+            );
         });
     }
 
