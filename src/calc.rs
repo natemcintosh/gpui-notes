@@ -12,7 +12,7 @@ use crate::theme;
 /// What one source line evaluated to. Indices line up with the block's lines.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
-    /// Blank line — spacing, nothing to show.
+    /// Blank or `#` comment line — nothing to show.
     Blank,
     Value(f64),
     Error(String),
@@ -47,7 +47,8 @@ struct Scope {
 
 impl Scope {
     fn eval_line(&mut self, line: &str) -> Outcome {
-        let line = line.trim();
+        // `#` starts a comment that runs to the end of the line.
+        let line = line.split_once('#').map_or(line, |(code, _)| code).trim();
         if line.is_empty() {
             return Outcome::Blank;
         }
@@ -534,6 +535,34 @@ mod tests {
                 Outcome::Blank,
                 Outcome::Value(2.0),
                 Outcome::Value(3.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn comment_lines_are_skipped_like_blanks() {
+        let out = eval_block("# groceries\n1\n  # indented note\n2\nsum");
+        assert_eq!(
+            out,
+            vec![
+                Outcome::Blank,
+                Outcome::Value(1.0),
+                Outcome::Blank,
+                Outcome::Value(2.0),
+                Outcome::Value(3.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn end_of_line_comments_are_ignored() {
+        let out = eval_block("x = 2 # base\nx * 3 #triple\nsum # all");
+        assert_eq!(
+            out,
+            vec![
+                Outcome::Value(2.0),
+                Outcome::Value(6.0),
+                Outcome::Value(8.0),
             ]
         );
     }
