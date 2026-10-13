@@ -121,8 +121,7 @@ pub fn go(direction: NavigationDirection, cx: &mut App) -> io::Result<bool> {
 fn open(target: &NavTarget, cx: &mut App) -> io::Result<()> {
     match target {
         NavTarget::Journals => journal::open_journals(cx),
-        NavTarget::Page(NoteSource::Page(name)) => set_current_page(name.as_ref(), cx),
-        NavTarget::Page(NoteSource::Journal(date)) => journal::open_for_date(*date, cx).map(|_| ()),
+        NavTarget::Page(source) => set_current_page(source, cx),
     }
 }
 

@@ -400,7 +400,7 @@ mod tests {
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());
             cx.set_global(NavHistory::default());
-            set_current_page("Target", cx).unwrap();
+            set_current_page(&NoteSource::Page("Target".into()), cx).unwrap();
 
             let page = cx.global::<CurrentPage>().get().cloned().unwrap();
             OutlineView::new(page, cx)
@@ -588,7 +588,7 @@ mod tests {
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());
             cx.set_global(NavHistory::default());
-            set_current_page("Target", cx).unwrap();
+            set_current_page(&NoteSource::Page("Target".into()), cx).unwrap();
 
             let page = cx.global::<CurrentPage>().get().cloned().unwrap();
             OutlineView::new(page, cx)
@@ -654,7 +654,7 @@ mod tests {
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());
             cx.set_global(NavHistory::default());
-            set_current_page("Target", cx).unwrap();
+            set_current_page(&NoteSource::Page("Target".into()), cx).unwrap();
             OutlineView::new(cx.global::<CurrentPage>().get().cloned().unwrap(), cx)
         });
         vcx.update(|window, _| window.activate_window());

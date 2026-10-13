@@ -6,39 +6,16 @@ use gpui::{App, AppContext, BorrowAppContext, Entity, Global, SharedString};
 
 use crate::page::Page;
 use crate::page_links;
-use crate::source::NoteSource;
+use crate::source::{source_label, NoteSource};
 use crate::store::NotesStore;
-
-/// Cache key for open pages. A regular page literally named `2026-07-13`
-/// and that date's journal are distinct pages living in different
-/// directories; keying the cache by display name let whichever opened
-/// first win and routed the other's saves to the wrong directory (#40).
-/// The typed key makes that collision unrepresentable.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum PageKey {
-    Page(SharedString),
-    Journal(NaiveDate),
-}
-
-impl PageKey {
-    fn source(&self) -> NoteSource {
-        match self {
-            Self::Page(name) => NoteSource::Page(name.clone()),
-            Self::Journal(date) => NoteSource::Journal(*date),
-        }
-    }
-
-    fn display_name(&self) -> SharedString {
-        match self {
-            Self::Page(name) => name.clone(),
-            Self::Journal(date) => date.format("%Y-%m-%d").to_string().into(),
-        }
-    }
-}
 
 pub struct PageRegistry {
     store: NotesStore,
-    open: HashMap<PageKey, Entity<Page>>,
+    /// Keyed by `NoteSource`, not display name: a regular page literally
+    /// named `2026-07-13` and that date's journal are distinct pages living
+    /// in different directories; keying by name let whichever opened first
+    /// win and routed the other's saves to the wrong directory (#40).
+    open: HashMap<NoteSource, Entity<Page>>,
 }
 
 impl Global for PageRegistry {}
@@ -57,7 +34,7 @@ impl PageRegistry {
     /// # Errors
     /// Returns `NotFound` if the page does not exist on disk, or a store I/O error.
     pub fn open(&mut self, name: &str, cx: &mut App) -> io::Result<Entity<Page>> {
-        let key = PageKey::Page(name.to_string().into());
+        let key = NoteSource::Page(name.to_string().into());
         if let Some(entity) = self.open.get(&key) {
             return Ok(entity.clone());
         }
@@ -71,7 +48,7 @@ impl PageRegistry {
     /// Returns any I/O error from the underlying store other than `NotFound`
     /// (which triggers creation).
     pub fn open_or_create(&mut self, name: &str, cx: &mut App) -> io::Result<Entity<Page>> {
-        let key = PageKey::Page(name.to_string().into());
+        let key = NoteSource::Page(name.to_string().into());
         if let Some(entity) = self.open.get(&key) {
             return Ok(entity.clone());
         }
@@ -98,7 +75,7 @@ impl PageRegistry {
         date: NaiveDate,
         cx: &mut App,
     ) -> io::Result<Entity<Page>> {
-        let key = PageKey::Journal(date);
+        let key = NoteSource::Journal(date);
         if let Some(entity) = self.open.get(&key) {
             return Ok(entity.clone());
         }
@@ -148,20 +125,19 @@ impl PageRegistry {
         }
         let key = self
             .key_for(page)
-            .unwrap_or_else(|| PageKey::Page(name.clone()));
+            .unwrap_or_else(|| NoteSource::Page(name.clone()));
         match &key {
-            PageKey::Page(name) => self.store.write(name, &body)?,
-            PageKey::Journal(date) => self.store.write_journal(*date, &body)?,
+            NoteSource::Page(name) => self.store.write(name, &body)?,
+            NoteSource::Journal(date) => self.store.write_journal(*date, &body)?,
         }
         page.update(cx, Page::mark_saved);
-        let source = key.source();
-        page_links::reindex_global_for_page(page, &source, cx);
+        page_links::reindex_global_for_page(page, &key, cx);
         Ok(())
     }
 
     /// Reverse lookup: the cache key under which `page`'s entity was opened.
     /// The map is small (open pages only), so a linear scan is fine.
-    fn key_for(&self, page: &Entity<Page>) -> Option<PageKey> {
+    fn key_for(&self, page: &Entity<Page>) -> Option<NoteSource> {
         self.open
             .iter()
             .find_map(|(key, entity)| (entity.entity_id() == page.entity_id()).then(|| key.clone()))
@@ -186,15 +162,13 @@ impl PageRegistry {
 
     #[must_use]
     pub fn source_for_page(&self, page: &Entity<Page>, cx: &App) -> NoteSource {
-        self.key_for(page).map_or_else(
-            || NoteSource::Page(page.read(cx).name().clone()),
-            |key| key.source(),
-        )
+        self.key_for(page)
+            .unwrap_or_else(|| NoteSource::Page(page.read(cx).name().clone()))
     }
 
-    fn insert(&mut self, key: PageKey, body: &str, cx: &mut App) -> Entity<Page> {
-        let source = key.source();
-        let page = cx.new(|cx| Page::new(key.display_name(), body, cx));
+    fn insert(&mut self, key: NoteSource, body: &str, cx: &mut App) -> Entity<Page> {
+        let source = key.clone();
+        let page = cx.new(|cx| Page::new(source_label(&key), body, cx));
         self.open.insert(key, page.clone());
         page_links::reindex_global_for_page(&page, &source, cx);
         page
@@ -292,16 +266,18 @@ pub fn save_all_on_quit(cx: &mut App) {
     .detach();
 }
 
-/// Saves the outgoing current page if dirty, opens `name` (creating if missing),
-/// and sets it as the current page.
+/// Saves the outgoing current page if dirty, opens `source` (creating if
+/// missing), and sets it as the current page.
 ///
 /// # Errors
 /// Returns any I/O error from saving the outgoing page or opening the incoming one.
-pub fn set_current_page(name: &str, cx: &mut App) -> io::Result<()> {
+pub fn set_current_page(source: &NoteSource, cx: &mut App) -> io::Result<()> {
     save_outgoing(cx)?;
-    let page = cx.update_global::<PageRegistry, io::Result<Entity<Page>>>(|reg, cx| {
-        reg.open_or_create(name, cx)
-    })?;
+    let page =
+        cx.update_global::<PageRegistry, io::Result<Entity<Page>>>(|reg, cx| match source {
+            NoteSource::Page(name) => reg.open_or_create(name, cx),
+            NoteSource::Journal(date) => reg.open_or_create_journal(*date, cx),
+        })?;
     cx.update_global::<CurrentPage, ()>(|current, _| {
         current.set(Some(page));
     });
@@ -624,12 +600,12 @@ mod tests {
         cx.update(|cx| {
             cx.set_global(PageRegistry::new(NotesStore::new(&root).unwrap()));
             cx.set_global(CurrentPage::default());
-            set_current_page("a", cx).unwrap();
+            set_current_page(&NoteSource::Page("a".into()), cx).unwrap();
 
             let page_a = cx.global::<CurrentPage>().get().unwrap().clone();
             page_a.update(cx, |p, cx| p.set_body_for_test("from-a", cx));
 
-            set_current_page("b", cx).unwrap();
+            set_current_page(&NoteSource::Page("b".into()), cx).unwrap();
         });
 
         cx.update(|cx| {

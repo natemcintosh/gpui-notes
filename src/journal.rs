@@ -1,10 +1,9 @@
 use std::io;
 
 use chrono::{Local, NaiveDate};
-use gpui::{App, BorrowAppContext, Entity};
+use gpui::{App, BorrowAppContext};
 
-use crate::page::Page;
-use crate::registry::{save_outgoing, CurrentPage, PageRegistry};
+use crate::registry::{save_outgoing, CurrentPage};
 
 #[must_use]
 pub fn today() -> NaiveDate {
@@ -23,22 +22,6 @@ pub fn parse_journal_name(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .ok()
         .filter(|d| d.format("%Y-%m-%d").to_string() == s)
-}
-
-/// Opens (creating if necessary) the journal page for `date`, saves any
-/// outgoing current page, and sets the journal as the current page.
-///
-/// # Errors
-/// Returns any I/O error from saving the outgoing page or opening the journal.
-pub fn open_for_date(date: NaiveDate, cx: &mut App) -> io::Result<Entity<Page>> {
-    save_outgoing(cx)?;
-    let page = cx.update_global::<PageRegistry, io::Result<Entity<Page>>>(|reg, cx| {
-        reg.open_or_create_journal(date, cx)
-    })?;
-    cx.update_global::<CurrentPage, ()>(|current, _| {
-        current.set(Some(page.clone()));
-    });
-    Ok(page)
 }
 
 /// Switches to journals mode (today's journal, then older ones beneath it),

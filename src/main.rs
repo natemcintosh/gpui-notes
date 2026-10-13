@@ -666,7 +666,7 @@ mod tests {
             cx.set_global(NavHistory::default());
             save_all_on_quit(cx);
             // Setup, not navigation: matches `main`'s startup, back stack empty.
-            set_current_page("Home", cx).unwrap();
+            set_current_page(&NoteSource::Page("Home".into()), cx).unwrap();
             RootView::new(window, cx)
         });
         vcx.update(|window, cx| {
