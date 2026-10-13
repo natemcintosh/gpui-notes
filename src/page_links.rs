@@ -67,6 +67,12 @@ impl LinkIndex {
         self.forward.get(source).unwrap_or(&EMPTY_TARGETS)
     }
 
+    /// Every `[[target]]` linked from at least one page or journal, whether
+    /// or not a file exists for it.
+    pub fn link_targets(&self) -> impl Iterator<Item = &str> {
+        self.reverse.keys().map(String::as_str)
+    }
+
     #[must_use]
     pub fn page_exists(&self, name: &str) -> bool {
         self.pages.contains(name)

@@ -1,8 +1,10 @@
-//! Fuzzy-by-substring page picker overlay. Lists every page name and journal
-//! date; the text input narrows the list as the user types. Up/Down navigates
+//! Fuzzy-by-substring page picker overlay. Lists every page name (including
+//! pages that are only `[[linked]]` and have no file yet) and journal date; the text input narrows the list as the user types. Up/Down navigates
 //! the selection; Enter emits `Selected`; Escape (via the input's `Cancel`
 //! action) emits `Cancelled`. The parent view (`RootView`) is responsible for
 //! mounting/unmounting this view and acting on the events.
+
+use std::collections::BTreeSet;
 
 use chrono::NaiveDate;
 use gpui::{
@@ -13,6 +15,8 @@ use gpui::{
 
 use gpui::ScrollHandle;
 
+use crate::page_links::link_target;
+use crate::source::NoteSource;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme;
 
@@ -40,6 +44,34 @@ impl PageEntry {
             Self::Journal(date) => SharedString::from(date.format("%Y-%m-%d").to_string()),
         }
     }
+}
+
+/// The picker's list: pages on disk plus every `[[link]]` target, so a page
+/// that is only ever referenced can still be found, then journals newest first.
+/// A link target that is a journal title is listed as that journal, matching
+/// what clicking the link opens.
+#[must_use]
+pub fn entries<'a>(
+    pages: Vec<SharedString>,
+    mut journals: Vec<NaiveDate>,
+    link_targets: impl IntoIterator<Item = &'a str>,
+) -> Vec<PageEntry> {
+    let mut pages: BTreeSet<SharedString> = pages.into_iter().collect();
+    for target in link_targets {
+        match link_target(target) {
+            NoteSource::Page(name) => {
+                pages.insert(name);
+            }
+            NoteSource::Journal(date) => journals.push(date),
+        }
+    }
+    journals.sort_unstable_by(|a, b| b.cmp(a));
+    journals.dedup();
+    pages
+        .into_iter()
+        .map(PageEntry::Page)
+        .chain(journals.into_iter().map(PageEntry::Journal))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +340,30 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn entries_include_link_targets_without_files() {
+        let day = |d| NaiveDate::from_ymd_opt(2026, 4, d).unwrap();
+        let labels: Vec<SharedString> = super::entries(
+            vec!["Beta".into(), "Alpha".into()],
+            vec![day(1), day(18)],
+            ["NNH", "Alpha", "2026-04-02", "2026-04-18"],
+        )
+        .iter()
+        .map(PageEntry::label)
+        .collect();
+        assert_eq!(
+            labels,
+            [
+                "Alpha",
+                "Beta",
+                "NNH",
+                "2026-04-18",
+                "2026-04-02",
+                "2026-04-01"
+            ]
+        );
+    }
+
     #[gpui::test]
     fn substring_filter_narrows_list(cx: &mut TestAppContext) {
         let (picker, vcx) = cx.add_window_view(|_window, cx| {
@@ -378,6 +434,47 @@ mod tests {
                 }
                 other => panic!("expected Selected(Page(Beta)), got {other:?}"),
             }
+        });
+    }
+
+    #[gpui::test]
+    fn lowercase_query_selects_the_page_by_its_real_name(cx: &mut TestAppContext) {
+        let (picker, vcx) = cx.add_window_view(|_window, cx| {
+            text_input::bind_keys(cx);
+            bind_keys(cx);
+            PagePicker::new(vec![PageEntry::Page("NNH".into())], cx)
+        });
+        vcx.update(|window, cx| {
+            window.activate_window();
+            let input_focus = picker.read(cx).input().focus_handle(cx);
+            window.focus(&input_focus, cx);
+        });
+        vcx.run_until_parked();
+
+        let recorder = vcx.update(|_, cx| {
+            cx.new(|cx| {
+                let sub = cx.subscribe(
+                    &picker,
+                    |this: &mut SelectionRecorder, _, event: &PagePickerEvent, _| {
+                        this.events.push(event.clone());
+                    },
+                );
+                SelectionRecorder {
+                    events: Vec::new(),
+                    _sub: sub,
+                }
+            })
+        });
+
+        vcx.simulate_input("nnh");
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+
+        recorder.read_with(vcx, |r, _| match r.events.as_slice() {
+            [PagePickerEvent::Selected(PageEntry::Page(name))] => {
+                assert_eq!(name.as_ref(), "NNH");
+            }
+            other => panic!("expected Selected(Page(NNH)), got {other:?}"),
         });
     }
 

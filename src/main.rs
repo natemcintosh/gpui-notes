@@ -395,13 +395,15 @@ impl RootView {
 
     fn collect_picker_entries(cx: &App) -> std::io::Result<Vec<PageEntry>> {
         let registry = cx.global::<PageRegistry>();
-        let mut entries: Vec<PageEntry> =
-            registry.list()?.into_iter().map(PageEntry::Page).collect();
-        let mut journals = registry.list_journals()?;
-        journals.sort();
-        journals.reverse();
-        entries.extend(journals.into_iter().map(PageEntry::Journal));
-        Ok(entries)
+        let link_targets = cx
+            .try_global::<LinkIndex>()
+            .into_iter()
+            .flat_map(LinkIndex::link_targets);
+        Ok(page_picker::entries(
+            registry.list()?,
+            registry.list_journals()?,
+            link_targets,
+        ))
     }
 
     fn handle_picker_selection(
