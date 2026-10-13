@@ -79,6 +79,13 @@ fn is_fence(text: &str) -> bool {
     text.trim_start().starts_with("```")
 }
 
+/// Whether `text` ends inside a code fence: an odd number of its lines are
+/// fence lines, by the same rule the parser uses.
+#[must_use]
+pub fn has_open_fence(text: &str) -> bool {
+    text.lines().filter(|line| is_fence(line)).count() % 2 == 1
+}
+
 /// `line` with up to `cols` columns of leading whitespace removed.
 fn strip_indent(line: &str, cols: usize) -> &str {
     let mut consumed = 0;

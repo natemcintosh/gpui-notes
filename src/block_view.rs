@@ -19,7 +19,7 @@ use gpui::{
 };
 
 use crate::block_render::{render_block, theme};
-use crate::outline::BlockId;
+use crate::outline::{self, BlockId};
 use crate::page::Page;
 use crate::page_completion::{self, CompletionState};
 use crate::page_links::{LinkIndex, PageLinkExt};
@@ -477,7 +477,7 @@ impl BlockView {
 /// once the block already spans lines, or once it has opened a code fence that
 /// is still waiting for its closing one.
 fn extends_on_enter(text: &str) -> bool {
-    text.contains('\n') || text.matches("```").count() % 2 == 1
+    text.contains('\n') || outline::has_open_fence(text)
 }
 
 impl Focusable for BlockView {
@@ -1095,6 +1095,16 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         (page, bv, cx)
+    }
+
+    #[test]
+    fn extends_on_enter_matches_the_parser_fence_rule() {
+        assert!(extends_on_enter("```calc"));
+        assert!(extends_on_enter("  ```"));
+        assert!(extends_on_enter("two\nlines"));
+        // The parser only opens a fence on a line that starts with ``` (#73).
+        assert!(!extends_on_enter("use ``` for fences"));
+        assert!(!extends_on_enter("plain"));
     }
 
     #[gpui::test]
