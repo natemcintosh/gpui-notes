@@ -169,7 +169,15 @@ fn atomic_write(final_path: &Path, body: &str) -> io::Result<()> {
         f.write_all(body.as_bytes())?;
         f.sync_all()?;
         drop(f);
-        fs::rename(&tmp_path, final_path)
+        fs::rename(&tmp_path, final_path)?;
+        // The rename lives in the directory entry; without syncing the
+        // directory it can be lost on power failure. Unix-only: Windows
+        // cannot open a directory as a file.
+        #[cfg(unix)]
+        if let Some(parent) = final_path.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     })();
 
     if result.is_err() {

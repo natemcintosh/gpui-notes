@@ -46,8 +46,7 @@ actions!(
 ///
 /// `PagePicker` and `ShortcutsHelp` are absolute-positioned overlays. The
 /// enum collapses them into the same axis so that opening any one always
-/// dismisses the others — see plan
-/// `/home/natemcintosh/.claude/plans/there-seem-to-be-abundant-peach.md`.
+/// dismisses the others.
 pub enum OverlayMode {
     None,
     PagePicker {
@@ -155,9 +154,9 @@ impl RootView {
         }
     }
 
-    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     /// Saves every open page, not just the current one: blocks edited in the
     /// linked-references section belong to other pages.
+    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     fn save_current(&mut self, _: &SavePage, _: &mut Window, cx: &mut Context<Self>) {
         let result = cx.update_global::<PageRegistry, _>(|reg, cx| reg.save_all(cx));
         if let Err(err) = result {
