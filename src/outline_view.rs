@@ -5,7 +5,7 @@
 //! mounted `TextInput` survive re-renders. Ids missing from the page's
 //! outline (deleted blocks) are pruned at render time.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gpui::{
     actions, div, px, relative, App, AppContext, Context, Entity, FocusHandle, Focusable,
@@ -48,6 +48,12 @@ const ROW_GAP: Pixels = px(1.0);
 /// the `BlockView`'s 1px border and 2px padding, plus half a 24px line.
 const BULLET_CENTER_Y: f32 = 15.0;
 const BULLET_SIZE: f32 = 6.0;
+/// The ring drawn behind a folded block's bullet, Logseq-style.
+const FOLDED_RING_SIZE: f32 = 16.0;
+/// The fold arrow sits just left of the bullet column, in the indent.
+const FOLD_TOGGLE_WIDTH: Pixels = px(16.0);
+/// Every row is a hover group so its fold arrow can appear on hover.
+const ROW_GROUP: &str = "outline-row";
 /// How sharply a thread turns from its parent's column into a bullet.
 const THREAD_RADIUS: Pixels = px(8.0);
 
@@ -296,6 +302,22 @@ impl OutlineView {
         self.scroll.scroll_to_item(new_idx);
     }
 
+    /// Fold or unfold `id` from its arrow. Folding away the block that holds
+    /// focus would leave focus on a row that is no longer drawn, so it moves
+    /// to the folded block.
+    fn toggle_fold(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
+        self.page
+            .update(cx, |page, cx| page.toggle_collapse(id, cx));
+        let Some(active) = self.active_block_id(window, cx) else {
+            return;
+        };
+        let visible = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        if !visible.iter().any(|&(_, v)| v == active) {
+            let handle = self.get_or_create(id, window, cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+    }
+
     /// Run one of the `Page` outline ops on the focused block. Focus stays
     /// on the same block — its `BlockView` survives the re-render because
     /// the ops never change block ids.
@@ -465,9 +487,33 @@ fn vertical_line(depth: usize, top: Pixels, color: gpui::Rgba) -> gpui::Div {
         .bg(color)
 }
 
-/// One outline row: indent, the bullet with its guides and thread, and the
-/// block itself.
-fn thread_row(depth: usize, thread: RowThread, bv: Entity<BlockView>) -> gpui::Div {
+/// Whether a row's block has children, and if so whether they are folded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fold {
+    Leaf,
+    Open,
+    Folded,
+}
+
+impl Fold {
+    fn of(block: &Block) -> Self {
+        match (block.children.is_empty(), block.collapsed) {
+            (true, _) => Self::Leaf,
+            (false, false) => Self::Open,
+            (false, true) => Self::Folded,
+        }
+    }
+}
+
+/// One outline row: indent, the fold arrow, the bullet with its guides and
+/// thread, and the block itself.
+fn thread_row(
+    depth: usize,
+    thread: RowThread,
+    fold: Fold,
+    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    bv: Entity<BlockView>,
+) -> gpui::Div {
     #[allow(clippy::cast_precision_loss)]
     let indent = INDENT_PER_LEVEL * depth as f32;
     // Faint guides down every ancestor's column, then the active
@@ -500,7 +546,42 @@ fn thread_row(depth: usize, thread: RowThread, bv: Entity<BlockView>) -> gpui::D
     } else {
         theme::fg_muted()
     };
+    let row_id = bv.entity_id();
+    // Hidden until the row (or the arrow itself, which hangs left of a root
+    // row's bounds) is hovered.
+    let toggle = (fold != Fold::Leaf).then(|| {
+        div()
+            .id(("fold-toggle", row_id))
+            .debug_selector(move || format!("fold-toggle-{row_id}"))
+            .absolute()
+            .left(indent - FOLD_TOGGLE_WIDTH)
+            .top(px(BULLET_CENTER_Y - FOLDED_RING_SIZE / 2.))
+            .w(FOLD_TOGGLE_WIDTH)
+            .h(px(FOLDED_RING_SIZE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .text_color(theme::fg_muted())
+            .cursor_pointer()
+            .opacity(0.)
+            .group_hover(ROW_GROUP, |s| s.opacity(1.))
+            .hover(|s| s.opacity(1.).text_color(theme::fg()))
+            // Don't let the outline's `track_focus` take focus from a block
+            // that is being edited.
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                window.prevent_default();
+            })
+            .on_click(on_toggle)
+            .child(if fold == Fold::Folded { "▸" } else { "▾" })
+    });
+    let ring = if fold == Fold::Folded {
+        theme::folded_bullet_ring()
+    } else {
+        theme::transparent()
+    };
     div()
+        .group(ROW_GROUP)
         .relative()
         .flex()
         .flex_row()
@@ -514,35 +595,45 @@ fn thread_row(depth: usize, thread: RowThread, bv: Entity<BlockView>) -> gpui::D
         .children(passes)
         .children(leaves)
         .children(enters)
+        .children(toggle)
         .child(
             div()
                 .w(BULLET_COLUMN_WIDTH)
                 .flex_none()
                 .flex()
                 .justify_center()
-                .pt(px(BULLET_CENTER_Y - BULLET_SIZE / 2.))
-                .child(div().size(px(BULLET_SIZE)).rounded_full().bg(bullet_color)),
+                .pt(px(BULLET_CENTER_Y - FOLDED_RING_SIZE / 2.))
+                .child(
+                    div()
+                        .size(px(FOLDED_RING_SIZE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(ring)
+                        .child(div().size(px(BULLET_SIZE)).rounded_full().bg(bullet_color)),
+                ),
         )
         .child(bv)
 }
 
-fn collect_all_ids(blocks: &[Block], out: &mut HashSet<BlockId>) {
+fn collect_folds(blocks: &[Block], out: &mut HashMap<BlockId, Fold>) {
     for b in blocks {
-        out.insert(b.id);
-        collect_all_ids(&b.children, out);
+        out.insert(b.id, Fold::of(b));
+        collect_folds(&b.children, out);
     }
 }
 
 impl Render for OutlineView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (flat, all_ids) = {
+        let (flat, folds) = {
             let roots = self.scoped_roots(self.page.read(cx).outline());
-            let mut all = HashSet::new();
-            collect_all_ids(roots, &mut all);
-            (flatten_visible(roots), all)
+            let mut folds = HashMap::new();
+            collect_folds(roots, &mut folds);
+            (flatten_visible(roots), folds)
         };
-        self.blocks.retain(|id, _| all_ids.contains(id));
-        self.block_subs.retain(|id, _| all_ids.contains(id));
+        self.blocks.retain(|id, _| folds.contains_key(id));
+        self.block_subs.retain(|id, _| folds.contains_key(id));
 
         // The bindings target the `BlockView` key context (see BLOCK_CONTEXT),
         // but the handlers live here because the ops need the outline-wide
@@ -600,7 +691,9 @@ impl Render for OutlineView {
         let threads = thread_rows(&flat, active);
         for ((depth, id), thread) in flat.into_iter().zip(threads) {
             let bv = self.get_or_create(id, window, cx);
-            root = root.child(thread_row(depth, thread, bv));
+            let on_toggle =
+                cx.listener(move |this, _, window, cx| this.toggle_fold(id, window, cx));
+            root = root.child(thread_row(depth, thread, folds[&id], on_toggle, bv));
         }
 
         if self.scope == OutlineScope::Page {
@@ -1413,6 +1506,70 @@ mod tests {
         cx.read(|cx| {
             let outline = page.read(cx).outline();
             assert_eq!(outline.roots[0].text, "a", "alt-up moves it back");
+        });
+    }
+
+    /// Clicks the fold arrow on `id`'s row.
+    fn click_fold_toggle(cx: &mut VisualTestContext, ov: &Entity<OutlineView>, id: BlockId) {
+        let entity = cx.read(|cx| ov.read(cx).block_view(id).expect("row mounted").entity_id());
+        // `debug_bounds` wants a `'static` name; leaking one is fine in a test.
+        let name: &'static str = format!("fold-toggle-{entity}").leak();
+        let center = cx.debug_bounds(name).expect("fold arrow painted").center();
+        cx.simulate_click(center, Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn clicking_the_fold_arrow_folds_and_unfolds_without_dirtying(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n  - b\n- c\n");
+        cx.run_until_parked();
+        let (a, c) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[1].id)
+        });
+        let c_entity = cx.read(|cx| ov.read(cx).block_view(c).unwrap().entity_id());
+        assert!(
+            cx.debug_bounds(format!("fold-toggle-{c_entity}").leak())
+                .is_none(),
+            "a childless block has no arrow",
+        );
+
+        click_fold_toggle(cx, &ov, a);
+        cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            assert!(outline.roots[0].collapsed, "a folded");
+            assert_eq!(flatten_visible(&outline.roots).len(), 2, "b hidden");
+            assert!(!page.read(cx).dirty(), "folding must not dirty the page");
+        });
+
+        click_fold_toggle(cx, &ov, a);
+        cx.read(|cx| {
+            assert!(!page.read(cx).outline().roots[0].collapsed, "a unfolded");
+        });
+    }
+
+    #[gpui::test]
+    fn folding_away_the_edited_block_moves_focus_to_the_folded_one(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n  - b\n");
+        cx.run_until_parked();
+        let (a, b) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[0].children[0].id)
+        });
+        focus_block(cx, &ov, b);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        editing_input(cx, &ov, b);
+
+        click_fold_toggle(cx, &ov, a);
+        assert_eq!(
+            focused_id(cx, &ov),
+            Some(a),
+            "focus lands on the folded block"
+        );
+        cx.read(|cx| {
+            let bv = ov.read(cx).block_view(b).expect("b still cached");
+            assert!(!bv.read(cx).is_editing(), "b's editor closed");
         });
     }
 

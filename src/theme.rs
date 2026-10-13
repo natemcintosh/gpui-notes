@@ -171,6 +171,12 @@ pub fn link_bracket() -> Rgba {
     rgb(0x5c5c5c)
 }
 
+/// The ring behind a folded block's bullet.
+#[must_use]
+pub fn folded_bullet_ring() -> Rgba {
+    overlay_border()
+}
+
 /// The faint line down each parent's bullet column, beside its children.
 #[must_use]
 pub fn thread_guide() -> Rgba {
