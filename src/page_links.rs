@@ -160,22 +160,33 @@ impl LinkIndex {
 
 /// Ids of the blocks in `outline` whose text links to `target`, in document
 /// order. Resolved against a live outline, so the ids are always current.
+///
+/// A hit's descendants are not searched: each id becomes a subtree row in
+/// Linked References, so a linking descendant is already on screen (#69).
 #[must_use]
 pub fn blocks_linking_to(outline: &Outline, target: &str) -> Vec<BlockId> {
-    all_blocks(&outline.roots)
-        .into_iter()
-        // A block with no `[[` cannot link anywhere, and the lowering below
-        // is a full markdown parse — by far the expensive part when a page
-        // has hundreds of referencing sources. Survivors still have to be
-        // parsed: a `[[Target]]` inside a ``` fence is not a reference.
-        .filter(|block| block.text.contains("[["))
-        .filter(|block| {
-            page_links_in_text(&block.text)
-                .iter()
-                .any(|link| link.as_ref() == target)
-        })
-        .map(|block| block.id)
-        .collect()
+    fn walk(out: &mut Vec<BlockId>, blocks: &[Block], target: &str) {
+        for block in blocks {
+            // A block with no `[[` cannot link anywhere, and the lowering
+            // below is a full markdown parse — by far the expensive part when
+            // a page has hundreds of referencing sources. Survivors still
+            // have to be parsed: a `[[Target]]` inside a ``` fence is not a
+            // reference.
+            let links = block.text.contains("[[")
+                && page_links_in_text(&block.text)
+                    .iter()
+                    .any(|link| link.as_ref() == target);
+            if links {
+                out.push(block.id);
+            } else {
+                walk(out, &block.children, target);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(&mut out, &outline.roots, target);
+    out
 }
 
 pub struct PageLinkExt;
@@ -484,7 +495,7 @@ mod tests {
     #[test]
     fn blocks_linking_to_finds_nested_blocks_and_skips_code() {
         let outline = Outline::parse(
-            "- intro [[Target]]\n\t- child [[Other]]\n\t\t- deep [[Target]]\n- ```txt\n  [[Target]]\n  ```\n",
+            "- intro [[Target]]\n\t- child [[Other]]\n\t\t- deep [[Target]]\n- plain\n\t- nested [[Target]]\n- ```txt\n  [[Target]]\n  ```\n",
         );
         let ids = blocks_linking_to(&outline, "Target");
         let texts: Vec<&str> = ids
@@ -492,9 +503,11 @@ mod tests {
             .map(|id| outline.get(*id).unwrap_or_default())
             .collect();
 
-        assert_eq!(texts.len(), 2, "fenced link must not count: {texts:?}");
+        // `deep` is inside `intro`'s subtree, which its row already shows
+        // (#69); the fenced link is not a reference at all.
+        assert_eq!(texts.len(), 2, "{texts:?}");
         assert!(texts[0].starts_with("intro"));
-        assert!(texts[1].starts_with("deep"));
+        assert!(texts[1].starts_with("nested"));
         assert_eq!(blocks_linking_to(&outline, "Missing"), []);
     }
 
