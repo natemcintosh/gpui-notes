@@ -34,6 +34,9 @@ const LOAD_MORE_MARGIN: Pixels = px(600.);
 /// while today is still short.
 const TODAY_MIN_HEIGHT: Pixels = px(400.);
 
+/// The window's padding on each side of the list (`RootView`'s `p_4`).
+const LIST_SIDE_INSET: Pixels = px(16.);
+
 struct Day {
     date: NaiveDate,
     page: Entity<Page>,
@@ -180,8 +183,18 @@ impl JournalsView {
 }
 
 impl Render for JournalsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.load_more_if_near_end(cx);
+
+        // A width in pixels, not `w_full` capped by `max_w`. Text paints the
+        // lines from its *last* measurement and a container is sized from
+        // whichever pass taffy kept, and with a percentage width some passes
+        // measured a day without knowing its width: the next day was drawn
+        // over a long one's end, or long lines ran off the screen unwrapped.
+        // A definite width gives every pass the same answer.
+        let day_width = (window.viewport_size().width - LIST_SIDE_INSET * 2.)
+            .min(theme::CONTENT_MAX_WIDTH)
+            .max(px(0.));
 
         // Each day is one direct child, which `load_more_if_near_end` relies
         // on when comparing the handle's child count to `days`.
@@ -200,12 +213,13 @@ impl Render for JournalsView {
                 .font_weight(FontWeight::BOLD)
                 .text_color(theme::fg())
                 .child(day.date.format("%Y-%m-%d").to_string());
+            let date = day.date;
             let mut entry = div()
+                .debug_selector(move || format!("journal-day-{date}"))
                 .flex()
                 .flex_col()
                 .flex_none()
-                .w_full()
-                .max_w(theme::CONTENT_MAX_WIDTH)
+                .w(day_width)
                 .mx_auto()
                 .gap_3()
                 .pb_8()
@@ -222,5 +236,73 @@ impl Render for JournalsView {
             list = list.child(entry);
         }
         list
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::LastError;
+    use crate::history::NavHistory;
+    use crate::page_links::LinkIndex;
+    use crate::store::NotesStore;
+    use crate::{block_view, outline_view, text_input};
+    use gpui::{size, TestAppContext};
+    use tempfile::TempDir;
+
+    #[gpui::test]
+    fn a_long_day_pushes_the_next_day_below_it(cx: &mut TestAppContext) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let today = journal::today();
+        let yesterday = today.pred_opt().unwrap();
+        // Taller than the viewport, with paragraphs that wrap: with a
+        // percentage day width, each of them was counted as one line.
+        let long = "lorem ipsum dolor sit amet ".repeat(20);
+        let body: String = (0..40)
+            .map(|i| format!("- line {i}\n"))
+            .chain((0..5).map(|_| format!("- {long}\n")))
+            .collect();
+        let (view, cx) = cx.add_window_view(move |_window, cx| {
+            text_input::bind_keys(cx);
+            block_view::bind_keys(cx);
+            outline_view::bind_keys(cx);
+            let store = NotesStore::new(&root).unwrap();
+            store.write_journal(today, &body).unwrap();
+            store.write_journal(yesterday, "- short\n").unwrap();
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            cx.set_global(PageRegistry::new(store));
+            let mut current = CurrentPage::default();
+            current.show_journals();
+            cx.set_global(current);
+            cx.set_global(LastError::default());
+            cx.set_global(NavHistory::default());
+            JournalsView::new(cx)
+        });
+        cx.simulate_resize(size(px(1920.), px(1000.)));
+        cx.run_until_parked();
+        let (last_block, next_day) = cx.read(|cx| {
+            let view = view.read(cx);
+            let today = view.days[0].page.read(cx).outline();
+            (today.roots.last().unwrap().id, view.days[1].date)
+        });
+        let block: &'static str = format!("block-view-{last_block:?}").leak();
+        let day: &'static str = format!("journal-day-{next_day}").leak();
+        let block_bottom = cx.debug_bounds(block).expect("block painted").bottom();
+        let day_top = cx.debug_bounds(day).expect("day painted").top();
+        let today_name: &'static str = format!("journal-day-{today}").leak();
+        let day_left = cx.debug_bounds(today_name).expect("today painted").left();
+        let first = cx.read(|cx| view.read(cx).days[0].page.read(cx).outline().roots[0].id);
+        let first: &'static str = format!("block-view-{first:?}").leak();
+        let block_left = cx.debug_bounds(first).expect("block painted").left();
+        assert!(
+            block_left - day_left < px(40.),
+            "a top-level block starts at the day's left edge, not centred: \
+             day at {day_left:?}, block at {block_left:?}",
+        );
+        assert!(
+            day_top >= block_bottom,
+            "next day starts at {day_top:?}, above today's last block ending at {block_bottom:?}",
+        );
     }
 }
