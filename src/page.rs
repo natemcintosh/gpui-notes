@@ -137,6 +137,16 @@ impl Page {
         self.apply_outline_edit(cx, |o| o.split_bullet_lines(id))
     }
 
+    /// See `Outline::paste_blocks`.
+    pub fn paste_blocks(
+        &mut self,
+        id: BlockId,
+        pasted: Vec<Block>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.apply_outline_edit(cx, |o| o.paste_blocks(id, pasted))
+    }
+
     /// Deletes the block (and its subtree) from the outline, remembering it
     /// for `undo_delete`.
     pub fn delete_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {

@@ -19,12 +19,13 @@ use gpui::{
 };
 
 use crate::block_render::{render_block, theme};
-use crate::outline::{self, BlockId};
+use crate::outline::{self, BlockId, Outline};
 use crate::page::Page;
 use crate::page_completion::{self, CompletionState};
 use crate::page_links::{LinkIndex, PageLinkExt};
 use crate::text_input::{
-    PendingVerticalPlacement, TextInput, TextInputEvent, VerticalDirection, VerticalMovementOutcome,
+    Paste, PendingVerticalPlacement, TextInput, TextInputEvent, VerticalDirection,
+    VerticalMovementOutcome,
 };
 
 actions!(block_view, [BeginEditing, MoveCaretUp, MoveCaretDown]);
@@ -466,6 +467,25 @@ impl BlockView {
         }
     }
 
+    /// Pastes clipboard outline markdown (a copied bullet with its children)
+    /// as real blocks: the edit ends, the blocks land in the outline, and this
+    /// block keeps focus. Anything else falls through to the `TextInput`.
+    fn paste_blocks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pasted) = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .and_then(|text| Outline::parse_pasted(&text))
+        else {
+            return;
+        };
+        cx.stop_propagation();
+        self.end_editing_inner(cx);
+        let block_id = self.block_id;
+        self.page
+            .update(cx, |p, cx| p.paste_blocks(block_id, pasted, cx));
+        window.focus(&self.focus_handle, cx);
+    }
+
     fn end_editing_inner(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.take_input_on_exit() else {
             return;
@@ -631,6 +651,11 @@ impl Render for BlockView {
             .key_context(key_context)
             .on_action(cx.listener(|this, _: &BeginEditing, window, cx| {
                 this.begin_editing(window, cx);
+            }))
+            // Capture, so a block paste is decided before the input's own
+            // plain-text paste runs.
+            .capture_action(cx.listener(|this, _: &Paste, window, cx| {
+                this.paste_blocks(window, cx);
             }))
             .on_action(cx.listener(|this, _: &MoveCaretUp, _, cx| {
                 this.move_caret_vertical(VerticalDirection::Up, cx);

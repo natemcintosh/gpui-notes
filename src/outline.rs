@@ -513,6 +513,59 @@ impl Outline {
     pub fn first_block_id(&self) -> Option<BlockId> {
         self.roots.first().map(|b| b.id)
     }
+
+    /// The blocks in `text` when it is outline markdown of more than one block
+    /// (such as a copied bullet with children), or `None` for anything that
+    /// should paste as plain text.
+    #[must_use]
+    pub fn parse_pasted(text: &str) -> Option<Vec<Block>> {
+        let pasted = Outline::parse(text);
+        let structured = pasted.preamble.is_empty()
+            && (pasted.roots.len() > 1 || pasted.roots.iter().any(|b| !b.children.is_empty()));
+        structured.then_some(pasted.roots)
+    }
+
+    /// Inserts `pasted` as siblings right after `id`. An empty `id` is
+    /// replaced by the first pasted block instead: it takes that block's text,
+    /// and its children go ahead of any `id` already had.
+    pub fn paste_blocks(&mut self, id: BlockId, pasted: Vec<Block>) -> bool {
+        let Some(path) = self.path_to(id) else {
+            return false;
+        };
+        let Some((&index, parent_path)) = path.split_last() else {
+            return false;
+        };
+        let siblings = children_mut(&mut self.roots, parent_path);
+        let mut pasted = pasted.into_iter();
+        let target = &mut siblings[index];
+        if target.text.trim().is_empty() {
+            if let Some(first) = pasted.next() {
+                target.text = first.text;
+                let existing = std::mem::replace(&mut target.children, first.children);
+                target.children.extend(existing);
+            }
+        }
+        let after = index + 1;
+        siblings.splice(after..after, pasted);
+        true
+    }
+
+    /// The markdown for `id` and its descendants, written as if `id` were a
+    /// root — what copying a bullet puts on the clipboard.
+    #[must_use]
+    pub fn subtree_markdown(&self, id: BlockId) -> Option<String> {
+        let path = self.path_to(id)?;
+        let (&last, parent_path) = path.split_last()?;
+        let mut siblings = &self.roots;
+        for &i in parent_path {
+            siblings = &siblings[i].children;
+        }
+        let alone = Outline {
+            preamble: String::new(),
+            roots: vec![siblings[last].clone()],
+        };
+        Some(alone.serialize())
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +631,45 @@ mod tests {
     fn tab_indent_counts_as_two_spaces() {
         let o = Outline::parse("- a\n\t- b\n");
         assert_eq!(o.roots[0].children[0].text, "b");
+    }
+
+    #[test]
+    fn plain_text_does_not_paste_as_blocks() {
+        assert!(Outline::parse_pasted("just words").is_none());
+        assert!(Outline::parse_pasted("- one bullet").is_none());
+        assert!(Outline::parse_pasted("line one\nline two").is_none());
+    }
+
+    #[test]
+    fn pasting_into_an_empty_block_replaces_it() {
+        let mut o = Outline::parse("- a\n-\n  - kept\n- z\n");
+        let empty = o.roots[1].id;
+        let pasted = Outline::parse_pasted("- # h1\n  - ## h2\n    - ### h3\n- next\n").unwrap();
+        assert!(o.paste_blocks(empty, pasted));
+        assert_eq!(
+            o.serialize(),
+            "- a\n- # h1\n  - ## h2\n    - ### h3\n  - kept\n- next\n- z\n"
+        );
+        assert_eq!(o.roots[1].id, empty, "the pasted-into block keeps its id");
+    }
+
+    #[test]
+    fn pasting_into_a_non_empty_block_adds_siblings_after_it() {
+        let mut o = Outline::parse("- a\n  - b\n- z\n");
+        let b = o.roots[0].children[0].id;
+        let pasted = Outline::parse_pasted("- x\n  - y\n").unwrap();
+        assert!(o.paste_blocks(b, pasted));
+        assert_eq!(o.serialize(), "- a\n  - b\n  - x\n    - y\n- z\n");
+    }
+
+    #[test]
+    fn subtree_markdown_writes_a_nested_block_as_a_root() {
+        let o = Outline::parse("- a\n  - b\n    multi\n    - c\n- d\n");
+        let b = o.roots[0].children[0].id;
+        assert_eq!(
+            o.subtree_markdown(b).as_deref(),
+            Some("- b\n  multi\n  - c\n")
+        );
     }
 
     #[test]

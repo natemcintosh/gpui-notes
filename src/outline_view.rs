@@ -8,8 +8,9 @@
 use std::collections::HashMap;
 
 use gpui::{
-    actions, div, px, relative, App, AppContext, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle,
+    actions, anchored, deferred, div, px, relative, AnyElement, App, AppContext, ClipboardItem,
+    Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollHandle,
     StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
@@ -100,6 +101,12 @@ enum OutlineScope {
     Subtree(BlockId),
 }
 
+/// The menu a right-click on a bullet opens, at the click position.
+struct BulletMenu {
+    block: BlockId,
+    position: Point<Pixels>,
+}
+
 pub struct OutlineView {
     page: Entity<Page>,
     scope: OutlineScope,
@@ -117,6 +124,7 @@ pub struct OutlineView {
     /// Built on first render (not in `new`: `Page::new` constructs its view
     /// from `cx.entity()` before the page itself exists). `Page` scope only.
     linked_refs: Option<Entity<LinkedRefsView>>,
+    bullet_menu: Option<BulletMenu>,
     /// The block the last render threaded to, so tests can see what was drawn.
     #[cfg(test)]
     rendered_active: Option<BlockId>,
@@ -150,6 +158,7 @@ impl OutlineView {
             block_subs: HashMap::new(),
             scroll: ScrollHandle::new(),
             linked_refs: None,
+            bullet_menu: None,
             #[cfg(test)]
             rendered_active: None,
             _page_sub: sub,
@@ -365,13 +374,17 @@ impl OutlineView {
         });
     }
 
-    /// Deletes the focused block with its subtree and moves focus to the
-    /// previous visible block (or, for the first, the next one after the
-    /// subtree). Does nothing when no block would be left to focus.
+    /// Deletes the focused block with its subtree; see `remove_block`.
     fn delete_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(current) = self.focused_block_id(window, cx) else {
-            return;
-        };
+        if let Some(current) = self.focused_block_id(window, cx) {
+            self.remove_block(current, window, cx);
+        }
+    }
+
+    /// Deletes `current` with its subtree and moves focus to the previous
+    /// visible block (or, for the first, the next one after the subtree).
+    /// Does nothing when no block would be left to focus.
+    fn remove_block(&mut self, current: BlockId, window: &mut Window, cx: &mut Context<Self>) {
         let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
         let Some(idx) = flat.iter().position(|&(_, id)| id == current) else {
             return;
@@ -389,6 +402,97 @@ impl OutlineView {
         });
         let handle = self.get_or_create(neighbor, window, cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    /// Puts `id` and its descendants on the clipboard as markdown.
+    fn copy_block(&self, id: BlockId, cx: &mut Context<Self>) {
+        if let Some(markdown) = self.page.read(cx).outline().subtree_markdown(id) {
+            cx.write_to_clipboard(ClipboardItem::new_string(markdown));
+        }
+    }
+
+    /// Copies `id` with its descendants, then deletes them (undoable like a
+    /// Backspace delete).
+    fn cut_block(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_block(id, cx);
+        self.remove_block(id, window, cx);
+    }
+
+    fn open_bullet_menu(
+        &mut self,
+        block: BlockId,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Don't let the outline's `track_focus` take focus from a block that
+        // is being edited.
+        window.prevent_default();
+        cx.stop_propagation();
+        self.bullet_menu = Some(BulletMenu {
+            block,
+            position: event.position,
+        });
+        cx.notify();
+    }
+
+    /// The bullet's Copy/Cut menu, if one is open. Any mouse-down outside it
+    /// closes it.
+    fn render_bullet_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.bullet_menu.as_ref()?;
+        let id = menu.block;
+        let item = |label: &'static str| {
+            div()
+                .id(label)
+                .debug_selector(move || format!("bullet-menu-{label}"))
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .text_color(theme::header_fg())
+                .hover(|s| s.bg(theme::row_hover()))
+                .child(label)
+        };
+        let list = div()
+            .id("bullet-menu")
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .bg(theme::overlay_bg())
+            .border_1()
+            .border_color(theme::overlay_border())
+            .rounded_md()
+            .p_1()
+            .min_w(px(120.0))
+            // Keep clicks on the menu from reaching the blocks it covers.
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.bullet_menu = None;
+                cx.notify();
+            }))
+            .child(item("Copy").on_click(cx.listener(move |this, _, _, cx| {
+                this.bullet_menu = None;
+                this.copy_block(id, cx);
+                cx.notify();
+            })))
+            .child(
+                item("Cut").on_click(cx.listener(move |this, _, window, cx| {
+                    this.bullet_menu = None;
+                    this.cut_block(id, window, cx);
+                    cx.notify();
+                })),
+            );
+        Some(
+            deferred(
+                anchored()
+                    .position(menu.position)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(list),
+            )
+            // Paint above the rows, and outside the outline's scroll container.
+            .with_priority(1)
+            .into_any_element(),
+        )
     }
 
     /// Restores the page's most recently deleted block and focuses it.
@@ -538,6 +642,7 @@ fn thread_row(
     thread: RowThread,
     fold: Fold,
     on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    on_bullet_menu: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     bv: Entity<BlockView>,
 ) -> gpui::Div {
     #[allow(clippy::cast_precision_loss)]
@@ -595,7 +700,7 @@ fn thread_row(
             .hover(|s| s.opacity(1.).text_color(theme::fg()))
             // Don't let the outline's `track_focus` take focus from a block
             // that is being edited.
-            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            .on_mouse_down(MouseButton::Left, |_, window, _| {
                 window.prevent_default();
             })
             .on_click(on_toggle)
@@ -624,6 +729,9 @@ fn thread_row(
         .children(toggle)
         .child(
             div()
+                .id(("bullet", row_id))
+                .debug_selector(move || format!("bullet-{row_id}"))
+                .on_mouse_down(MouseButton::Right, on_bullet_menu)
                 .w(BULLET_COLUMN_WIDTH)
                 .flex_none()
                 .flex()
@@ -722,7 +830,17 @@ impl Render for OutlineView {
             let bv = self.get_or_create(id, window, cx);
             let on_toggle =
                 cx.listener(move |this, _, window, cx| this.toggle_fold(id, window, cx));
-            root = root.child(thread_row(depth, thread, folds[&id], on_toggle, bv));
+            let on_bullet_menu = cx.listener(move |this, event, window, cx| {
+                this.open_bullet_menu(id, event, window, cx);
+            });
+            root = root.child(thread_row(
+                depth,
+                thread,
+                folds[&id],
+                on_toggle,
+                on_bullet_menu,
+                bv,
+            ));
         }
 
         if self.scope == OutlineScope::Page {
@@ -738,7 +856,9 @@ impl Render for OutlineView {
                     .child(refs.clone()),
             );
         }
-        root
+        // After the rows (and refs), so it doesn't shift `scroll_to_item`
+        // indices.
+        root.children(self.render_bullet_menu(cx))
     }
 }
 
@@ -1536,6 +1656,140 @@ mod tests {
             let outline = page.read(cx).outline();
             assert_eq!(outline.roots[0].text, "a", "alt-up moves it back");
         });
+    }
+
+    /// Right-clicks `id`'s bullet, then clicks `item` in the menu it opens.
+    fn bullet_menu_click(
+        cx: &mut VisualTestContext,
+        ov: &Entity<OutlineView>,
+        id: BlockId,
+        item: &str,
+    ) {
+        let entity = cx.read(|cx| ov.read(cx).block_view(id).expect("row mounted").entity_id());
+        let bullet = cx
+            .debug_bounds(format!("bullet-{entity}").leak())
+            .expect("bullet painted")
+            .center();
+        cx.simulate_mouse_down(bullet, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(bullet, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        let item = cx
+            .debug_bounds(format!("bullet-menu-{item}").leak())
+            .expect("menu open")
+            .center();
+        cx.simulate_click(item, Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("bullet-menu-Copy").is_none(),
+            "choosing an item closes the menu",
+        );
+    }
+
+    fn clipboard(cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+    }
+
+    #[gpui::test]
+    fn bullet_menu_copy_puts_the_subtree_on_the_clipboard(cx: &mut TestAppContext) {
+        let body = "- a\n- b\n  - c\n- d\n";
+        let (page, ov, cx) = mount(cx, body);
+        let b = cx.read(|cx| page.read(cx).outline().roots[1].id);
+
+        bullet_menu_click(cx, &ov, b, "Copy");
+
+        assert_eq!(clipboard(cx).as_deref(), Some("- b\n  - c\n"));
+        cx.read(|cx| {
+            assert_eq!(
+                page.read(cx).outline().serialize(),
+                body,
+                "copy changes nothing"
+            );
+            assert!(!page.read(cx).dirty());
+        });
+    }
+
+    #[gpui::test]
+    fn bullet_menu_cut_copies_then_deletes_undoably(cx: &mut TestAppContext) {
+        let body = "- a\n  - b\n    - c\n- d\n";
+        let (page, ov, cx) = mount(cx, body);
+        let (a, b) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[0].children[0].id)
+        });
+
+        bullet_menu_click(cx, &ov, b, "Cut");
+
+        assert_eq!(clipboard(cx).as_deref(), Some("- b\n  - c\n"));
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- a\n- d\n"));
+        assert_eq!(focused_id(cx, &ov), Some(a), "previous block takes focus");
+
+        cx.simulate_keystrokes(&format!("{}-z", crate::cmd_key()));
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), body));
+    }
+
+    /// Copy a bullet, then paste into an empty block: the same tree comes
+    /// back as blocks, not as one line of markdown.
+    #[gpui::test]
+    fn pasting_a_copied_bullet_recreates_its_children(cx: &mut TestAppContext) {
+        let tree = "- # h1\n  - ## h2\n    - ### h3\n      - #### h4\n";
+        let (page, ov, cx) = mount(cx, &format!("{tree}-\n"));
+        let (h1, empty) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[1].id)
+        });
+
+        bullet_menu_click(cx, &ov, h1, "Copy");
+        focus_block(cx, &ov, empty);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_keystrokes(&format!("{}-v", crate::cmd_key()));
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert_eq!(page.read(cx).outline().serialize(), format!("{tree}{tree}"));
+        });
+        assert_eq!(
+            focused_id(cx, &ov),
+            Some(empty),
+            "the pasted-into block keeps focus"
+        );
+        cx.read(|cx| {
+            let bv = ov.read(cx).block_view(empty).unwrap();
+            assert!(!bv.read(cx).is_editing(), "the paste ends the edit");
+        });
+    }
+
+    #[gpui::test]
+    fn plain_text_still_pastes_into_the_editor(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("bc".into())));
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_keystrokes(&format!("{}-v", crate::cmd_key()));
+        cx.run_until_parked();
+
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- abc\n"));
+    }
+
+    #[gpui::test]
+    fn clicking_outside_the_bullet_menu_closes_it(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        let entity = cx.read(|cx| ov.read(cx).block_view(a).unwrap().entity_id());
+        let bullet = cx
+            .debug_bounds(format!("bullet-{entity}").leak())
+            .unwrap()
+            .center();
+        cx.simulate_mouse_down(bullet, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(bullet, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("bullet-menu-Copy").is_some(), "menu open");
+
+        cx.simulate_click(point(px(1.), px(1.)), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("bullet-menu-Copy").is_none(), "menu closed");
     }
 
     /// Clicks the fold arrow on `id`'s row.
