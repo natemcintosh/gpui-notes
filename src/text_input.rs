@@ -49,8 +49,8 @@ actions!(
 pub enum TextInputEvent {
     Changed(SharedString),
     Submitted,
-    /// `shift-enter`: submit even where the owner would have treated plain
-    /// Enter as "extend what I am editing".
+    /// `shift-enter`. The block editor breaks the line; single-line owners
+    /// treat it like `Submitted`.
     SubmittedNow,
     Cancelled,
 }

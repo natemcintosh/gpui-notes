@@ -1,6 +1,6 @@
 use gpui::{AppContext, Context, Entity, EventEmitter, SharedString};
 
-use crate::outline::{Block, BlockId, Outline};
+use crate::outline::{Block, BlockId, Outline, Removed};
 use crate::outline_view::OutlineView;
 
 #[derive(Debug, Clone)]
@@ -16,6 +16,8 @@ pub struct Page {
     body: SharedString,
     view: Entity<OutlineView>,
     dirty: bool,
+    /// Blocks deleted with `delete_block`, most recent last, for `undo_delete`.
+    deleted: Vec<Removed>,
 }
 
 impl EventEmitter<PageEvent> for Page {}
@@ -38,6 +40,7 @@ impl Page {
             body,
             view,
             dirty: false,
+            deleted: Vec::new(),
         }
     }
 
@@ -134,9 +137,28 @@ impl Page {
         self.apply_outline_edit(cx, |o| o.split_bullet_lines(id))
     }
 
-    /// Deletes the block (and its subtree) from the outline.
+    /// Deletes the block (and its subtree) from the outline, remembering it
+    /// for `undo_delete`.
     pub fn delete_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
-        self.apply_outline_edit(cx, |o| o.delete(id).is_some())
+        let mut removed = None;
+        let changed = self.apply_outline_edit(cx, |o| {
+            removed = o.remove(id);
+            removed.is_some()
+        });
+        self.deleted.extend(removed);
+        changed
+    }
+
+    /// Puts back the most recently deleted block. Returns its id, or `None`
+    /// when there is nothing to undo.
+    pub fn undo_delete(&mut self, cx: &mut Context<Self>) -> Option<BlockId> {
+        let removed = self.deleted.pop()?;
+        let mut restored = None;
+        self.apply_outline_edit(cx, |o| {
+            restored = Some(o.restore(removed));
+            true
+        });
+        restored
     }
 
     /// Collapse state is view-only — it is not serialized into the body —

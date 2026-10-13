@@ -30,7 +30,8 @@ actions!(
         MoveBlockUp,
         MoveBlockDown,
         ToggleCollapse,
-        DeleteBackward
+        DeleteBlock,
+        UndoDelete
     ]
 );
 
@@ -63,6 +64,7 @@ const THREAD_RADIUS: Pixels = px(8.0);
 /// ancestor of the input, so without the guard, keys the input doesn't bind
 /// (up/down/tab…) would leak into outline ops mid-edit.
 const BLOCK_CONTEXT: &str = "BlockView && !editing";
+const EDITING_CONTEXT: &str = "BlockView && editing";
 
 pub fn bind_keys(cx: &mut App) {
     let cmd = crate::cmd_key();
@@ -74,7 +76,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-up", MoveBlockUp, Some(BLOCK_CONTEXT)),
         KeyBinding::new("alt-down", MoveBlockDown, Some(BLOCK_CONTEXT)),
         KeyBinding::new(&format!("{cmd}-enter"), ToggleCollapse, Some(BLOCK_CONTEXT)),
-        KeyBinding::new("backspace", DeleteBackward, Some(BLOCK_CONTEXT)),
+        KeyBinding::new("backspace", DeleteBlock, Some(BLOCK_CONTEXT)),
+        KeyBinding::new("delete", DeleteBlock, Some(BLOCK_CONTEXT)),
+        KeyBinding::new(&format!("{cmd}-z"), UndoDelete, Some(BLOCK_CONTEXT)),
+        // Mid-edit, Tab indents only from the very start of the block (the
+        // handler checks the caret); elsewhere it does nothing.
+        KeyBinding::new("tab", IndentBlock, Some(EDITING_CONTEXT)),
+        KeyBinding::new("shift-tab", OutdentBlock, Some(EDITING_CONTEXT)),
     ]);
 }
 
@@ -335,35 +343,65 @@ impl OutlineView {
         });
     }
 
-    /// Backspace on an empty, childless focused block deletes it and moves
-    /// focus to the previous visible block (or the next one when the first
-    /// block is deleted). Non-empty blocks, blocks with children, and the
-    /// only remaining block are left alone.
-    fn delete_backward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Indent/outdent apply to the focused block, or to the block being
+    /// edited when its caret sits at the very start.
+    fn update_indent_target(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        op: impl FnOnce(&mut Page, BlockId, &mut Context<Page>) -> bool,
+    ) {
+        let target = self.focused_block_id(window, cx).or_else(|| {
+            self.blocks.iter().find_map(|(id, bv)| {
+                let bv = bv.read(cx);
+                (bv.holds_focus(window, cx) && bv.caret_at_start(cx)).then_some(*id)
+            })
+        });
+        let Some(target) = target else {
+            return;
+        };
+        self.page.update(cx, |page, cx| {
+            op(page, target, cx);
+        });
+    }
+
+    /// Deletes the focused block with its subtree and moves focus to the
+    /// previous visible block (or, for the first, the next one after the
+    /// subtree). Does nothing when no block would be left to focus.
+    fn delete_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(current) = self.focused_block_id(window, cx) else {
             return;
         };
-        let (flat, deletable) = {
-            let outline = self.page.read(cx).outline();
-            let deletable = outline.get(current) == Some("")
-                && outline
-                    .path_to(current)
-                    .is_some_and(|path| children_at(&outline.roots, &path).is_empty());
-            (flatten_visible(self.scoped_roots(outline)), deletable)
-        };
-        if !deletable || flat.len() <= 1 {
-            return;
-        }
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
         let Some(idx) = flat.iter().position(|&(_, id)| id == current) else {
             return;
         };
-        let neighbor = if idx > 0 { flat[idx - 1].1 } else { flat[1].1 };
+        let depth = flat[idx].0;
+        let after_subtree = flat[idx + 1..]
+            .iter()
+            .find(|&&(d, _)| d <= depth)
+            .map(|&(_, id)| id);
+        let Some(neighbor) = idx.checked_sub(1).map(|i| flat[i].1).or(after_subtree) else {
+            return;
+        };
         self.page.update(cx, |page, cx| {
             page.delete_block(current, cx);
         });
-        let bv = self.get_or_create(neighbor, window, cx);
-        let handle = bv.focus_handle(cx);
+        let handle = self.get_or_create(neighbor, window, cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    /// Restores the page's most recently deleted block and focuses it.
+    fn undo_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(restored) = self.page.update(cx, Page::undo_delete) else {
+            return;
+        };
+        let handle = self.get_or_create(restored, window, cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        if let Some(idx) = flat.iter().position(|&(_, id)| id == restored) {
+            self.scroll.scroll_to_item(idx);
+        }
     }
 
     #[cfg(test)]
@@ -398,18 +436,6 @@ fn block_slice_at<'a>(roots: &'a [Block], path: &[usize]) -> &'a [Block] {
         blocks = &blocks[i].children;
     }
     &blocks[last..=last]
-}
-
-/// The children of the block at `path` (empty slice semantics: `path` must
-/// be valid, which `Outline::path_to` guarantees for a live id).
-fn children_at<'a>(roots: &'a [Block], path: &[usize]) -> &'a [Block] {
-    let mut blocks = roots;
-    let mut node: Option<&Block> = None;
-    for &i in path {
-        node = Some(&blocks[i]);
-        blocks = &blocks[i].children;
-    }
-    node.map_or(&[], |b| &b.children)
 }
 
 fn flatten_visible(roots: &[Block]) -> Vec<(usize, BlockId)> {
@@ -649,10 +675,10 @@ impl Render for OutlineView {
                 this.move_focus(1, window, cx);
             }))
             .on_action(cx.listener(|this, _: &IndentBlock, window, cx| {
-                this.update_focused_block(window, cx, Page::indent_block);
+                this.update_indent_target(window, cx, Page::indent_block);
             }))
             .on_action(cx.listener(|this, _: &OutdentBlock, window, cx| {
-                this.update_focused_block(window, cx, Page::outdent_block);
+                this.update_indent_target(window, cx, Page::outdent_block);
             }))
             .on_action(cx.listener(|this, _: &MoveBlockUp, window, cx| {
                 this.update_focused_block(window, cx, Page::move_block_up);
@@ -663,8 +689,11 @@ impl Render for OutlineView {
             .on_action(cx.listener(|this, _: &ToggleCollapse, window, cx| {
                 this.update_focused_block(window, cx, Page::toggle_collapse);
             }))
-            .on_action(cx.listener(|this, _: &DeleteBackward, window, cx| {
-                this.delete_backward(window, cx);
+            .on_action(cx.listener(|this, _: &DeleteBlock, window, cx| {
+                this.delete_block(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &UndoDelete, window, cx| {
+                this.undo_delete(window, cx);
             }))
             .flex()
             .flex_col()
@@ -1605,61 +1634,125 @@ mod tests {
     }
 
     #[gpui::test]
-    fn backspace_on_empty_block_deletes_and_focuses_previous(cx: &mut TestAppContext) {
-        let (page, ov, cx) = mount(cx, "- a\n- b\n");
+    fn backspace_removes_the_block_and_focuses_previous(cx: &mut TestAppContext) {
+        delete_key_removes_the_block_and_focuses_previous(cx, "backspace");
+    }
+
+    #[gpui::test]
+    fn delete_removes_the_block_and_focuses_previous(cx: &mut TestAppContext) {
+        delete_key_removes_the_block_and_focuses_previous(cx, "delete");
+    }
+
+    fn delete_key_removes_the_block_and_focuses_previous(cx: &mut TestAppContext, key: &str) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n  - c\n- d\n");
         let (a, b) = cx.read(|cx| {
             let outline = page.read(cx).outline();
             (outline.roots[0].id, outline.roots[1].id)
         });
-        cx.update(|_, cx| page.update(cx, |p, cx| p.set_block_text(b, "", cx)));
 
         focus_block(cx, &ov, b);
-        cx.simulate_keystrokes("backspace");
-        cx.run_until_parked();
-
-        cx.read(|cx| {
-            let outline = page.read(cx).outline();
-            assert_eq!(outline.roots.len(), 1, "empty block deleted");
-            assert_eq!(outline.roots[0].text, "a");
-        });
-        assert_eq!(focused_id(cx, &ov), Some(a), "previous block takes focus");
-    }
-
-    #[gpui::test]
-    fn backspace_on_non_empty_block_does_not_delete(cx: &mut TestAppContext) {
-        let (page, ov, cx) = mount(cx, "- a\n- b\n");
-        let b = cx.read(|cx| page.read(cx).outline().roots[1].id);
-
-        focus_block(cx, &ov, b);
-        cx.simulate_keystrokes("backspace");
+        cx.simulate_keystrokes(key);
         cx.run_until_parked();
 
         cx.read(|cx| {
             assert_eq!(
-                page.read(cx).outline().roots.len(),
-                2,
-                "non-empty block must not be deleted",
+                page.read(cx).outline().serialize(),
+                "- a\n- d\n",
+                "the block and its children are gone",
             );
         });
+        assert_eq!(focused_id(cx, &ov), Some(a), "previous block takes focus");
     }
 
-    /// An empty block that still has children is not deleted — backspace
-    /// must never silently drop a subtree.
+    /// The first block hands focus to the block after its subtree, not to
+    /// its own (also deleted) child.
     #[gpui::test]
-    fn backspace_on_empty_block_with_children_is_noop(cx: &mut TestAppContext) {
-        let (page, ov, cx) = mount(cx, "- a\n- p\n  - c\n");
-        let p = cx.read(|cx| page.read(cx).outline().roots[1].id);
-        cx.update(|_, cx| page.update(cx, |pg, cx| pg.set_block_text(p, "", cx)));
+    fn deleting_the_first_block_focuses_the_next_survivor(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n  - a1\n- b\n");
+        let (a, b) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[1].id)
+        });
 
-        focus_block(cx, &ov, p);
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("delete");
+        cx.run_until_parked();
+
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- b\n"));
+        assert_eq!(focused_id(cx, &ov), Some(b));
+    }
+
+    #[gpui::test]
+    fn deleting_the_only_block_is_noop(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n  - a1\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+
+        focus_block(cx, &ov, a);
         cx.simulate_keystrokes("backspace");
         cx.run_until_parked();
 
-        cx.read(|cx| {
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- a\n  - a1\n"));
+    }
+
+    #[gpui::test]
+    fn undo_restores_deleted_blocks_in_reverse_order(cx: &mut TestAppContext) {
+        let body = "- a\n- b\n  - c\n- d\n";
+        let (page, ov, cx) = mount(cx, body);
+        let (c, d) = cx.read(|cx| {
             let outline = page.read(cx).outline();
-            assert_eq!(outline.roots.len(), 2, "parent block survives");
-            assert_eq!(outline.roots[1].children.len(), 1, "child survives");
+            (outline.roots[1].children[0].id, outline.roots[2].id)
         });
+        let undo = format!("{}-z", crate::cmd_key());
+
+        // Deleting d focuses c, the previous visible block; then c goes too.
+        focus_block(cx, &ov, d);
+        cx.simulate_keystrokes("backspace backspace");
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- a\n- b\n"));
+
+        cx.simulate_keystrokes(&undo);
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- a\n- b\n  - c\n"));
+        assert_eq!(
+            focused_id(cx, &ov),
+            Some(c),
+            "the restored block is focused"
+        );
+
+        cx.simulate_keystrokes(&undo);
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), body));
+        assert_eq!(focused_id(cx, &ov), Some(d));
+
+        // Nothing left to undo.
+        cx.simulate_keystrokes(&undo);
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), body));
+    }
+
+    /// Mid-edit, Tab/Shift-Tab indent and outdent only with the caret at the
+    /// very start, and editing carries on in the moved block.
+    #[gpui::test]
+    fn tab_at_start_of_edit_indents_and_outdents(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n");
+        let b = cx.read(|cx| page.read(cx).outline().roots[1].id);
+
+        focus_block(cx, &ov, b);
+        cx.simulate_keystrokes("enter home tab");
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- a\n  - b\n"));
+
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("left shift-tab");
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- a\n- xb\n"));
+        let bv = cx.read(|cx| ov.read(cx).block_view(b).expect("b mounted").clone());
+        cx.read(|cx| assert!(bv.read(cx).is_editing(), "still editing"));
+
+        // Away from the start, Tab does nothing.
+        cx.simulate_keystrokes("right tab");
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- a\n- xb\n"));
     }
 
     /// The `!editing` guard in `BLOCK_CONTEXT`: while a block's `TextInput` is

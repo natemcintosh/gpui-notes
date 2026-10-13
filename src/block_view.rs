@@ -155,6 +155,13 @@ impl BlockView {
                 if input.focus_handle(cx).is_focused(window))
     }
 
+    /// Whether this block is being edited with a bare caret at offset 0.
+    #[must_use]
+    pub fn caret_at_start(&self, cx: &App) -> bool {
+        matches!(&self.mode, BlockMode::Editing { input, .. }
+            if input.read(cx).selected_range() == (0..0))
+    }
+
     pub(crate) fn begin_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.begin_editing_with_placement(None, window, cx);
     }
@@ -210,21 +217,21 @@ impl BlockView {
                     this.end_editing_inner(cx);
                     window.focus(&this.focus_handle, cx);
                 }
-                // Enter finishes the block, except where the block is a body
-                // rather than a line — then it just breaks the line, and
-                // shift-enter is the way out (#62).
+                // Enter finishes the block, except inside a code fence still
+                // waiting for its closing ``` — there it breaks the line (#62).
                 TextInputEvent::Submitted => {
                     if this.accept_completion(cx) {
                         return;
                     }
-                    if extends_on_enter(input.read(cx).content()) {
+                    if outline::has_open_fence(input.read(cx).content()) {
                         input.update(cx, |input, cx| input.insert_newline(window, cx));
                     } else {
                         this.insert_sibling_below(cx);
                     }
                 }
+                // shift-enter always breaks the line.
                 TextInputEvent::SubmittedNow => {
-                    this.insert_sibling_below(cx);
+                    input.update(cx, |input, cx| input.insert_newline(window, cx));
                 }
                 // Flush every keystroke to the page so all save paths
                 // (ctrl-s, page-switch autosave, quit-save) see the
@@ -471,13 +478,6 @@ impl BlockView {
         });
         cx.notify();
     }
-}
-
-/// Whether Enter should add a line to the block rather than start a new one:
-/// once the block already spans lines, or once it has opened a code fence that
-/// is still waiting for its closing one.
-fn extends_on_enter(text: &str) -> bool {
-    text.contains('\n') || outline::has_open_fence(text)
 }
 
 impl Focusable for BlockView {
@@ -1098,13 +1098,13 @@ mod tests {
     }
 
     #[test]
-    fn extends_on_enter_matches_the_parser_fence_rule() {
-        assert!(extends_on_enter("```calc"));
-        assert!(extends_on_enter("  ```"));
-        assert!(extends_on_enter("two\nlines"));
+    fn enter_extends_only_an_open_fence() {
+        assert!(outline::has_open_fence("```calc"));
+        assert!(outline::has_open_fence("  ```"));
+        assert!(!outline::has_open_fence("two\nlines"));
         // The parser only opens a fence on a line that starts with ``` (#73).
-        assert!(!extends_on_enter("use ``` for fences"));
-        assert!(!extends_on_enter("plain"));
+        assert!(!outline::has_open_fence("use ``` for fences"));
+        assert!(!outline::has_open_fence("plain"));
     }
 
     #[gpui::test]
@@ -1151,7 +1151,7 @@ mod tests {
     fn escape_turns_a_typed_bullet_line_into_a_child(cx: &mut TestAppContext) {
         let (page, bv, cx) = mount(cx, "- a\n  b\n");
         focus_block(cx, &bv);
-        cx.simulate_keystrokes("enter enter");
+        cx.simulate_keystrokes("enter shift-enter");
         cx.simulate_input("- c");
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
@@ -1166,12 +1166,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn shift_enter_splits_typed_bullets_before_adding_the_sibling(cx: &mut TestAppContext) {
+    fn enter_splits_typed_bullets_before_adding_the_sibling(cx: &mut TestAppContext) {
         let (page, bv, cx) = mount(cx, "- a\n  b\n");
         focus_block(cx, &bv);
-        cx.simulate_keystrokes("enter enter");
+        cx.simulate_keystrokes("enter shift-enter");
         cx.simulate_input("- c");
-        cx.simulate_keystrokes("shift-enter");
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
         cx.read(|cx| {
@@ -1183,13 +1183,28 @@ mod tests {
         });
     }
 
-    /// The escape hatch: shift-enter starts a new block even where plain Enter
-    /// would have added a line.
     #[gpui::test]
-    fn shift_enter_inside_a_fence_still_inserts_a_sibling(cx: &mut TestAppContext) {
-        let (page, _bv, cx) = edit_open_fence(cx);
+    fn shift_enter_breaks_the_line(cx: &mut TestAppContext) {
+        let (page, bv, cx) = mount(cx, "- a\n");
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter shift-enter");
+        cx.simulate_input("b");
+        cx.run_until_parked();
 
-        cx.simulate_keystrokes("shift-enter");
+        cx.read(|cx| {
+            assert!(bv.read(cx).is_editing(), "still editing the same block");
+            let outline = page.read(cx).outline();
+            assert_eq!(outline.roots.len(), 1, "no sibling was inserted");
+            assert_eq!(outline.get(bv.read(cx).block_id), Some("a\nb"));
+        });
+    }
+
+    /// Plain Enter in a multi-line block (fences closed) starts a new block.
+    #[gpui::test]
+    fn enter_in_a_multi_line_block_inserts_a_sibling(cx: &mut TestAppContext) {
+        let (page, bv, cx) = mount(cx, "- a\n  b\n");
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter enter");
         cx.run_until_parked();
 
         cx.read(|cx| assert_eq!(page.read(cx).outline().roots.len(), 2));
