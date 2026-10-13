@@ -15,6 +15,10 @@ build:
 run: test-zone
     GPUI_NOTES_ROOT="$HOME/Desktop/logseq-test-zone" cargo run --release
 
+# Run against the real Logseq graph (~/logseq, or a given absolute path) — edits are saved to your actual notes
+real $GPUI_NOTES_ROOT=(home_directory() / "logseq"):
+    cargo run --release
+
 test:
     cargo nextest run --no-fail-fast
 
