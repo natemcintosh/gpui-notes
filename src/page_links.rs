@@ -98,20 +98,30 @@ impl LinkIndex {
     /// written; they are deliberately kept out of `pages`, which drives the
     /// `[[` completion list.
     ///
+    /// A file that fails to read (not UTF-8, no permission) is left out of
+    /// the index and returned with its error instead, so one bad file cannot
+    /// keep the app from starting (#67).
+    ///
     /// # Errors
-    /// Returns the first I/O error from listing or reading pages/journals.
-    pub fn rebuild_from(store: &NotesStore) -> io::Result<Self> {
+    /// Returns an I/O error if the pages or journals directory cannot be listed.
+    pub fn rebuild_from(store: &NotesStore) -> io::Result<(Self, Vec<(NoteSource, io::Error)>)> {
         let mut index = Self::default();
+        let mut skipped = Vec::new();
         for name in store.list()? {
-            let body = store.read(&name)?;
-            let source = NoteSource::Page(SharedString::from(name));
-            index.reindex_outline(&source, &Outline::parse(&body));
+            let source = NoteSource::Page(SharedString::from(name.clone()));
+            match store.read(&name) {
+                Ok(body) => index.reindex_outline(&source, &Outline::parse(&body)),
+                Err(err) => skipped.push((source, err)),
+            }
         }
         for date in store.list_journals()? {
-            let body = store.read_journal(date)?;
-            index.reindex_outline(&NoteSource::Journal(date), &Outline::parse(&body));
+            let source = NoteSource::Journal(date);
+            match store.read_journal(date) {
+                Ok(body) => index.reindex_outline(&source, &Outline::parse(&body)),
+                Err(err) => skipped.push((source, err)),
+            }
         }
-        Ok(index)
+        Ok((index, skipped))
     }
 
     fn reindex_outline(&mut self, source: &NoteSource, outline: &Outline) {
@@ -398,7 +408,7 @@ mod tests {
         store.write("B", "- [[A]] [[C]]\n").unwrap();
         store.write("C", "- [[A]]\n").unwrap();
 
-        let index = LinkIndex::rebuild_from(&store).unwrap();
+        let index = LinkIndex::rebuild_from(&store).unwrap().0;
         assert_eq!(index.backlinks("A").len(), 2);
         assert_eq!(
             index.backlinks("B").iter().collect::<Vec<_>>(),
@@ -413,6 +423,28 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_from_skips_unreadable_files_instead_of_failing() {
+        let tmp = TempDir::new().unwrap();
+        let store = NotesStore::new(tmp.path()).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 7, 23).unwrap();
+        store.write("Good", "- [[Target]]\n").unwrap();
+        store.write("Bad", "").unwrap();
+        store.write_journal(date, "").unwrap();
+        // Not valid UTF-8, so `read_to_string` fails.
+        std::fs::write(tmp.path().join("pages/Bad.md"), [0xff, 0xfe]).unwrap();
+        std::fs::write(tmp.path().join("journals/2026_07_23.md"), [0xff]).unwrap();
+
+        let (index, skipped) = LinkIndex::rebuild_from(&store).unwrap();
+        let skipped: Vec<&NoteSource> = skipped.iter().map(|(source, _)| source).collect();
+        assert_eq!(skipped, [&page("Bad"), &NoteSource::Journal(date)]);
+        assert_eq!(
+            index.backlinks("Target").iter().collect::<Vec<_>>(),
+            [&page("Good")],
+            "readable files must still be indexed",
+        );
+    }
+
+    #[test]
     fn rebuild_from_indexes_journals_without_listing_them_as_pages() {
         let tmp = TempDir::new().unwrap();
         let store = NotesStore::new(tmp.path()).unwrap();
@@ -422,7 +454,7 @@ mod tests {
             .write_journal(date, "- [[NSSP]] issue [[Target]]\n")
             .unwrap();
 
-        let index = LinkIndex::rebuild_from(&store).unwrap();
+        let index = LinkIndex::rebuild_from(&store).unwrap().0;
         assert_eq!(
             index.backlinks("Target").iter().collect::<Vec<_>>(),
             [&NoteSource::Journal(date)],

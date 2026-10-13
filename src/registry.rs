@@ -421,7 +421,7 @@ mod tests {
         cx.update(|cx| {
             let store = NotesStore::new(&root).unwrap();
             store.write("A", "- [[B]]\n").unwrap();
-            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap().0);
             let mut reg = PageRegistry::new(store);
 
             let page_a = reg.open("A", cx).unwrap();
@@ -450,7 +450,7 @@ mod tests {
         cx.update(|cx| {
             let store = NotesStore::new(&root).unwrap();
             store.write_journal(date, "- issue [[Target]]\n").unwrap();
-            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap().0);
             let mut reg = PageRegistry::new(store);
 
             let journal = reg.open_or_create_journal(date, cx).unwrap();

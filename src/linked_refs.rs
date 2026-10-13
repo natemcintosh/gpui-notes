@@ -395,7 +395,7 @@ mod tests {
                 .write_journal(date(OLDER), "- earlier [[Target]]\n")
                 .unwrap();
 
-            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap().0);
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());
@@ -583,7 +583,7 @@ mod tests {
                     .unwrap();
             }
 
-            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap().0);
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());
@@ -649,7 +649,7 @@ mod tests {
         let (ov, vcx) = cx.add_window_view(move |_window, cx| {
             let store = NotesStore::new(&root).unwrap();
             store.write("Target", "- links to [[Target]]\n").unwrap();
-            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap().0);
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());

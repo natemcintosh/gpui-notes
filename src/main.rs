@@ -18,7 +18,7 @@ use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
 use gpui_notes::registry::{pick_next, save_all_on_quit, CurrentPage, PageRegistry};
 use gpui_notes::shortcut_bar::{ShortcutBar, ShortcutOverlay};
 use gpui_notes::shortcut_hints::{self, ShortcutHint};
-use gpui_notes::source::NoteSource;
+use gpui_notes::source::{source_label, NoteSource};
 use gpui_notes::store::NotesStore;
 use gpui_notes::text_input;
 use gpui_notes::theme;
@@ -591,11 +591,21 @@ fn main() {
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
         let store = NotesStore::new(root_dir).expect("init notes store");
-        let link_index = LinkIndex::rebuild_from(&store).expect("index page links");
+        let (link_index, skipped) = LinkIndex::rebuild_from(&store).expect("index page links");
         cx.set_global(link_index);
         cx.set_global(PageRegistry::new(store));
         cx.set_global(CurrentPage::default());
         cx.set_global(LastError::default());
+        if !skipped.is_empty() {
+            let files: Vec<String> = skipped
+                .iter()
+                .map(|(source, err)| format!("{} ({err})", source_label(source)))
+                .collect();
+            errors::report(
+                format!("skipped unreadable notes: {}", files.join(", ")),
+                cx,
+            );
+        }
         cx.set_global(NavHistory::default());
         save_all_on_quit(cx);
         // Deliberately not `navigate_to`: the first page is not a history
@@ -650,7 +660,7 @@ mod tests {
             let store = NotesStore::new(&root_dir).unwrap();
             store.write("Home", "- home\n").unwrap();
             store.write("Tagged", "- has #todo\n").unwrap();
-            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap().0);
             cx.set_global(PageRegistry::new(store));
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());

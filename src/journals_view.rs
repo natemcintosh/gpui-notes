@@ -270,7 +270,7 @@ mod tests {
             let store = NotesStore::new(&root).unwrap();
             store.write_journal(today, &body).unwrap();
             store.write_journal(yesterday, "- short\n").unwrap();
-            cx.set_global(LinkIndex::rebuild_from(&store).unwrap());
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap().0);
             cx.set_global(PageRegistry::new(store));
             let mut current = CurrentPage::default();
             current.show_journals();
