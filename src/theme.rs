@@ -32,12 +32,14 @@ pub fn ui_font_family(cx: &App) -> SharedString {
 /// Returns the first candidate family present in `installed`, falling back to
 /// `.SystemUIFont` when none is (no worse than gpui's default behavior).
 fn pick_ui_font(installed: &[String]) -> SharedString {
-    const CANDIDATES: [&str; 5] = [
+    const CANDIDATES: [&str; 6] = [
         "Adwaita Sans",
         "Cantarell",
         "Noto Sans",
         "Ubuntu",
         "DejaVu Sans",
+        // Windows.
+        "Segoe UI",
     ];
     first_installed(&CANDIDATES, installed).unwrap_or(".SystemUIFont".into())
 }
@@ -62,13 +64,16 @@ pub fn mono_font_family(cx: &App) -> SharedString {
 }
 
 fn pick_mono_font(installed: &[String]) -> SharedString {
-    const CANDIDATES: [&str; 6] = [
+    const CANDIDATES: [&str; 8] = [
         "Adwaita Mono",
         "Noto Sans Mono",
         "DejaVu Sans Mono",
         "Ubuntu Mono",
         "Liberation Mono",
         "Source Code Pro",
+        // Windows.
+        "Cascadia Mono",
+        "Consolas",
     ];
     first_installed(&CANDIDATES, installed).unwrap_or("monospace".into())
 }

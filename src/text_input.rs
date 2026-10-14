@@ -1392,7 +1392,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-right", SelectEnd, Some("TextInput")),
     ]);
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         KeyBinding::new("ctrl-left", WordLeft, Some("TextInput")),
         KeyBinding::new("ctrl-right", WordRight, Some("TextInput")),
@@ -1428,7 +1428,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-end", SelectDocumentEnd, Some("TextInput")),
     ]);
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         KeyBinding::new("ctrl-home", DocumentStart, Some("TextInput")),
         KeyBinding::new("ctrl-end", DocumentEnd, Some("TextInput")),
@@ -2182,9 +2182,9 @@ mod tests {
         });
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(not(target_os = "macos"))]
     #[gpui::test]
-    fn unix_native_word_and_endpoint_bindings(cx: &mut TestAppContext) {
+    fn non_mac_word_and_endpoint_bindings(cx: &mut TestAppContext) {
         let (input, cx) = mount_input(cx, "alpha beta");
 
         cx.simulate_keystrokes("ctrl-left ctrl-shift-left");

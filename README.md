@@ -37,6 +37,10 @@ xcodebuild -downloadComponent MetalToolchain
 
 Verify with `xcrun metal --version` — you should see `Apple metal version ...`. If you instead see `unable to find utility "metal"` or `missing Metal Toolchain`, one of the steps above hasn't completed.
 
+## Windows setup
+
+Build natively with the MSVC Rust toolchain (`stable-x86_64-pc-windows-msvc`). You need the Visual Studio Build Tools ("Desktop development with C++") and a Windows 10/11 SDK: `gpui_windows` compiles its HLSL shaders with the SDK's `fxc.exe` at build time (override its location with `GPUI_FXC_PATH`). WSL is not recommended: WSLg has no hardware Vulkan driver, so GPUI falls back to slower rendering paths.
+
 ## GPUI dependency
 
 GPUI is not published to crates.io. We depend on it (and `gpui_platform`) directly from the [`zed-industries/zed`](https://github.com/zed-industries/zed) repository. Because that repo is Zed's active development trunk, its API changes without warning — the scaffold emitted by `create-gpui-app` has already drifted from HEAD at least once (e.g. `Application::new()` was removed in favor of `gpui_platform::application()`).
@@ -45,6 +49,6 @@ To keep builds reproducible, we **pin both crates to a specific `rev`** in `Carg
 
 - Never depend on the floating `main` branch. Always use `rev = "..."`.
 - Both `gpui` and `gpui_platform` must share the same `rev`, or Cargo will pull two copies of the Zed workspace.
-- `gpui_platform` is declared per-target so each OS gets the right backend features: `runtime_shaders` + `font-kit` on macOS, `wayland` on Linux/FreeBSD. The `font-kit` feature is **required on macOS** — without it `gpui_macos` falls back to a `NoopTextSystem` and text shapes but never paints (cursor still renders, so it looks like a styling bug).
+- `gpui_platform` is declared per-target so each OS gets the right backend features: `runtime_shaders` + `font-kit` on macOS, `wayland` on Linux/FreeBSD, none on Windows. The `font-kit` feature is **required on macOS** — without it `gpui_macos` falls back to a `NoopTextSystem` and text shapes but never paints (cursor still renders, so it looks like a styling bug).
 - To bump: pick a new commit from `zed-industries/zed`, update both `rev` values, run `cargo update -p gpui -p gpui_platform`, then `cargo check`. Expect to fix API breakage; check the relevant example in `zed/crates/gpui/examples/` for the current idiomatic usage.
 - Commit the resulting `Cargo.lock` change alongside the `Cargo.toml` bump.
