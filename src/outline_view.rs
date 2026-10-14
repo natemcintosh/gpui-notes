@@ -279,6 +279,13 @@ impl OutlineView {
             return;
         };
         let target = flat[target_index].1;
+        // Close the source editor here rather than leaving it to its blur
+        // listener: gpui runs blur listeners after drawing, where `notify`
+        // does not schedule a redraw, so the source would stay on screen as
+        // an editor until the next input event.
+        if let Some(source_bv) = self.blocks.get(&source) {
+            source_bv.update(cx, BlockView::end_editing_inner);
+        }
         let placement =
             PendingVerticalPlacement::for_navigation(request.direction, request.preferred_screen_x);
         let target_bv = self.get_or_create(target, window, cx);
@@ -1570,6 +1577,37 @@ mod tests {
         // that follows must already thread to b, not wait for another frame.
         cx.simulate_keystrokes("up");
         assert_eq!(cx.read(|cx| ov.read(cx).rendered_active), Some(b));
+    }
+
+    #[gpui::test]
+    fn vertical_edit_move_closes_the_source_editor_on_the_same_frame(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n");
+        let (a, b) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[1].id)
+        });
+
+        focus_block(cx, &ov, b);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // The source's blur listener runs in gpui's post-draw focus phase,
+        // where `notify` does not schedule a redraw, so b stayed on screen as
+        // an editor until the next keystroke. The move itself must close it,
+        // before any frame — hence asserting inside the same update, which a
+        // simulated keystroke (it draws, running the blur listener) cannot.
+        cx.update(|window, cx| {
+            ov.update(cx, |ov, cx| {
+                let request = crate::block_view::AdjacentEditRequest {
+                    direction: VerticalDirection::Up,
+                    preferred_screen_x: px(0.),
+                };
+                ov.move_edit_to_adjacent(b, request, window, cx);
+                let view = |id| ov.block_view(id).expect("mounted").read(cx);
+                assert!(view(a).is_editing(), "destination enters edit mode");
+                assert!(!view(b).is_editing(), "source leaves edit mode at once");
+            });
+        });
     }
 
     #[gpui::test]
