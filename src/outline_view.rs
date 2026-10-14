@@ -75,8 +75,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", FocusDown, Some(BLOCK_CONTEXT)),
         KeyBinding::new("tab", IndentBlock, Some(BLOCK_CONTEXT)),
         KeyBinding::new("shift-tab", OutdentBlock, Some(BLOCK_CONTEXT)),
-        KeyBinding::new("alt-up", MoveBlockUp, Some(BLOCK_CONTEXT)),
-        KeyBinding::new("alt-down", MoveBlockDown, Some(BLOCK_CONTEXT)),
+        KeyBinding::new(&format!("{cmd}-shift-up"), MoveBlockUp, Some(BLOCK_CONTEXT)),
+        KeyBinding::new(
+            &format!("{cmd}-shift-down"),
+            MoveBlockDown,
+            Some(BLOCK_CONTEXT),
+        ),
         KeyBinding::new(&format!("{cmd}-enter"), ToggleCollapse, Some(BLOCK_CONTEXT)),
         KeyBinding::new("backspace", DeleteBlock, Some(BLOCK_CONTEXT)),
         KeyBinding::new("delete", DeleteBlock, Some(BLOCK_CONTEXT)),
@@ -1664,12 +1668,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn alt_up_down_move_block_among_siblings(cx: &mut TestAppContext) {
+    fn cmd_shift_up_down_move_block_among_siblings(cx: &mut TestAppContext) {
         let (page, ov, cx) = mount(cx, "- a\n- b\n");
         let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
 
         focus_block(cx, &ov, a);
-        cx.simulate_keystrokes("alt-down");
+        cx.simulate_keystrokes(&format!("{}-shift-down", crate::cmd_key()));
         cx.run_until_parked();
 
         cx.read(|cx| {
@@ -1678,12 +1682,12 @@ mod tests {
             assert_eq!(outline.roots[1].text, "a");
         });
 
-        cx.simulate_keystrokes("alt-up");
+        cx.simulate_keystrokes(&format!("{}-shift-up", crate::cmd_key()));
         cx.run_until_parked();
 
         cx.read(|cx| {
             let outline = page.read(cx).outline();
-            assert_eq!(outline.roots[0].text, "a", "alt-up moves it back");
+            assert_eq!(outline.roots[0].text, "a", "cmd-shift-up moves it back");
         });
     }
 
@@ -2046,7 +2050,7 @@ mod tests {
         assert_eq!(serialized(cx), "- a\n  - bxy\n");
 
         // A new edit drops what was left to redo.
-        cx.simulate_keystrokes(&format!("{cmd}-z alt-up {cmd}-shift-z"));
+        cx.simulate_keystrokes(&format!("{cmd}-z {cmd}-shift-up {cmd}-shift-z"));
         cx.run_until_parked();
         assert_eq!(serialized(cx), "- bxy\n- a\n");
     }
