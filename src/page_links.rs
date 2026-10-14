@@ -78,15 +78,23 @@ impl LinkIndex {
         self.pages.contains(name)
     }
 
-    /// Every page name the index knows about, sorted case-insensitively.
+    /// Every page name the index knows about — pages on disk plus link
+    /// targets that are not journal titles — sorted case-insensitively.
     /// Backs the `[[` completion popup, which needs the list on every
     /// keystroke and so cannot afford to re-read the notes directory.
     #[must_use]
     pub fn page_names(&self) -> Vec<SharedString> {
+        let linked = self
+            .link_targets()
+            .filter(|target| journal::parse_journal_name(target).is_none());
         let mut names: Vec<SharedString> = self
             .pages
             .iter()
-            .map(|name| SharedString::from(name.clone()))
+            .map(String::as_str)
+            .chain(linked)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .map(|name| SharedString::from(name.to_string()))
             .collect();
         names.sort_by_key(|name| name.to_lowercase());
         names
@@ -462,7 +470,7 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 7, 23).unwrap();
         store.write("Target", "- the page itself\n").unwrap();
         store
-            .write_journal(date, "- [[NSSP]] issue [[Target]]\n")
+            .write_journal(date, "- [[NSSP]] issue [[Target]] on [[2026-07-01]]\n")
             .unwrap();
 
         let index = LinkIndex::rebuild_from(&store).unwrap().0;
@@ -471,12 +479,16 @@ mod tests {
             [&NoteSource::Journal(date)],
             "a journal that links a page must be a backlink source",
         );
-        assert_eq!(index.targets(&NoteSource::Journal(date)).len(), 2);
+        assert_eq!(index.targets(&NoteSource::Journal(date)).len(), 3);
 
         // Journals must not leak into the page set: it drives the `[[`
-        // completion list.
+        // completion list. A page that is only ever linked (no file, like
+        // `NSSP`) is offered, as Logseq does; a journal title is not.
         assert!(!index.page_exists("2026-07-23"));
-        assert_eq!(index.page_names(), vec![SharedString::from("Target")]);
+        assert_eq!(
+            index.page_names(),
+            vec![SharedString::from("NSSP"), SharedString::from("Target")],
+        );
     }
 
     #[test]
