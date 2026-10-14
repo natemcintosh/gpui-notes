@@ -186,14 +186,6 @@ fn children_mut<'a>(roots: &'a mut Vec<Block>, path: &[usize]) -> &'a mut Vec<Bl
     v
 }
 
-/// A block taken out of an outline by `Outline::remove`, with where it was.
-#[derive(Clone, Debug)]
-pub struct Removed {
-    parent: Option<BlockId>,
-    index: usize,
-    block: Block,
-}
-
 impl Outline {
     /// Every line of `input` lands somewhere — a save rewrites the whole
     /// file from the outline, so a dropped line is deleted from disk. Page
@@ -429,51 +421,19 @@ impl Outline {
         Some(new_id)
     }
 
+    pub fn insert_before(&mut self, id: BlockId, text: impl Into<String>) -> Option<BlockId> {
+        let path = self.path_to(id)?;
+        let (&last, parent_path) = path.split_last()?;
+        let block = Block::new(text);
+        let new_id = block.id;
+        let siblings = children_mut(&mut self.roots, parent_path);
+        siblings.insert(last, block);
+        Some(new_id)
+    }
+
     pub fn delete(&mut self, id: BlockId) -> Option<Block> {
         let path = self.path_to(id)?;
         Some(self.take(&path))
-    }
-
-    /// Like `delete`, but remembers where the block sat so `restore` can put
-    /// it back.
-    pub fn remove(&mut self, id: BlockId) -> Option<Removed> {
-        let path = self.path_to(id)?;
-        let (&index, parent_path) = path.split_last()?;
-        let parent = parent_path.split_last().map(|(&i, grandparent_path)| {
-            let mut blocks = &self.roots;
-            for &g in grandparent_path {
-                blocks = &blocks[g].children;
-            }
-            blocks[i].id
-        });
-        let block = self.take(&path);
-        Some(Removed {
-            parent,
-            index,
-            block,
-        })
-    }
-
-    /// Puts a `remove`d block back. Edits made since may have moved things:
-    /// the index is clamped, and a parent that is gone sends the block to the
-    /// end of the roots. Returns the restored block's id.
-    pub fn restore(&mut self, removed: Removed) -> BlockId {
-        let Removed {
-            parent,
-            index,
-            block,
-        } = removed;
-        let id = block.id;
-        // `children_mut` of the parent's path is the parent's children; the
-        // empty path is the roots.
-        match parent.map_or(Some(Vec::new()), |p| self.path_to(p)) {
-            Some(path) => {
-                let siblings = children_mut(&mut self.roots, &path);
-                siblings.insert(index.min(siblings.len()), block);
-            }
-            None => self.roots.push(block),
-        }
-        id
     }
 
     #[must_use]
@@ -967,6 +927,15 @@ mod tests {
     }
 
     #[test]
+    fn insert_before_creates_sibling_above() {
+        let mut o = Outline::parse("- a\n- c\n  - d\n");
+        let c = by_text(&o, "c");
+        let new_id = o.insert_before(c, "b").unwrap();
+        assert_eq!(o.serialize(), "- a\n- b\n- c\n  - d\n");
+        assert_eq!(o.path_to(new_id), Some(vec![1]));
+    }
+
+    #[test]
     fn delete_removes_subtree_and_returns_it() {
         let mut o = Outline::parse("- a\n  - b\n- c\n");
         let a = by_text(&o, "a");
@@ -974,30 +943,6 @@ mod tests {
         assert_eq!(removed.text, "a");
         assert_eq!(removed.children.len(), 1);
         assert_eq!(o.serialize(), "- c\n");
-    }
-
-    #[rstest::rstest]
-    #[case::root("a")]
-    #[case::nested("b")]
-    #[case::middle_child("c")]
-    #[case::last_root("e")]
-    fn restore_puts_a_removed_block_back(#[case] text: &str) {
-        let body = "- a\n  - b\n  - c\n  - d\n- e\n";
-        let mut o = Outline::parse(body);
-        let id = by_text(&o, text);
-        let removed = o.remove(id).unwrap();
-        assert_ne!(o.serialize(), body);
-        assert_eq!(o.restore(removed), id);
-        assert_eq!(o.serialize(), body);
-    }
-
-    #[test]
-    fn restore_without_its_parent_lands_at_the_end() {
-        let mut o = Outline::parse("- a\n  - b\n- c\n");
-        let removed = o.remove(by_text(&o, "b")).unwrap();
-        o.delete(by_text(&o, "a"));
-        o.restore(removed);
-        assert_eq!(o.serialize(), "- c\n- b\n");
     }
 
     #[test]

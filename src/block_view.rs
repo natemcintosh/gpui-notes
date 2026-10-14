@@ -49,8 +49,8 @@ pub(crate) struct AdjacentEditRequest {
 /// Events emitted by `BlockView` to its parent (typically `OutlineView`).
 #[derive(Debug, Clone)]
 pub(crate) enum BlockViewEvent {
-    /// The user finished a block with Enter and a new sibling was inserted
-    /// after `self.block_id`. The parent should mount the view for the newly
+    /// The user pressed Enter and a new sibling was inserted after (or, with
+    /// the caret at the start, before) `self.block_id`. The parent should mount the view for the newly
     /// created block and put it into editing.
     FocusRequested(BlockId),
     /// Vertical caret movement passed the first or last visual row. The
@@ -199,6 +199,8 @@ impl BlockView {
             }
             input
         });
+        // Each edit session starts its own undo step.
+        self.page.update(cx, |p, _| p.end_typing_group());
         let input_focus = input.focus_handle(cx);
         let on_blur = cx.on_blur(&input_focus, window, |this, window, cx| {
             this.end_editing(window, cx);
@@ -224,10 +226,18 @@ impl BlockView {
                     if this.accept_completion(cx) {
                         return;
                     }
-                    if outline::has_open_fence(input.read(cx).content()) {
+                    let (content, selection) = {
+                        let input = input.read(cx);
+                        (input.content().clone(), input.selected_range())
+                    };
+                    // Enter in front of the text opens a new block above,
+                    // pushing this one down.
+                    if selection == (0..0) && !content.is_empty() {
+                        this.insert_sibling(cx, |p, id, cx| p.insert_block_before(id, "", cx));
+                    } else if outline::has_open_fence(&content) {
                         input.update(cx, |input, cx| input.insert_newline(window, cx));
                     } else {
-                        this.insert_sibling_below(cx);
+                        this.insert_sibling(cx, |p, id, cx| p.insert_block_after(id, "", cx));
                     }
                 }
                 // shift-enter always breaks the line.
@@ -446,11 +456,16 @@ impl BlockView {
         }
     }
 
-    /// Flush the in-progress edit, insert an empty sibling immediately after
-    /// this block, and ask the parent view to focus the new block. The new
-    /// block's text starts empty regardless of where the caret was — splitting
-    /// at the caret is a follow-up (see issue #31).
-    fn insert_sibling_below(&mut self, cx: &mut Context<Self>) {
+    /// Flush the in-progress edit, insert an empty sibling next to this block
+    /// with `insert` (`Page::insert_block_after` or `insert_block_before`),
+    /// and ask the parent view to focus the new block. The new block's text
+    /// starts empty regardless of where the caret was — splitting at the
+    /// caret is a follow-up (see issue #31).
+    fn insert_sibling(
+        &mut self,
+        cx: &mut Context<Self>,
+        insert: impl FnOnce(&mut Page, BlockId, &mut Context<Page>) -> Option<BlockId>,
+    ) {
         let Some(input) = self.take_input_on_exit() else {
             return;
         };
@@ -459,7 +474,7 @@ impl BlockView {
         let new_id = self.page.update(cx, |p, cx| {
             p.set_block_text(block_id, text, cx);
             p.split_bullet_lines(block_id, cx);
-            p.insert_block_after(block_id, "", cx)
+            insert(p, block_id, cx)
         });
         cx.notify();
         if let Some(new_id) = new_id {
@@ -486,7 +501,7 @@ impl BlockView {
         window.focus(&self.focus_handle, cx);
     }
 
-    fn end_editing_inner(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn end_editing_inner(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.take_input_on_exit() else {
             return;
         };

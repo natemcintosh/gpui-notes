@@ -1,6 +1,6 @@
 use gpui::{AppContext, Context, Entity, EventEmitter, SharedString};
 
-use crate::outline::{Block, BlockId, Outline, Removed};
+use crate::outline::{Block, BlockId, Outline};
 use crate::outline_view::OutlineView;
 
 #[derive(Debug, Clone)]
@@ -16,8 +16,23 @@ pub struct Page {
     body: SharedString,
     view: Entity<OutlineView>,
     dirty: bool,
-    /// Blocks deleted with `delete_block`, most recent last, for `undo_delete`.
-    deleted: Vec<Removed>,
+    /// Outlines to go back to, most recent last. Every edit pushes the
+    /// outline as it was before, so undo covers text, structure and deletes
+    /// alike.
+    undo: Vec<Snapshot>,
+    /// Outlines undone since the last edit, most recent last.
+    redo: Vec<Snapshot>,
+    /// The block whose keystrokes are being folded into the top `undo`
+    /// snapshot, so one stretch of typing undoes as a single step. Any other
+    /// edit, an undo/redo, or `end_typing_group` ends the stretch.
+    typing: Option<BlockId>,
+}
+
+/// A whole outline saved for undo/redo, with the block to focus once it is
+/// back on screen.
+struct Snapshot {
+    outline: Outline,
+    focus: BlockId,
 }
 
 impl EventEmitter<PageEvent> for Page {}
@@ -40,7 +55,9 @@ impl Page {
             body,
             view,
             dirty: false,
-            deleted: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            typing: None,
         }
     }
 
@@ -76,15 +93,20 @@ impl Page {
         if self.outline.get(id) == Some(text.as_str()) {
             return;
         }
+        let before = (self.typing != Some(id)).then(|| self.outline.clone());
         if !self.outline.set_text(id, text) {
             return;
+        }
+        if let Some(before) = before {
+            self.push_undo(before, id);
+            self.typing = Some(id);
         }
         self.body = self.outline.serialize().into();
         self.dirty = true;
         cx.notify();
     }
 
-    /// Insert an empty sibling block immediately after `id`. Returns the new
+    /// Insert a sibling block immediately after `id`. Returns the new
     /// block's id, or `None` if `id` is not in the outline.
     pub fn insert_block_after(
         &mut self,
@@ -92,49 +114,82 @@ impl Page {
         text: impl Into<String>,
         cx: &mut Context<Self>,
     ) -> Option<BlockId> {
-        let new_id = self.outline.insert_after(id, text)?;
-        self.body = self.outline.serialize().into();
-        self.dirty = true;
-        cx.notify();
-        Some(new_id)
+        let mut new_id = None;
+        self.apply_outline_edit(id, cx, |o| {
+            new_id = o.insert_after(id, text);
+            new_id.is_some()
+        });
+        new_id
     }
 
-    /// Applies a structural outline edit. If `op` reports a change, the body
-    /// is reserialized, the page marked dirty, and observers notified.
-    /// Returns whether anything changed.
+    /// Insert a sibling block immediately before `id`. Returns the new
+    /// block's id, or `None` if `id` is not in the outline.
+    pub fn insert_block_before(
+        &mut self,
+        id: BlockId,
+        text: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<BlockId> {
+        let mut new_id = None;
+        self.apply_outline_edit(id, cx, |o| {
+            new_id = o.insert_before(id, text);
+            new_id.is_some()
+        });
+        new_id
+    }
+
+    /// Applies a structural outline edit. If `op` reports a change, the
+    /// outline as it was is pushed for undo (focusing `focus` when it comes
+    /// back), the body is reserialized, the page marked dirty, and observers
+    /// notified. Returns whether anything changed.
     fn apply_outline_edit(
         &mut self,
+        focus: BlockId,
         cx: &mut Context<Self>,
         op: impl FnOnce(&mut Outline) -> bool,
     ) -> bool {
+        let before = self.outline.clone();
         if !op(&mut self.outline) {
             return false;
         }
+        self.push_undo(before, focus);
+        self.typing = None;
         self.body = self.outline.serialize().into();
         self.dirty = true;
         cx.notify();
         true
     }
 
+    fn push_undo(&mut self, outline: Outline, focus: BlockId) {
+        self.undo.push(Snapshot { outline, focus });
+        self.redo.clear();
+    }
+
+    /// Ends the current stretch of typing, so the next keystroke starts a
+    /// new undo step. Called whenever a block enters editing.
+    pub fn end_typing_group(&mut self) {
+        self.typing = None;
+    }
+
     pub fn indent_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
-        self.apply_outline_edit(cx, |o| o.indent(id))
+        self.apply_outline_edit(id, cx, |o| o.indent(id))
     }
 
     pub fn outdent_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
-        self.apply_outline_edit(cx, |o| o.outdent(id))
+        self.apply_outline_edit(id, cx, |o| o.outdent(id))
     }
 
     pub fn move_block_up(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
-        self.apply_outline_edit(cx, |o| o.move_up(id))
+        self.apply_outline_edit(id, cx, |o| o.move_up(id))
     }
 
     pub fn move_block_down(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
-        self.apply_outline_edit(cx, |o| o.move_down(id))
+        self.apply_outline_edit(id, cx, |o| o.move_down(id))
     }
 
     /// Called when an edit of `id` ends; see `Outline::split_bullet_lines`.
     pub fn split_bullet_lines(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
-        self.apply_outline_edit(cx, |o| o.split_bullet_lines(id))
+        self.apply_outline_edit(id, cx, |o| o.split_bullet_lines(id))
     }
 
     /// See `Outline::paste_blocks`.
@@ -144,31 +199,47 @@ impl Page {
         pasted: Vec<Block>,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.apply_outline_edit(cx, |o| o.paste_blocks(id, pasted))
+        self.apply_outline_edit(id, cx, |o| o.paste_blocks(id, pasted))
     }
 
-    /// Deletes the block (and its subtree) from the outline, remembering it
-    /// for `undo_delete`.
+    /// Deletes the block (and its subtree) from the outline.
     pub fn delete_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
-        let mut removed = None;
-        let changed = self.apply_outline_edit(cx, |o| {
-            removed = o.remove(id);
-            removed.is_some()
-        });
-        self.deleted.extend(removed);
-        changed
+        self.apply_outline_edit(id, cx, |o| o.delete(id).is_some())
     }
 
-    /// Puts back the most recently deleted block. Returns its id, or `None`
-    /// when there is nothing to undo.
-    pub fn undo_delete(&mut self, cx: &mut Context<Self>) -> Option<BlockId> {
-        let removed = self.deleted.pop()?;
-        let mut restored = None;
-        self.apply_outline_edit(cx, |o| {
-            restored = Some(o.restore(removed));
-            true
+    /// Steps back to the outline before the most recent edit. Returns the
+    /// block that edit touched, for the view to focus, or `None` when there
+    /// is nothing to undo.
+    pub fn undo(&mut self, cx: &mut Context<Self>) -> Option<BlockId> {
+        let snapshot = self.undo.pop()?;
+        let focus = snapshot.focus;
+        let current = std::mem::replace(&mut self.outline, snapshot.outline);
+        self.redo.push(Snapshot {
+            outline: current,
+            focus,
         });
-        restored
+        self.history_stepped(cx);
+        Some(focus)
+    }
+
+    /// Re-applies the most recently undone edit; see `undo`.
+    pub fn redo(&mut self, cx: &mut Context<Self>) -> Option<BlockId> {
+        let snapshot = self.redo.pop()?;
+        let focus = snapshot.focus;
+        let current = std::mem::replace(&mut self.outline, snapshot.outline);
+        self.undo.push(Snapshot {
+            outline: current,
+            focus,
+        });
+        self.history_stepped(cx);
+        Some(focus)
+    }
+
+    fn history_stepped(&mut self, cx: &mut Context<Self>) {
+        self.typing = None;
+        self.body = self.outline.serialize().into();
+        self.dirty = true;
+        cx.notify();
     }
 
     /// Collapse state is view-only — it is not serialized into the body —

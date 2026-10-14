@@ -46,6 +46,8 @@ actions!(
         Submit,
         SubmitNow,
         Cancel,
+        Bold,
+        Italic,
     ]
 );
 
@@ -335,6 +337,10 @@ pub struct TextInput {
     last_layout: Option<CachedLayout>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Markdown conveniences for the block editor: typing a bracket, quote,
+    /// `*` or `~` over a selection wraps it (see `surround_pair`), and
+    /// `Bold`/`Italic` wrap it in `**`/`*`.
+    markdown: bool,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -357,7 +363,9 @@ impl TextInput {
         placeholder: impl Into<SharedString>,
         content: impl Into<SharedString>,
     ) -> Self {
-        Self::with_layout(cx, placeholder, content, LayoutMode::SoftWrapped)
+        let mut input = Self::with_layout(cx, placeholder, content, LayoutMode::SoftWrapped);
+        input.markdown = true;
+        input
     }
 
     fn with_layout(
@@ -381,6 +389,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            markdown: false,
         }
     }
 
@@ -547,6 +556,29 @@ impl TextInput {
             ));
             self.replace_text_in_range(None, "", window, cx);
         }
+    }
+
+    fn bold(&mut self, _: &Bold, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_emphasis(Emphasis::Bold, cx);
+    }
+
+    fn italic(&mut self, _: &Italic, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_emphasis(Emphasis::Italic, cx);
+    }
+
+    fn toggle_emphasis(&mut self, emphasis: Emphasis, cx: &mut Context<Self>) {
+        let (content, selection) =
+            apply_toggle_emphasis(&self.content, self.selection.range(), emphasis);
+        self.apply_edit(content, selection, cx);
+    }
+
+    /// Wraps the selection in `open`/`close`, keeping the original text
+    /// selected so a second wrap nests (`*` twice makes `**bold**`). With no
+    /// selection the caret lands between the pair.
+    fn surround_selection(&mut self, open: &str, close: &str, cx: &mut Context<Self>) {
+        let (content, selection) =
+            apply_surround(&self.content, self.selection.range(), open, close);
+        self.apply_edit(content, selection, cx);
     }
 
     #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
@@ -746,8 +778,10 @@ impl TextInput {
         new_selection: Range<usize>,
         cx: &mut Context<Self>,
     ) {
-        debug_assert!(new_selection.is_empty());
-        self.selection = Selection::collapsed(new_selection.end);
+        self.selection = Selection {
+            anchor: new_selection.start,
+            head: new_selection.end,
+        };
         self.caret_affinity = CaretAffinity::Upstream;
         self.preferred_screen_x = None;
         self.pending_vertical_placement = None;
@@ -831,6 +865,18 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A typed character arrives with no explicit range and no IME
+        // composition in progress.
+        if self.markdown
+            && range_utf16.is_none()
+            && self.marked_range.is_none()
+            && !self.selection.is_empty()
+        {
+            if let Some((open, close)) = surround_pair(new_text) {
+                self.surround_selection(open, close, cx);
+                return;
+            }
+        }
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -1225,6 +1271,10 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::submit_now))
             .on_action(cx.listener(Self::cancel))
+            .when(self.markdown, |el| {
+                el.on_action(cx.listener(Self::bold))
+                    .on_action(cx.listener(Self::italic))
+            })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1398,6 +1448,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(&format!("{cmd}-c"), Copy, Some("TextInput")),
         KeyBinding::new(&format!("{cmd}-v"), Paste, Some("TextInput")),
         KeyBinding::new(&format!("{cmd}-x"), Cut, Some("TextInput")),
+        KeyBinding::new(&format!("{cmd}-b"), Bold, Some("TextInput")),
+        KeyBinding::new(&format!("{cmd}-i"), Italic, Some("TextInput")),
     ]);
 }
 
@@ -1489,6 +1541,108 @@ fn apply_replace(content: &str, range: Range<usize>, new_text: &str) -> (String,
     );
     let end = range.start + new_text.len();
     (new_content, end..end)
+}
+
+/// The closing half for a character that wraps a selection when typed over
+/// it, or `None` for one that replaces the selection as usual.
+fn surround_pair(typed: &str) -> Option<(&'static str, &'static str)> {
+    Some(match typed {
+        "(" => ("(", ")"),
+        "[" => ("[", "]"),
+        "{" => ("{", "}"),
+        "`" => ("`", "`"),
+        "'" => ("'", "'"),
+        "\"" => ("\"", "\""),
+        "*" => ("*", "*"),
+        "~" => ("~", "~"),
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Emphasis {
+    Bold,
+    Italic,
+}
+
+impl Emphasis {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Bold => "**",
+            Self::Italic => "*",
+        }
+    }
+
+    /// Whether runs of `l` and `r` asterisks on either side of some text
+    /// apply this emphasis. Bold and italic share the `*` character, so
+    /// italic needs an odd run: `**x**` is bold only, `***x***` is both.
+    fn applied(self, l: usize, r: usize) -> bool {
+        match self {
+            Self::Bold => l >= 2 && r >= 2,
+            Self::Italic => l % 2 == 1 && r % 2 == 1,
+        }
+    }
+}
+
+/// Removes `emphasis` from the selection when its markers sit just outside
+/// it (`**|hi|**`) or are its own first and last characters (`|**hi**|`);
+/// otherwise wraps the selection like `apply_surround`. Either way the
+/// returned selection covers the same text without markers.
+fn apply_toggle_emphasis(
+    content: &str,
+    selection: Range<usize>,
+    emphasis: Emphasis,
+) -> (String, Range<usize>) {
+    let marker = emphasis.marker();
+    let width = marker.len();
+    let leading_stars = |text: &str| text.len() - text.trim_start_matches('*').len();
+    let trailing_stars = |text: &str| text.len() - text.trim_end_matches('*').len();
+
+    let before = trailing_stars(&content[..selection.start]);
+    let after = leading_stars(&content[selection.end..]);
+    if emphasis.applied(before, after) {
+        let new_content = format!(
+            "{}{}{}",
+            &content[..selection.start - width],
+            &content[selection.clone()],
+            &content[selection.end + width..]
+        );
+        let start = selection.start - width;
+        return (new_content, start..start + selection.len());
+    }
+
+    let selected = &content[selection.clone()];
+    if selected.len() >= 2 * width
+        && emphasis.applied(leading_stars(selected), trailing_stars(selected))
+    {
+        let inner = &selected[width..selected.len() - width];
+        let new_content = format!(
+            "{}{inner}{}",
+            &content[..selection.start],
+            &content[selection.end..]
+        );
+        return (new_content, selection.start..selection.start + inner.len());
+    }
+
+    apply_surround(content, selection, marker, marker)
+}
+
+/// Wraps `selection` in `open`/`close`; the returned selection covers the
+/// same text, now between the pair.
+fn apply_surround(
+    content: &str,
+    selection: Range<usize>,
+    open: &str,
+    close: &str,
+) -> (String, Range<usize>) {
+    let new_content = format!(
+        "{}{open}{}{close}{}",
+        &content[..selection.start],
+        &content[selection.clone()],
+        &content[selection.end..]
+    );
+    let start = selection.start + open.len();
+    (new_content, start..start + selection.len())
 }
 
 fn apply_backspace(content: &str, selection: Range<usize>) -> (String, Range<usize>) {
@@ -1720,6 +1874,145 @@ mod tests {
         });
         vcx.run_until_parked();
         (input, vcx)
+    }
+
+    #[rstest]
+    #[case::wraps_selection("a hi b", 2..4, "(", ")", "a (hi) b", 3..5)]
+    #[case::double_marker("hi", 0..2, "**", "**", "**hi**", 2..4)]
+    #[case::empty_selection_lands_between("ab", 1..1, "**", "**", "a****b", 3..3)]
+    #[case::multibyte("🦀", 0..4, "~", "~", "~🦀~", 1..5)]
+    fn surround_cases(
+        #[case] content: &str,
+        #[case] selection: Range<usize>,
+        #[case] open: &str,
+        #[case] close: &str,
+        #[case] expected_content: &str,
+        #[case] expected_selection: Range<usize>,
+    ) {
+        let (out, sel) = apply_surround(content, selection, open, close);
+        assert_eq!(out, expected_content);
+        assert_eq!(sel, expected_selection);
+    }
+
+    #[rstest]
+    #[case::wraps_bold("hi", 0..2, Emphasis::Bold, "**hi**", 2..4)]
+    #[case::unwraps_bold_around_selection("**hi**", 2..4, Emphasis::Bold, "hi", 0..2)]
+    #[case::unwraps_bold_inside_selection("a **hi** b", 2..8, Emphasis::Bold, "a hi b", 2..4)]
+    #[case::unwraps_empty_bold_pair("a****b", 3..3, Emphasis::Bold, "ab", 1..1)]
+    #[case::wraps_italic("hi", 0..2, Emphasis::Italic, "*hi*", 1..3)]
+    #[case::unwraps_italic("*hi*", 1..3, Emphasis::Italic, "hi", 0..2)]
+    #[case::unwraps_italic_inside_selection("*hi*", 0..4, Emphasis::Italic, "hi", 0..2)]
+    #[case::italic_over_bold_adds("**hi**", 2..4, Emphasis::Italic, "***hi***", 3..5)]
+    #[case::bold_over_italic_adds("*hi*", 1..3, Emphasis::Bold, "***hi***", 3..5)]
+    #[case::unwraps_italic_from_both("***hi***", 3..5, Emphasis::Italic, "**hi**", 2..4)]
+    #[case::unwraps_bold_from_both("***hi***", 3..5, Emphasis::Bold, "*hi*", 1..3)]
+    fn toggle_emphasis_cases(
+        #[case] content: &str,
+        #[case] selection: Range<usize>,
+        #[case] emphasis: Emphasis,
+        #[case] expected_content: &str,
+        #[case] expected_selection: Range<usize>,
+    ) {
+        let (out, sel) = apply_toggle_emphasis(content, selection, emphasis);
+        assert_eq!(out, expected_content);
+        assert_eq!(sel, expected_selection);
+    }
+
+    fn assert_buffer(
+        cx: &mut VisualTestContext,
+        input: &Entity<TextInput>,
+        content: &str,
+        selection: Range<usize>,
+    ) {
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.content().as_ref(), content);
+            assert_eq!(input.selected_range(), selection);
+        });
+    }
+
+    /// Typed brackets, quotes and emphasis markers wrap the selection and keep
+    /// it selected, so repeated markers nest (`*` twice is bold).
+    #[gpui::test]
+    fn typing_a_pair_character_over_a_selection_wraps_it(cx: &mut TestAppContext) {
+        let (input, cx) = mount_wrapped_input(cx, "hi");
+        let cmd = crate::cmd_key();
+
+        cx.simulate_keystrokes(&format!("{cmd}-a"));
+        cx.simulate_input("(");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "(hi)", 1..3);
+
+        cx.simulate_input("**");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "(**hi**)", 3..5);
+
+        for (typed, wrapped) in [
+            ("[", "[hi]"),
+            ("{", "{hi}"),
+            ("`", "`hi`"),
+            ("'", "'hi'"),
+            ("\"", "\"hi\""),
+            ("~~", "~~hi~~"),
+        ] {
+            input.update(cx, |input, cx| input.test_replace_all("hi", cx));
+            cx.simulate_keystrokes(&format!("{cmd}-a"));
+            cx.simulate_input(typed);
+            cx.run_until_parked();
+            input.read_with(cx, |input, _| assert_eq!(input.content().as_ref(), wrapped));
+        }
+
+        // Without a selection the character is just typed.
+        cx.simulate_keystrokes("right");
+        cx.simulate_input("(");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "~~hi(~~", 5..5);
+    }
+
+    #[gpui::test]
+    fn bold_and_italic_toggle_on_the_selection(cx: &mut TestAppContext) {
+        let (input, cx) = mount_wrapped_input(cx, "hi");
+        let cmd = crate::cmd_key();
+
+        cx.simulate_keystrokes(&format!("{cmd}-a {cmd}-b"));
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "**hi**", 2..4);
+
+        cx.simulate_keystrokes(&format!("{cmd}-i"));
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "***hi***", 3..5);
+
+        // Pressed again, each takes its own markers back off.
+        cx.simulate_keystrokes(&format!("{cmd}-b"));
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "*hi*", 1..3);
+
+        cx.simulate_keystrokes(&format!("{cmd}-i"));
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "hi", 0..2);
+
+        // With no selection, the caret lands between the markers, and a
+        // second press takes the empty pair away.
+        cx.simulate_keystrokes(&format!("right {cmd}-b"));
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "hi****", 4..4);
+
+        cx.simulate_keystrokes(&format!("{cmd}-b"));
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "hi", 2..2);
+    }
+
+    /// Single-line fields (the page picker) keep plain replace-the-selection
+    /// typing.
+    #[gpui::test]
+    fn plain_input_replaces_the_selection(cx: &mut TestAppContext) {
+        let (input, cx) = mount_input(cx, "hi");
+        let cmd = crate::cmd_key();
+
+        cx.simulate_keystrokes(&format!("{cmd}-a"));
+        cx.simulate_input("(");
+        cx.simulate_keystrokes(&format!("{cmd}-a {cmd}-b"));
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "(", 0..1);
     }
 
     #[gpui::test]

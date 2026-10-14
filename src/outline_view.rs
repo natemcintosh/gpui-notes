@@ -32,7 +32,8 @@ actions!(
         MoveBlockDown,
         ToggleCollapse,
         DeleteBlock,
-        UndoDelete
+        Undo,
+        Redo
     ]
 );
 
@@ -79,7 +80,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(&format!("{cmd}-enter"), ToggleCollapse, Some(BLOCK_CONTEXT)),
         KeyBinding::new("backspace", DeleteBlock, Some(BLOCK_CONTEXT)),
         KeyBinding::new("delete", DeleteBlock, Some(BLOCK_CONTEXT)),
-        KeyBinding::new(&format!("{cmd}-z"), UndoDelete, Some(BLOCK_CONTEXT)),
+        // Undo/redo work mid-edit too: the editor ends, the page steps, and
+        // editing resumes on the block the step touched.
+        KeyBinding::new(&format!("{cmd}-z"), Undo, Some("BlockView")),
+        KeyBinding::new(&format!("{cmd}-shift-z"), Redo, Some("BlockView")),
         // Mid-edit, Tab indents only from the very start of the block (the
         // handler checks the caret); elsewhere it does nothing.
         KeyBinding::new("tab", IndentBlock, Some(EDITING_CONTEXT)),
@@ -495,17 +499,39 @@ impl OutlineView {
         )
     }
 
-    /// Restores the page's most recently deleted block and focuses it.
-    fn undo_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(restored) = self.page.update(cx, Page::undo_delete) else {
+    /// Steps the page's undo history (`Page::undo` or `Page::redo`) and
+    /// focuses the block the step touched. A block being edited stops editing
+    /// first, so its text is flushed and the step can replace it, then
+    /// editing resumes on the focused block.
+    fn step_history(
+        &mut self,
+        step: fn(&mut Page, &mut Context<Page>) -> Option<BlockId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editing = self.blocks.iter().find_map(|(id, bv)| {
+            let bv = bv.read(cx);
+            (bv.is_editing() && bv.holds_focus(window, cx)).then_some(*id)
+        });
+        if let Some(id) = editing {
+            self.blocks[&id].update(cx, BlockView::end_editing_inner);
+        }
+        let stepped = self.page.update(cx, step);
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let position = |target: Option<BlockId>| {
+            target.and_then(|target| flat.iter().position(|&(_, id)| id == target))
+        };
+        let Some(idx) = position(stepped).or_else(|| position(editing)) else {
+            self.focus_first_block(window, cx);
             return;
         };
-        let handle = self.get_or_create(restored, window, cx).focus_handle(cx);
-        window.focus(&handle, cx);
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
-        if let Some(idx) = flat.iter().position(|&(_, id)| id == restored) {
-            self.scroll.scroll_to_item(idx);
+        let bv = self.get_or_create(flat[idx].1, window, cx);
+        if editing.is_some() {
+            bv.update(cx, |bv, cx| bv.begin_editing(window, cx));
+        } else {
+            window.focus(&bv.focus_handle(cx), cx);
         }
+        self.scroll.scroll_to_item(idx);
     }
 
     #[cfg(test)]
@@ -800,8 +826,11 @@ impl Render for OutlineView {
             .on_action(cx.listener(|this, _: &DeleteBlock, window, cx| {
                 this.delete_block(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &UndoDelete, window, cx| {
-                this.undo_delete(window, cx);
+            .on_action(cx.listener(|this, _: &Undo, window, cx| {
+                this.step_history(Page::undo, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Redo, window, cx| {
+                this.step_history(Page::redo, window, cx);
             }))
             .flex()
             .flex_col()
@@ -1982,6 +2011,105 @@ mod tests {
         cx.simulate_keystrokes(&undo);
         cx.run_until_parked();
         cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), body));
+    }
+
+    #[gpui::test]
+    fn undo_and_redo_step_through_text_and_structural_edits(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n");
+        let b = cx.read(|cx| page.read(cx).outline().roots[1].id);
+        let cmd = crate::cmd_key();
+        let serialized =
+            |cx: &mut VisualTestContext| cx.read(|cx| page.read(cx).body().to_string());
+
+        focus_block(cx, &ov, b);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("xy");
+        cx.simulate_keystrokes("escape tab");
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- a\n  - bxy\n");
+
+        cx.simulate_keystrokes(&format!("{cmd}-z"));
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- a\n- bxy\n", "undo the indent");
+        assert_eq!(focused_id(cx, &ov), Some(b));
+
+        cx.simulate_keystrokes(&format!("{cmd}-z"));
+        cx.run_until_parked();
+        assert_eq!(
+            serialized(cx),
+            "- a\n- b\n",
+            "the typing undoes as one step"
+        );
+
+        cx.simulate_keystrokes(&format!("{cmd}-shift-z {cmd}-shift-z"));
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- a\n  - bxy\n");
+
+        // A new edit drops what was left to redo.
+        cx.simulate_keystrokes(&format!("{cmd}-z alt-up {cmd}-shift-z"));
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- bxy\n- a\n");
+    }
+
+    /// Mid-edit, undo replaces the editor's text and editing carries on, on
+    /// whichever block the step touched.
+    #[gpui::test]
+    fn undo_mid_edit_keeps_editing(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        let undo = format!("{}-z", crate::cmd_key());
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("1");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("z");
+        cx.run_until_parked();
+        let texts = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                let roots = &page.read(cx).outline().roots;
+                roots.iter().map(|b| b.text.clone()).collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(texts(cx), ["a1", "z"]);
+        let new = cx.read(|cx| page.read(cx).outline().roots[1].id);
+
+        cx.simulate_keystrokes(&undo);
+        cx.run_until_parked();
+        assert_eq!(texts(cx), ["a1", ""]);
+        let input = editing_input(cx, &ov, new);
+        cx.read(|cx| assert_eq!(input.read(cx).content().as_ref(), ""));
+
+        cx.simulate_keystrokes(&undo);
+        cx.run_until_parked();
+        assert_eq!(texts(cx), ["a1"], "undo the Enter that made the block");
+        let input = editing_input(cx, &ov, a);
+        cx.read(|cx| assert_eq!(input.read(cx).content().as_ref(), "a1"));
+
+        cx.simulate_keystrokes(&undo);
+        cx.run_until_parked();
+        assert_eq!(texts(cx), ["a"]);
+        let input = editing_input(cx, &ov, a);
+        cx.read(|cx| assert_eq!(input.read(cx).content().as_ref(), "a"));
+    }
+
+    /// Enter with the caret in front of the text opens an empty block above
+    /// and moves editing into it; the block (with its children) moves down.
+    #[gpui::test]
+    fn enter_at_start_of_text_inserts_a_block_above(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n  - c\n");
+        let b = cx.read(|cx| page.read(cx).outline().roots[1].id);
+
+        focus_block(cx, &ov, b);
+        cx.simulate_keystrokes("enter home enter");
+        cx.simulate_input("x");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert_eq!(page.read(cx).body().as_ref(), "- a\n- x\n- b\n  - c\n");
+            let bv = ov.read(cx).block_view(b).expect("b mounted");
+            assert!(!bv.read(cx).is_editing(), "editing moved to the new block");
+        });
     }
 
     /// Mid-edit, Tab/Shift-Tab indent and outdent only with the caret at the
