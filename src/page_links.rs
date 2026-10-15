@@ -44,6 +44,8 @@ pub struct LinkIndex {
     /// Keyed by `NoteSource` rather than by display name so that a page named
     /// `2026-07-23` cannot purge the reverse entries of that date's journal.
     forward: BTreeMap<NoteSource, HashSet<SharedString>>,
+    /// Page names only: journals are indexed as link sources above but kept
+    /// out of here, since this drives the `[[` completion list.
     pages: HashSet<String>,
 }
 

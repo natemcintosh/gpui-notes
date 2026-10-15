@@ -29,7 +29,9 @@ pub struct Page {
 }
 
 /// A whole outline saved for undo/redo, with the block to focus once it is
-/// back on screen.
+/// back on screen. It keeps `BlockId`s, so restored blocks reuse their cached
+/// `BlockView`s, and fold state: collapse toggles aren't recorded as steps,
+/// but a step brings back the folds it was taken with.
 struct Snapshot {
     outline: Outline,
     focus: BlockId,
