@@ -1,12 +1,14 @@
 //! Application-wide color tokens.
 //!
-//! Keep visual decisions here so the dark theme can evolve without hunting
+//! Keep visual decisions here so the themes can evolve without hunting
 //! through view implementations. Callers use semantic names rather than raw
-//! RGB values.
+//! RGB values; each name reads from the active [`Theme`]'s palette, so
+//! switching themes (`toggle`) changes every view on its next render.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-use gpui::{px, rgb, rgba, App, Pixels, Rgba, SharedString};
+use gpui::{px, rgba, App, Pixels, Rgba, SharedString};
 
 /// Widest the note column grows; wider windows centre it. Matches Logseq's
 /// `--ls-main-content-max-width`.
@@ -85,69 +87,220 @@ fn first_installed(candidates: &[&'static str], installed: &[String]) -> Option<
         .map(|&name| name.into())
 }
 
+/// The two built-in colour themes, both from Ethan Schoonover's Solarized
+/// palette. The app starts in [`Theme::SolarizedDark`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Theme {
+    #[default]
+    SolarizedDark,
+    SolarizedLight,
+}
+
+impl Theme {
+    /// The other theme.
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::SolarizedDark => Self::SolarizedLight,
+            Self::SolarizedLight => Self::SolarizedDark,
+        }
+    }
+
+    fn palette(self) -> &'static Palette {
+        match self {
+            Self::SolarizedDark => &SOLARIZED_DARK,
+            Self::SolarizedLight => &SOLARIZED_LIGHT,
+        }
+    }
+}
+
+/// The active theme. A process-wide static rather than a gpui `Global`
+/// because the colour functions below are called from ~100 render sites,
+/// many without an `App` at hand. `false` is dark, `true` is light.
+static LIGHT: AtomicBool = AtomicBool::new(false);
+
+/// The theme every colour function currently answers for.
+#[must_use]
+pub fn current() -> Theme {
+    if LIGHT.load(Ordering::Relaxed) {
+        Theme::SolarizedLight
+    } else {
+        Theme::SolarizedDark
+    }
+}
+
+/// Switch to `theme` and redraw every window, since nothing else notifies
+/// the views that their colours changed.
+pub fn set(theme: Theme, cx: &mut App) {
+    LIGHT.store(theme == Theme::SolarizedLight, Ordering::Relaxed);
+    cx.refresh_windows();
+}
+
+/// Switch between the dark and light themes.
+pub fn toggle(cx: &mut App) {
+    set(current().toggled(), cx);
+}
+
+/// The base colours each theme assigns; the role functions below derive
+/// from these.
+struct Palette {
+    window_bg: Rgba,
+    /// Overlays, menus and the shortcut bar.
+    overlay_bg: Rgba,
+    overlay_border: Rgba,
+    /// List rows and inputs.
+    row_bg: Rgba,
+    /// Hover, chips, inline code and the client-side titlebar.
+    bg_subtle: Rgba,
+    /// Body text.
+    fg: Rgba,
+    /// Secondary text.
+    fg_muted: Rgba,
+    /// Titles, hovered controls and selected rows.
+    fg_emphasis: Rgba,
+    accent: Rgba,
+    link_bracket: Rgba,
+    error_bg: Rgba,
+    error_hover_bg: Rgba,
+    error_fg: Rgba,
+    spell_underline: Rgba,
+}
+
+/// `0xRRGGBB` as an opaque colour; `gpui::rgb` isn't `const`.
+#[allow(clippy::cast_precision_loss)] // Each channel is at most 255.
+const fn hex(rgb: u32) -> Rgba {
+    Rgba {
+        r: ((rgb >> 16) & 0xff) as f32 / 255.,
+        g: ((rgb >> 8) & 0xff) as f32 / 255.,
+        b: (rgb & 0xff) as f32 / 255.,
+        a: 1.,
+    }
+}
+
+// The sixteen Solarized colours (https://ethanschoonover.com/solarized/).
+const BASE03: u32 = 0x002b36;
+const BASE02: u32 = 0x073642;
+const BASE01: u32 = 0x586e75;
+const BASE00: u32 = 0x657b83;
+const BASE0: u32 = 0x839496;
+const BASE1: u32 = 0x93a1a1;
+const BASE2: u32 = 0xeee8d5;
+const BASE3: u32 = 0xfdf6e3;
+const BLUE: u32 = 0x268bd2;
+const RED: u32 = 0xdc322f;
+
+// Solarized has only two background tones per mode, and the UI needs a few
+// more: the extra tones below are blends of neighbouring base colours (or of
+// the background and red, for errors).
+const SOLARIZED_DARK: Palette = Palette {
+    window_bg: hex(BASE03),
+    overlay_bg: hex(0x00212b),
+    overlay_border: hex(0x1f4751),
+    row_bg: hex(0x03313d),
+    bg_subtle: hex(BASE02),
+    fg: hex(BASE0),
+    fg_muted: hex(BASE01),
+    fg_emphasis: hex(BASE1),
+    accent: hex(BLUE),
+    link_bracket: hex(0x2f525b),
+    error_bg: hex(0x422d34),
+    error_hover_bg: hex(0x582e33),
+    error_fg: hex(RED),
+    spell_underline: hex(RED),
+};
+
+const SOLARIZED_LIGHT: Palette = Palette {
+    window_bg: hex(BASE3),
+    overlay_bg: hex(BASE2),
+    overlay_border: hex(0xd3cbb7),
+    row_bg: hex(0xf7f0dd),
+    bg_subtle: hex(0xe4ddc8),
+    fg: hex(BASE00),
+    fg_muted: hex(BASE1),
+    fg_emphasis: hex(BASE01),
+    accent: hex(BLUE),
+    link_bracket: hex(0xc0c4bb),
+    error_bg: hex(0xf8d8c8),
+    error_hover_bg: hex(0xf5c5b6),
+    error_fg: hex(RED),
+    spell_underline: hex(RED),
+};
+
+fn palette() -> &'static Palette {
+    current().palette()
+}
+
+/// `color` at `alpha` (0–255) opacity.
+fn with_alpha(color: Rgba, alpha: u8) -> Rgba {
+    Rgba {
+        a: f32::from(alpha) / 255.,
+        ..color
+    }
+}
+
 #[must_use]
 pub fn window_bg() -> Rgba {
-    rgb(0x1e1e1e)
+    palette().window_bg
 }
 
 #[must_use]
 pub fn overlay_bg() -> Rgba {
-    rgb(0x141414)
+    palette().overlay_bg
 }
 
 #[must_use]
 pub fn overlay_border() -> Rgba {
-    rgb(0x3a3a3a)
+    palette().overlay_border
 }
 
 #[must_use]
 pub fn fg() -> Rgba {
-    rgb(0xe6e6e6)
+    palette().fg
 }
 
 #[must_use]
 pub fn fg_muted() -> Rgba {
-    rgb(0x9a9a9a)
+    palette().fg_muted
 }
 
 #[must_use]
 pub fn header_fg() -> Rgba {
-    rgb(0xcccccc)
+    fg()
 }
 
 #[must_use]
 pub fn chrome_fg() -> Rgba {
-    rgb(0xaaaaaa)
+    fg()
 }
 
 #[must_use]
 pub fn control_fg() -> Rgba {
-    rgb(0x888888)
+    fg_muted()
 }
 
 #[must_use]
 pub fn control_hover_fg() -> Rgba {
-    rgb(0xdddddd)
+    palette().fg_emphasis
 }
 
 #[must_use]
 pub fn overlay_title_fg() -> Rgba {
-    rgb(0xeeeeee)
+    palette().fg_emphasis
 }
 
 #[must_use]
 pub fn empty_state_fg() -> Rgba {
-    rgb(0x999999)
+    fg_muted()
 }
 
 #[must_use]
 pub fn bg_subtle() -> Rgba {
-    rgb(0x2a2a2a)
+    palette().bg_subtle
 }
 
 #[must_use]
 pub fn row_bg() -> Rgba {
-    rgb(0x222222)
+    palette().row_bg
 }
 
 #[must_use]
@@ -162,18 +315,18 @@ pub fn row_selected() -> Rgba {
 
 #[must_use]
 pub fn row_selected_fg() -> Rgba {
-    rgb(0xffffff)
+    palette().fg_emphasis
 }
 
 #[must_use]
 pub fn accent() -> Rgba {
-    rgb(0x66b2ff)
+    palette().accent
 }
 
 /// The `[[`/`]]` around a page link: dimmer than `fg_muted`, like Logseq.
 #[must_use]
 pub fn link_bracket() -> Rgba {
-    rgb(0x5c5c5c)
+    palette().link_bracket
 }
 
 /// The ring behind a folded block's bullet.
@@ -225,34 +378,34 @@ pub fn input_cursor() -> Rgba {
 
 #[must_use]
 pub fn input_selection() -> Rgba {
-    rgba(0x66b2_ff66)
+    with_alpha(accent(), 0x66)
 }
 
 /// Behind whole blocks selected by dragging across rows.
 #[must_use]
 pub fn block_selection() -> Rgba {
-    rgba(0x66b2_ff33)
+    with_alpha(accent(), 0x33)
 }
 
 #[must_use]
 pub fn error_bg() -> Rgba {
-    rgb(0x3a2222)
+    palette().error_bg
 }
 
 #[must_use]
 pub fn error_hover_bg() -> Rgba {
-    rgb(0x4a2a2a)
+    palette().error_hover_bg
 }
 
 #[must_use]
 pub fn error_fg() -> Rgba {
-    rgb(0xff9999)
+    palette().error_fg
 }
 
 /// The wavy underline under a misspelled word.
 #[must_use]
 pub fn spell_underline() -> Rgba {
-    rgb(0xe06c75)
+    palette().spell_underline
 }
 
 #[must_use]

@@ -37,6 +37,7 @@ actions!(
         ToggleShortcuts,
         NavigateBack,
         NavigateForward,
+        ToggleTheme,
         Quit,
         Hide,
         HideOtherApps
@@ -485,7 +486,8 @@ impl Render for RootView {
             .on_action(cx.listener(Self::open_page_picker))
             .on_action(cx.listener(Self::toggle_shortcuts))
             .on_action(cx.listener(Self::navigate_back))
-            .on_action(cx.listener(Self::navigate_forward));
+            .on_action(cx.listener(Self::navigate_forward))
+            .on_action(|_: &ToggleTheme, _, cx| theme::toggle(cx));
         let mut root = Self::bind_navigation_mouse(root, cx)
             .relative()
             .flex()
@@ -588,6 +590,7 @@ fn main() {
             // free for `WordLeft`/`WordRight` (see `text_input::bind_keys`).
             KeyBinding::new("alt-left", NavigateBack, Some("RootView && !TextInput")),
             KeyBinding::new("alt-right", NavigateForward, Some("RootView && !TextInput")),
+            KeyBinding::new(&format!("{cmd}-shift-t"), ToggleTheme, Some("RootView")),
         ]);
         // macOS apps conventionally hide with cmd-h (and hide everything
         // else with cmd-alt-h); there is no such convention on Linux, where
@@ -604,14 +607,20 @@ fn main() {
         // active app's menus. The bold app-menu title comes from the bundle
         // (or, run unbundled, the executable name), not from this `Menu`'s name.
         #[cfg(target_os = "macos")]
-        cx.set_menus([gpui::Menu::new("GPUI Notes").items([
-            gpui::MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
-            gpui::MenuItem::separator(),
-            gpui::MenuItem::action("Hide GPUI Notes", Hide),
-            gpui::MenuItem::action("Hide Others", HideOtherApps),
-            gpui::MenuItem::separator(),
-            gpui::MenuItem::action("Quit GPUI Notes", Quit),
-        ])]);
+        cx.set_menus([
+            gpui::Menu::new("GPUI Notes").items([
+                gpui::MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
+                gpui::MenuItem::separator(),
+                gpui::MenuItem::action("Hide GPUI Notes", Hide),
+                gpui::MenuItem::action("Hide Others", HideOtherApps),
+                gpui::MenuItem::separator(),
+                gpui::MenuItem::action("Quit GPUI Notes", Quit),
+            ]),
+            gpui::Menu::new("View").items([gpui::MenuItem::action(
+                "Toggle Light/Dark Theme",
+                ToggleTheme,
+            )]),
+        ]);
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
         let store = NotesStore::new(root_dir).expect("init notes store");
@@ -685,6 +694,7 @@ mod tests {
                 KeyBinding::new("ctrl-/", ToggleShortcuts, None),
                 KeyBinding::new("alt-left", NavigateBack, Some("RootView && !TextInput")),
                 KeyBinding::new("alt-right", NavigateForward, Some("RootView && !TextInput")),
+                KeyBinding::new("ctrl-shift-t", ToggleTheme, Some("RootView")),
             ]);
             let store = NotesStore::new(&root_dir).unwrap();
             store.write("Home", "- home\n").unwrap();
@@ -1874,5 +1884,23 @@ mod tests {
         cx.simulate_keystrokes("alt-left");
         cx.run_until_parked();
         assert_eq!(current_page_name(cx), "Journals");
+    }
+
+    #[gpui::test]
+    fn shortcut_toggles_between_light_and_dark(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_root, cx) = mount_root(cx, &tmp);
+        assert_eq!(theme::current(), theme::Theme::SolarizedDark);
+        let dark_bg = theme::window_bg();
+
+        cx.simulate_keystrokes("ctrl-shift-t");
+        cx.run_until_parked();
+        assert_eq!(theme::current(), theme::Theme::SolarizedLight);
+        assert_ne!(theme::window_bg(), dark_bg);
+
+        cx.simulate_keystrokes("ctrl-shift-t");
+        cx.run_until_parked();
+        assert_eq!(theme::current(), theme::Theme::SolarizedDark);
+        assert_eq!(theme::window_bg(), dark_bg);
     }
 }
