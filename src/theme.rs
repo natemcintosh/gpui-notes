@@ -8,11 +8,35 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-use gpui::{px, rgba, App, Pixels, Rgba, SharedString};
+use gpui::{px, rgba, App, Pixels, Rgba, SharedString, Window};
 
 /// Widest the note column grows; wider windows centre it. Matches Logseq's
 /// `--ls-main-content-max-width`.
 pub const CONTENT_MAX_WIDTH: Pixels = px(810.);
+
+/// The window's padding on each side of the content (`RootView`'s `p_4`).
+const WINDOW_SIDE_INSET: Pixels = px(16.);
+
+/// The note column's width in this window, in pixels.
+///
+/// Size the column with this, not `w_full` capped by `max_w` and centred
+/// with `mx_auto`: some taffy passes measure a child without knowing a
+/// percentage width, and with auto margins such a row shrinks to its text
+/// and centres on its own — the text then paints from that measurement.
+/// A definite width gives every pass the same answer.
+#[must_use]
+pub fn content_width(window: &Window) -> Pixels {
+    (window.viewport_size().width - WINDOW_SIDE_INSET * 2.)
+        .min(CONTENT_MAX_WIDTH)
+        .max(px(0.))
+}
+
+/// The gap on each side of the note column inside the window's padding.
+#[must_use]
+pub fn content_gutter(window: &Window) -> Pixels {
+    ((window.viewport_size().width - WINDOW_SIDE_INSET * 2. - content_width(window)) / 2.)
+        .max(px(0.))
+}
 
 /// The app-wide UI font family.
 ///

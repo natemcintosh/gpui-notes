@@ -1104,8 +1104,6 @@ fn thread_row(
         .flex()
         .flex_row()
         .w_full()
-        .max_w(theme::CONTENT_MAX_WIDTH)
-        .mx_auto()
         .min_w_0()
         .items_start()
         .pl(indent)
@@ -1233,11 +1231,19 @@ impl Render for OutlineView {
         // Only the page-level view scrolls: a subtree view is rendered inside
         // that scroll container, and nesting a second one would trap the wheel.
         let mut root = match self.scope {
-            OutlineScope::Page => root.flex_1().min_h_0().overflow_y_scroll().track_scroll(
-                // Child indices line up with `flat`, so the refs section must
-                // stay the last child (see below).
-                &self.scroll,
-            ),
+            // The column is centred by padding the scroll container, so the
+            // rows themselves never carry auto margins (see
+            // `theme::content_width`).
+            OutlineScope::Page => root
+                .flex_1()
+                .min_h_0()
+                .px(theme::content_gutter(window))
+                .overflow_y_scroll()
+                .track_scroll(
+                    // Child indices line up with `flat`, so the refs section
+                    // must stay the last child (see below).
+                    &self.scroll,
+                ),
             OutlineScope::Embedded | OutlineScope::Subtree(_) => root,
         };
 
@@ -1273,13 +1279,7 @@ impl Render for OutlineView {
             let refs = self
                 .linked_refs
                 .get_or_insert_with(|| cx.new(|cx| LinkedRefsView::new(page, cx)));
-            root = root.child(
-                div()
-                    .w_full()
-                    .max_w(theme::CONTENT_MAX_WIDTH)
-                    .mx_auto()
-                    .child(refs.clone()),
-            );
+            root = root.child(div().w_full().child(refs.clone()));
         }
         // After the rows (and refs), so it doesn't shift `scroll_to_item`
         // indices.
@@ -2645,6 +2645,37 @@ mod tests {
             let outline = page.read(cx).outline();
             assert_eq!(outline.roots.len(), 2, "tab mid-edit must not indent");
         });
+    }
+
+    /// In a wide window the rows form one centred column of
+    /// `CONTENT_MAX_WIDTH`, sharing a left edge however long their text:
+    /// rows that each centre on their own read as centre-justified text.
+    #[gpui::test]
+    fn rows_form_one_centred_column_in_a_wide_window(cx: &mut TestAppContext) {
+        let (page, _ov, cx) = mount(cx, "- a\n- a much longer block of text\n- mid length\n");
+        cx.simulate_resize(size(px(1920.), px(1000.)));
+        cx.run_until_parked();
+        let ids: Vec<BlockId> =
+            cx.read(|cx| page.read(cx).outline().roots.iter().map(|b| b.id).collect());
+        let blocks: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                cx.debug_bounds(format!("block-view-{id:?}").leak())
+                    .expect("block painted")
+            })
+            .collect();
+        assert!(
+            blocks
+                .windows(2)
+                .all(|w| w[0].left() == w[1].left() && w[0].right() == w[1].right()),
+            "rows differ: {blocks:?}",
+        );
+        // The bare test window has no `RootView` padding, so the column
+        // is `content_width` wide with `content_gutter` on each side.
+        let (gutter, width) =
+            cx.update(|window, _| (theme::content_gutter(window), theme::content_width(window)));
+        assert_eq!(width, theme::CONTENT_MAX_WIDTH);
+        assert!(gutter > px(0.));
     }
 
     // ── Block selection by dragging ────────────────────────────────────

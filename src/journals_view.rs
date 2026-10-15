@@ -35,9 +35,6 @@ const LOAD_MORE_MARGIN: Pixels = px(600.);
 /// while today is still short.
 const TODAY_MIN_HEIGHT: Pixels = px(400.);
 
-/// The window's padding on each side of the list (`RootView`'s `p_4`).
-const LIST_SIDE_INSET: Pixels = px(16.);
-
 struct Day {
     date: NaiveDate,
     page: Entity<Page>,
@@ -187,15 +184,10 @@ impl Render for JournalsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.load_more_if_near_end(cx);
 
-        // A width in pixels, not `w_full` capped by `max_w`. Text paints the
-        // lines from its *last* measurement and a container is sized from
-        // whichever pass taffy kept, and with a percentage width some passes
-        // measured a day without knowing its width: the next day was drawn
-        // over a long one's end, or long lines ran off the screen unwrapped.
-        // A definite width gives every pass the same answer.
-        let day_width = (window.viewport_size().width - LIST_SIDE_INSET * 2.)
-            .min(theme::CONTENT_MAX_WIDTH)
-            .max(px(0.));
+        // A definite width (see `theme::content_width`): with a percentage
+        // one, the next day was drawn over a long one's end, or long lines
+        // ran off the screen unwrapped.
+        let day_width = theme::content_width(window);
 
         // Each day is one direct child, which `load_more_if_near_end` relies
         // on when comparing the handle's child count to `days`.
