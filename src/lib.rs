@@ -27,6 +27,7 @@ pub mod page_completion;
 pub mod page_links;
 pub mod page_picker;
 pub mod registry;
+pub mod search;
 pub mod shortcut_bar;
 pub mod shortcut_hints;
 pub mod source;

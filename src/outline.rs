@@ -474,6 +474,23 @@ impl Outline {
         self.roots.first().map(|b| b.id)
     }
 
+    /// Every block, parents before their children, in document order. A
+    /// block's position here is stable across re-parsing the same text, which
+    /// is what lets search name a block before its page is open.
+    #[must_use]
+    pub fn preorder(&self) -> Vec<&Block> {
+        fn walk<'a>(out: &mut Vec<&'a Block>, blocks: &'a [Block]) {
+            for block in blocks {
+                out.push(block);
+                walk(out, &block.children);
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(&mut out, &self.roots);
+        out
+    }
+
     /// The blocks in `text` when it is outline markdown of more than one block
     /// (such as a copied bullet with children), or `None` for anything that
     /// should paste as plain text.

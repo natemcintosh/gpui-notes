@@ -160,6 +160,23 @@ impl PageRegistry {
         first_err.map_or(Ok(()), Err)
     }
 
+    /// The open page for `source`, if any. Unlike `open`, never reads disk.
+    #[must_use]
+    pub fn get_open(&self, source: &NoteSource) -> Option<&Entity<Page>> {
+        self.open.get(source)
+    }
+
+    /// The markdown on disk for `source`, whether or not it is open.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if the note does not exist, or another I/O error.
+    pub fn read_source(&self, source: &NoteSource) -> io::Result<String> {
+        match source {
+            NoteSource::Page(name) => self.store.read(name),
+            NoteSource::Journal(date) => self.store.read_journal(*date),
+        }
+    }
+
     #[must_use]
     pub fn source_for_page(&self, page: &Entity<Page>, cx: &App) -> NoteSource {
         self.key_for(page)

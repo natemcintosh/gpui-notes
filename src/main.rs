@@ -16,6 +16,7 @@ use gpui_notes::page::Page;
 use gpui_notes::page_links::{self, LinkIndex, OpenPage};
 use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
 use gpui_notes::registry::{pick_next, save_all_on_quit, CurrentPage, PageRegistry};
+use gpui_notes::search::{self, SearchCorpus, SearchEvent, SearchTarget, SearchView};
 use gpui_notes::shortcut_bar::{ShortcutBar, ShortcutOverlay};
 use gpui_notes::shortcut_hints::{self, ShortcutHint};
 use gpui_notes::source::{source_label, NoteSource};
@@ -34,6 +35,7 @@ actions!(
         JumpToToday,
         CloseOverlay,
         OpenPagePicker,
+        OpenSearch,
         ToggleShortcuts,
         NavigateBack,
         NavigateForward,
@@ -48,13 +50,17 @@ actions!(
 /// enum keeps overlay invariants (only one open at a time) unrepresentable as
 /// invalid states, and gives transition tests a single field to assert on.
 ///
-/// `PagePicker` and `ShortcutsHelp` are absolute-positioned overlays. The
+/// `PagePicker`, `Search` and `ShortcutsHelp` are absolute-positioned overlays. The
 /// enum collapses them into the same axis so that opening any one always
 /// dismisses the others.
 pub enum OverlayMode {
     None,
     PagePicker {
         entity: Entity<PagePicker>,
+        _sub: Subscription,
+    },
+    Search {
+        entity: Entity<SearchView>,
         _sub: Subscription,
     },
     ShortcutsHelp {
@@ -71,6 +77,15 @@ impl OverlayMode {
     #[must_use]
     pub fn picker(&self) -> Option<&Entity<PagePicker>> {
         if let Self::PagePicker { entity, .. } = self {
+            Some(entity)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub fn search(&self) -> Option<&Entity<SearchView>> {
+        if let Self::Search { entity, .. } = self {
             Some(entity)
         } else {
             None
@@ -136,6 +151,9 @@ impl RootView {
         match &self.overlay {
             OverlayMode::PagePicker { entity, .. } => {
                 entity.update(cx, |picker, cx| picker.focus_input(window, cx));
+            }
+            OverlayMode::Search { entity, .. } => {
+                entity.update(cx, |search, cx| search.focus_input(window, cx));
             }
             OverlayMode::ShortcutsHelp { .. } => {
                 window.focus(&self.focus_handle, cx);
@@ -384,7 +402,7 @@ impl RootView {
                     this.handle_picker_selection(entry, window, cx);
                 }
                 PagePickerEvent::Cancelled => {
-                    this.close_picker(window, cx);
+                    this.dismiss_overlay(window, cx);
                 }
             },
         );
@@ -422,18 +440,80 @@ impl RootView {
         if let Err(err) = history::navigate_to(&target.into(), cx) {
             errors::report(format!("page picker: open failed: {err}"), cx);
         }
-        self.close_picker(window, cx);
+        self.dismiss_overlay(window, cx);
     }
 
-    fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.overlay = OverlayMode::None;
         self.park_focus(window, cx);
         cx.notify();
     }
 
+    fn open_search(&mut self, _: &OpenSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.overlay, OverlayMode::Search { .. }) {
+            return;
+        }
+        let corpus = match SearchCorpus::collect(cx) {
+            Ok((corpus, skipped)) => {
+                if !skipped.is_empty() {
+                    let files: Vec<String> = skipped
+                        .iter()
+                        .map(|(source, err)| format!("{} ({err})", source_label(source)))
+                        .collect();
+                    errors::report(format!("search skipped: {}", files.join(", ")), cx);
+                }
+                corpus
+            }
+            Err(err) => {
+                errors::report(format!("search: list failed: {err}"), cx);
+                return;
+            }
+        };
+        let view = cx.new(|cx| SearchView::new(corpus, cx));
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            |this, _view, event: &SearchEvent, window, cx| match event {
+                SearchEvent::Selected(target) => this.handle_search_selection(target, window, cx),
+                SearchEvent::Cancelled => this.dismiss_overlay(window, cx),
+            },
+        );
+        self.overlay = OverlayMode::Search {
+            entity: view,
+            _sub: sub,
+        };
+        self.park_focus(window, cx);
+        cx.notify();
+    }
+
+    /// Opens the hit's note, then focuses the matched block in place of the
+    /// first one `park_focus` would pick.
+    fn handle_search_selection(
+        &mut self,
+        target: &SearchTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(err) = history::navigate_to(&target.source.clone().into(), cx) {
+            errors::report(format!("search: open failed: {err}"), cx);
+            self.dismiss_overlay(window, cx);
+            return;
+        }
+        self.dismiss_overlay(window, cx);
+        let Some(page) = cx.global::<CurrentPage>().get().cloned() else {
+            return;
+        };
+        let Some(id) = target.resolve(page.read(cx).outline()) else {
+            return;
+        };
+        let view = page.read(cx).view().clone();
+        view.update(cx, |view, cx| view.reveal_block(id, window, cx));
+    }
+
     fn debug_hud_text(&self, window: &Window, cx: &App) -> String {
         let (focus_target, block_mode) = match &self.overlay {
             OverlayMode::PagePicker { .. } => ("page picker input", "not applicable"),
+            OverlayMode::Search { .. } => ("search input", "not applicable"),
             OverlayMode::ShortcutsHelp { .. } => ("root", "not applicable"),
             OverlayMode::None if cx.global::<CurrentPage>().is_journals() => {
                 self.journals.read(cx).debug_focus_status(window, cx)
@@ -484,6 +564,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::open_page))
             .on_action(cx.listener(Self::close_overlay))
             .on_action(cx.listener(Self::open_page_picker))
+            .on_action(cx.listener(Self::open_search))
             .on_action(cx.listener(Self::toggle_shortcuts))
             .on_action(cx.listener(Self::navigate_back))
             .on_action(cx.listener(Self::navigate_forward))
@@ -541,6 +622,7 @@ impl Render for RootView {
 
         let overlay_child: Option<gpui::AnyElement> = match &self.overlay {
             OverlayMode::PagePicker { entity, .. } => Some(entity.clone().into_any_element()),
+            OverlayMode::Search { entity, .. } => Some(entity.clone().into_any_element()),
             OverlayMode::ShortcutsHelp { hints } => {
                 Some(ShortcutOverlay::new(hints.clone()).into_any_element())
             }
@@ -572,6 +654,7 @@ fn main() {
         block_view::bind_keys(cx);
         outline_view::bind_keys(cx);
         page_picker::bind_keys(cx);
+        search::bind_keys(cx);
         let cmd = cmd_key();
         cx.bind_keys([
             KeyBinding::new(&format!("{cmd}-s"), SavePage, Some("RootView")),
@@ -591,6 +674,7 @@ fn main() {
             KeyBinding::new("alt-left", NavigateBack, Some("RootView && !TextInput")),
             KeyBinding::new("alt-right", NavigateForward, Some("RootView && !TextInput")),
             KeyBinding::new(&format!("{cmd}-shift-t"), ToggleTheme, Some("RootView")),
+            KeyBinding::new(&format!("{cmd}-shift-f"), OpenSearch, Some("RootView")),
         ]);
         // macOS apps conventionally hide with cmd-h (and hide everything
         // else with cmd-alt-h); there is no such convention on Linux, where
@@ -684,6 +768,7 @@ mod tests {
             block_view::bind_keys(cx);
             outline_view::bind_keys(cx);
             page_picker::bind_keys(cx);
+            search::bind_keys(cx);
             cx.bind_keys([
                 KeyBinding::new("ctrl-s", SavePage, Some("RootView")),
                 KeyBinding::new("ctrl-p", NextPage, Some("RootView")),
@@ -695,6 +780,7 @@ mod tests {
                 KeyBinding::new("alt-left", NavigateBack, Some("RootView && !TextInput")),
                 KeyBinding::new("alt-right", NavigateForward, Some("RootView && !TextInput")),
                 KeyBinding::new("ctrl-shift-t", ToggleTheme, Some("RootView")),
+                KeyBinding::new("ctrl-shift-f", OpenSearch, Some("RootView")),
             ]);
             let store = NotesStore::new(&root_dir).unwrap();
             store.write("Home", "- home\n").unwrap();
@@ -1079,6 +1165,82 @@ mod tests {
                 "picker dismissed on select",
             );
         });
+    }
+
+    fn focused_text(cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|window, cx| {
+            let page = cx.global::<CurrentPage>().get().cloned()?;
+            let id = page.read(cx).view().read(cx).focused_block_id(window, cx)?;
+            page.read(cx).outline().get(id).map(str::to_owned)
+        })
+    }
+
+    /// `ctrl-shift-f`, a lowercase query and Enter open the note holding the
+    /// hit and focus that block, not the page's first one.
+    #[gpui::test]
+    fn search_opens_the_hit_and_focuses_its_block(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+        NotesStore::new(tmp.path())
+            .unwrap()
+            .write("Deep", "- top\n  - the Needle is here\n- after\n")
+            .unwrap();
+
+        cx.simulate_keystrokes("ctrl-shift-f");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().search().is_some()));
+        assert_root_in_focus_path(cx, &root);
+
+        cx.simulate_input("needle");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(root.read(cx).overlay().is_none(), "search dismissed");
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            assert_eq!(current.read(cx).name().as_ref(), "Deep");
+        });
+        assert_eq!(focused_text(cx).as_deref(), Some("the Needle is here"));
+        assert_root_in_focus_path(cx, &root);
+    }
+
+    /// An open page is searched as it stands in memory, and a hit folded
+    /// under a collapsed parent focuses that parent without unfolding it.
+    #[gpui::test]
+    fn search_reads_unsaved_edits_and_stops_at_a_folded_parent(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+        cx.update(|_, cx| {
+            NotesStore::new(tmp.path())
+                .unwrap()
+                .write("Folded", "- parent\n  - child\n")
+                .unwrap();
+            let page = cx
+                .update_global::<PageRegistry, _>(|reg, cx| reg.open("Folded", cx))
+                .unwrap();
+            page.update(cx, |page, cx| {
+                let parent = page.outline().roots[0].id;
+                let child = page.outline().roots[0].children[0].id;
+                page.set_block_text(child, "unsaved needle", cx);
+                page.toggle_collapse(parent, cx);
+            });
+        });
+
+        cx.simulate_keystrokes("ctrl-shift-f");
+        cx.run_until_parked();
+        cx.simulate_input("NEEDLE");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let current = cx.global::<CurrentPage>().get().unwrap();
+            assert_eq!(current.read(cx).name().as_ref(), "Folded");
+            assert!(current.read(cx).outline().roots[0].collapsed, "fold kept");
+        });
+        assert_eq!(focused_text(cx).as_deref(), Some("parent"));
+        assert_root_in_focus_path(cx, &root);
     }
 
     // ────────────────────────────────────────────────────────────────────

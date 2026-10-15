@@ -243,6 +243,45 @@ impl OutlineView {
         window.focus(&handle, cx);
     }
 
+    /// Focus `id` and scroll it into view. A block folded away under a
+    /// collapsed ancestor focuses that ancestor instead, so revealing a
+    /// search hit never changes the page's fold state. Returns `false` (and
+    /// focuses nothing) when `id` is not in this view's scope.
+    pub fn reveal_block(
+        &mut self,
+        id: BlockId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let outline = self.page.read(cx).outline();
+        let roots = self.scoped_roots(outline);
+        let Some(path) = outline.path_to(id) else {
+            return false;
+        };
+        let mut blocks = &outline.roots[..];
+        let mut target = None;
+        for &i in &path {
+            let block = &blocks[i];
+            target = Some(block.id);
+            if block.collapsed {
+                break;
+            }
+            blocks = &block.children;
+        }
+        let flat = flatten_visible(roots);
+        let Some((idx, target)) = target.and_then(|target| {
+            flat.iter()
+                .position(|&(_, b)| b == target)
+                .map(|i| (i, target))
+        }) else {
+            return false;
+        };
+        let bv = self.get_or_create(target, window, cx);
+        window.focus(&bv.focus_handle(cx), cx);
+        self.scroll.scroll_to_item(idx);
+        true
+    }
+
     /// Describes the active page-body focus target for the optional root debug
     /// HUD. `contains_focused` follows the real GPUI focus path, so an active
     /// text input is correctly reported as belonging to its block.
@@ -337,7 +376,8 @@ impl OutlineView {
 
     /// The id of the block whose wrapper currently holds focus (i.e. the
     /// focused-but-viewing block the outline keys operate on).
-    fn focused_block_id(&self, window: &Window, cx: &App) -> Option<BlockId> {
+    #[must_use]
+    pub fn focused_block_id(&self, window: &Window, cx: &App) -> Option<BlockId> {
         self.blocks.iter().find_map(|(id, bv)| {
             bv.read(cx)
                 .focus_handle(cx)

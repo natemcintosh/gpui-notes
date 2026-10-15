@@ -387,6 +387,12 @@ pub fn block_selection() -> Rgba {
     with_alpha(accent(), 0x33)
 }
 
+/// Behind the matched text in a search result snippet.
+#[must_use]
+pub fn search_match_bg() -> Rgba {
+    with_alpha(accent(), 0x55)
+}
+
 #[must_use]
 pub fn error_bg() -> Rgba {
     palette().error_bg

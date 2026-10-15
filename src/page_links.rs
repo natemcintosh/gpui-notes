@@ -149,7 +149,7 @@ impl LinkIndex {
         }
 
         let mut targets = HashSet::new();
-        for block in all_blocks(&outline.roots) {
+        for block in outline.preorder() {
             for target in page_links_in_text(&block.text) {
                 targets.insert(target.clone());
                 self.reverse
@@ -256,19 +256,6 @@ pub fn reindex_global_for_page(page: &gpui::Entity<Page>, source: &NoteSource, c
 fn page_name(source: &str) -> Option<&str> {
     let name = source.strip_prefix("[[")?.strip_suffix("]]")?.trim();
     (!name.is_empty()).then_some(name)
-}
-
-fn all_blocks(blocks: &[Block]) -> Vec<&Block> {
-    fn walk<'a>(out: &mut Vec<&'a Block>, blocks: &'a [Block]) {
-        for block in blocks {
-            out.push(block);
-            walk(out, &block.children);
-        }
-    }
-
-    let mut out = Vec::new();
-    walk(&mut out, blocks);
-    out
 }
 
 fn page_links_in_text(text: &str) -> BTreeSet<SharedString> {
