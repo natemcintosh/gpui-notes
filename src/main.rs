@@ -600,6 +600,18 @@ fn main() {
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
         cx.on_action(|_: &Hide, cx: &mut App| cx.hide());
         cx.on_action(|_: &HideOtherApps, cx: &mut App| cx.hide_other_apps());
+        // Without a menu bar of its own, macOS keeps showing the previously
+        // active app's menus. The bold app-menu title comes from the bundle
+        // (or, run unbundled, the executable name), not from this `Menu`'s name.
+        #[cfg(target_os = "macos")]
+        cx.set_menus([gpui::Menu::new("GPUI Notes").items([
+            gpui::MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::action("Hide GPUI Notes", Hide),
+            gpui::MenuItem::action("Hide Others", HideOtherApps),
+            gpui::MenuItem::separator(),
+            gpui::MenuItem::action("Quit GPUI Notes", Quit),
+        ])]);
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
         let store = NotesStore::new(root_dir).expect("init notes store");
