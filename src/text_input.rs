@@ -339,7 +339,8 @@ pub struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     /// Markdown conveniences for the block editor: typing a bracket, quote,
-    /// `*` or `~` over a selection wraps it (see `surround_pair`), and
+    /// `*` or `~` over a selection wraps it (see `surround_pair`), typing a
+    /// bracket or quote without one auto-closes it (`apply_auto_pair`), and
     /// `Bold`/`Italic` wrap it in `**`/`*`. Also turns on spell checking.
     markdown: bool,
     /// Misspelled byte ranges of `content`, recomputed in `render` only when
@@ -520,7 +521,11 @@ impl TextInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        let (new_content, new_selection) = apply_backspace(&self.content, self.selection.range());
+        let unpaired = (self.markdown && self.selection.is_empty())
+            .then(|| apply_unpair_backspace(&self.content, self.selection.head))
+            .flatten();
+        let (new_content, new_selection) =
+            unpaired.unwrap_or_else(|| apply_backspace(&self.content, self.selection.range()));
         if new_content.as_str() == self.content.as_ref() {
             window.play_system_bell();
             return;
@@ -1030,6 +1035,18 @@ impl EntityInputHandler for TextInput {
         {
             if let Some((open, close)) = surround_pair(new_text) {
                 self.surround_selection(open, close, cx);
+                return;
+            }
+        }
+        if self.markdown
+            && range_utf16.is_none()
+            && self.marked_range.is_none()
+            && self.selection.is_empty()
+        {
+            if let Some((content, selection)) =
+                apply_auto_pair(&self.content, self.selection.head, new_text)
+            {
+                self.apply_edit(content, selection, cx);
                 return;
             }
         }
@@ -1842,6 +1859,71 @@ fn apply_surround(
     (new_content, start..start + selection.len())
 }
 
+/// Characters typed with no selection that the block editor auto-closes,
+/// with their closing half. `*` and `~` are deliberately absent: `*` also
+/// starts a list item and a lone `~` is common prose, so pairing them would
+/// get in the way more than it helps.
+const AUTO_PAIRS: [(char, char); 6] = [
+    ('(', ')'),
+    ('[', ']'),
+    ('{', '}'),
+    ('"', '"'),
+    ('\'', '\''),
+    ('`', '`'),
+];
+
+/// What typing `typed` at an empty selection `caret` does beyond a plain
+/// insert, or `None` for a plain insert:
+///
+/// - a closing character that is already the next character is typed over
+///   (the caret steps past it), so typing through an auto-closed pair never
+///   doubles its closer;
+/// - an opening character gets its closer, with the caret between, when the
+///   next character is whitespace, the end of the buffer or a closer — so
+///   `(` in front of a word stays a lone `(`. A quote must also not follow a
+///   word character (`don't`) or the same quote (the third backtick of a
+///   ``` fence).
+fn apply_auto_pair(content: &str, caret: usize, typed: &str) -> Option<(String, Range<usize>)> {
+    let mut chars = typed.chars();
+    let (Some(typed), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    let next = content[caret..].chars().next();
+    let is_closer = AUTO_PAIRS.iter().any(|&(_, close)| close == typed);
+    if is_closer && next == Some(typed) {
+        let after = caret + typed.len_utf8();
+        return Some((content.to_string(), after..after));
+    }
+
+    let &(open, close) = AUTO_PAIRS.iter().find(|&&(open, _)| open == typed)?;
+    let next_allows =
+        next.is_none_or(|c| c.is_whitespace() || AUTO_PAIRS.iter().any(|&(_, close)| close == c));
+    let prev = content[..caret].chars().next_back();
+    let prev_allows = open != close || prev.is_none_or(|c| !c.is_alphanumeric() && c != open);
+    if !(next_allows && prev_allows) {
+        return None;
+    }
+    let mut pair = String::with_capacity(open.len_utf8() + close.len_utf8());
+    pair.push(open);
+    pair.push(close);
+    let (new_content, _) = apply_replace(content, caret..caret, &pair);
+    let inside = caret + open.len_utf8();
+    Some((new_content, inside..inside))
+}
+
+/// Backspace with the caret between an empty auto-closable pair (`(|)`)
+/// removes both halves, undoing the auto-close in one keystroke.
+fn apply_unpair_backspace(content: &str, caret: usize) -> Option<(String, Range<usize>)> {
+    let prev = content[..caret].chars().next_back()?;
+    let next = content[caret..].chars().next()?;
+    if !AUTO_PAIRS.contains(&(prev, next)) {
+        return None;
+    }
+    let start = caret - prev.len_utf8();
+    let (new_content, _) = apply_replace(content, start..caret + next.len_utf8(), "");
+    Some((new_content, start..start))
+}
+
 fn apply_backspace(content: &str, selection: Range<usize>) -> (String, Range<usize>) {
     if selection.is_empty() {
         let prev = previous_grapheme_boundary(content, selection.start);
@@ -2089,6 +2171,84 @@ mod tests {
         let (out, sel) = apply_surround(content, selection, open, close);
         assert_eq!(out, expected_content);
         assert_eq!(sel, expected_selection);
+    }
+
+    #[rstest]
+    #[case::paren_at_end("a ", 2, "(", Some(("a ()", 3)))]
+    #[case::bracket_before_space("a b", 1, "[", Some(("a[] b", 2)))]
+    #[case::brace_before_closer("()", 1, "{", Some(("({})", 2)))]
+    #[case::second_bracket_nests("[]", 1, "[", Some(("[[]]", 2)))]
+    #[case::quote_after_space("a ", 2, "\"", Some(("a \"\"", 3)))]
+    #[case::backtick_at_start("", 0, "`", Some(("``", 1)))]
+    #[case::not_before_a_word("word", 0, "(", None)]
+    #[case::apostrophe_after_a_word("don", 3, "'", None)]
+    #[case::third_backtick_of_a_fence("``", 2, "`", None)]
+    #[case::types_over_closer("()", 1, ")", Some(("()", 2)))]
+    #[case::types_over_quote("\"x\"", 2, "\"", Some(("\"x\"", 3)))]
+    #[case::lone_closer_is_plain("a", 1, ")", None)]
+    #[case::other_char_is_plain("a", 1, "x", None)]
+    #[case::multi_char_input_is_plain("", 0, "((", None)]
+    fn auto_pair_cases(
+        #[case] content: &str,
+        #[case] caret: usize,
+        #[case] typed: &str,
+        #[case] expected: Option<(&str, usize)>,
+    ) {
+        let out = apply_auto_pair(content, caret, typed);
+        let expected = expected.map(|(text, caret)| (text.to_string(), caret..caret));
+        assert_eq!(out, expected);
+    }
+
+    #[rstest]
+    #[case::empty_pair("a()", 2, Some(("a", 1)))]
+    #[case::empty_quotes("''", 1, Some(("", 0)))]
+    #[case::mismatched("(]", 1, None)]
+    #[case::non_empty("(x)", 2, None)]
+    #[case::at_start("()", 0, None)]
+    fn unpair_backspace_cases(
+        #[case] content: &str,
+        #[case] caret: usize,
+        #[case] expected: Option<(&str, usize)>,
+    ) {
+        let out = apply_unpair_backspace(content, caret);
+        let expected = expected.map(|(text, caret)| (text.to_string(), caret..caret));
+        assert_eq!(out, expected);
+    }
+
+    /// Typing an opener closes it, typing the closer steps over it, and
+    /// backspace in an empty pair removes both halves.
+    #[gpui::test]
+    fn typing_brackets_and_quotes_auto_closes_them(cx: &mut TestAppContext) {
+        let (input, cx) = mount_wrapped_input(cx, "");
+
+        cx.simulate_input("(");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "()", 1..1);
+
+        cx.simulate_input("x)");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "(x)", 3..3);
+
+        cx.simulate_input(" \"");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "(x) \"\"", 5..5);
+
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "(x) ", 4..4);
+
+        cx.simulate_input("```");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "(x) ```", 7..7);
+    }
+
+    /// A plain input (page picker, search) types brackets literally.
+    #[gpui::test]
+    fn plain_input_does_not_auto_close(cx: &mut TestAppContext) {
+        let (input, cx) = mount_input(cx, "");
+        cx.simulate_input("(");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "(", 1..1);
     }
 
     #[rstest]
