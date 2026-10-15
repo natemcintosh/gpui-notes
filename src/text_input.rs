@@ -6,16 +6,17 @@ use std::{ops::Range, rc::Rc};
 
 use gpui::FontFallbacks;
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, size, App, AvailableSpace, Bounds,
-    ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
-    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine,
+    actions, anchored, deferred, div, fill, point, prelude::*, px, relative, size, AnyElement, App,
+    AvailableSpace, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
+    InspectorElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::theme;
+use crate::spellcheck::SpellChecker;
+use crate::{errors, theme};
 
 actions!(
     text_input,
@@ -339,8 +340,20 @@ pub struct TextInput {
     is_selecting: bool,
     /// Markdown conveniences for the block editor: typing a bracket, quote,
     /// `*` or `~` over a selection wraps it (see `surround_pair`), and
-    /// `Bold`/`Italic` wrap it in `**`/`*`.
+    /// `Bold`/`Italic` wrap it in `**`/`*`. Also turns on spell checking.
     markdown: bool,
+    /// Misspelled byte ranges of `content`, recomputed in `render` only when
+    /// the content or the `SpellChecker` generation in `misspelled_key`
+    /// changes, since the whole window re-renders on every keystroke.
+    misspelled: Vec<Range<usize>>,
+    misspelled_key: Option<(SharedString, u64)>,
+    spell_menu: Option<SpellMenu>,
+}
+
+/// The "Add to dictionary" menu a right-click on a misspelled word opens.
+struct SpellMenu {
+    word: SharedString,
+    position: Point<Pixels>,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -390,6 +403,9 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             markdown: false,
+            misspelled: Vec::new(),
+            misspelled_key: None,
+            spell_menu: None,
         }
     }
 
@@ -639,6 +655,104 @@ impl TextInput {
         } else {
             self.move_to_with_affinity(offset, affinity, cx);
         }
+    }
+
+    fn on_right_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (offset, _) = self.caret_for_mouse_position(event.position);
+        let Some(word) = self
+            .misspelled
+            .iter()
+            .find(|word| word.contains(&offset) || word.end == offset)
+        else {
+            return;
+        };
+        self.spell_menu = Some(SpellMenu {
+            word: self.content[word.clone()].to_string().into(),
+            position: event.position,
+        });
+        cx.notify();
+    }
+
+    /// Re-checks `content` if it or the dictionary changed since last time.
+    fn refresh_misspelled(&mut self, cx: &App) {
+        let Some(checker) = cx.try_global::<SpellChecker>().filter(|_| self.markdown) else {
+            return;
+        };
+        let key = (self.content.clone(), checker.generation());
+        if self.misspelled_key.as_ref() != Some(&key) {
+            self.misspelled = checker.misspelled(&self.content);
+            self.misspelled_key = Some(key);
+        }
+    }
+
+    /// The misspelled words to underline: not the one at the caret, which
+    /// may still be being typed, and none if the ranges are stale.
+    fn spelling_underlines(&self) -> Vec<Range<usize>> {
+        if self.misspelled_key.as_ref().map(|(c, _)| c) != Some(&self.content) {
+            return Vec::new();
+        }
+        let cursor = self.cursor_offset();
+        self.misspelled
+            .iter()
+            .filter(|word| !(word.start..=word.end).contains(&cursor))
+            .cloned()
+            .collect()
+    }
+
+    fn render_spell_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.spell_menu.as_ref()?;
+        let word = menu.word.clone();
+        let list = div()
+            .id("spell-menu")
+            .bg(theme::overlay_bg())
+            .border_1()
+            .border_color(theme::overlay_border())
+            .rounded_md()
+            .p_1()
+            // Keep clicks on the menu from reaching the text under it.
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.spell_menu = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("spell-menu-add")
+                    .debug_selector(|| "spell-menu-add".into())
+                    .cursor_pointer()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_sm()
+                    .text_color(theme::header_fg())
+                    .hover(|s| s.bg(theme::row_hover()))
+                    .child(format!("Add \u{201c}{word}\u{201d} to dictionary"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.spell_menu = None;
+                        let saved = cx.update_global::<SpellChecker, _>(|c, _| c.add_word(&word));
+                        if let Err(e) = saved {
+                            errors::report(
+                                format!("couldn't save {word:?} to the dictionary: {e}"),
+                                cx,
+                            );
+                        }
+                        cx.notify();
+                    })),
+            );
+        Some(
+            deferred(
+                anchored()
+                    .position(menu.position)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(list),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -1062,32 +1176,34 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = marked_range {
-            vec![
-                TextRun {
-                    len: marked_range.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked_range.end - marked_range.start,
-                    underline: Some(UnderlineStyle {
+        // The IME's composition underline wins over spelling.
+        let underlines: Vec<(Range<usize>, UnderlineStyle)> =
+            if let Some(marked_range) = marked_range {
+                vec![(
+                    marked_range,
+                    UnderlineStyle {
                         color: Some(run.color),
                         thickness: px(1.0),
                         wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: display_text.len() - marked_range.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect::<Vec<_>>()
-        } else {
-            vec![run]
-        };
+                    },
+                )]
+            } else {
+                input
+                    .spelling_underlines()
+                    .into_iter()
+                    .map(|word| {
+                        (
+                            word,
+                            UnderlineStyle {
+                                color: Some(theme::spell_underline().into()),
+                                thickness: px(1.0),
+                                wavy: true,
+                            },
+                        )
+                    })
+                    .collect()
+            };
+        let runs = underlined_runs(&run, &underlines);
 
         let font_size = style.font_size.to_pixels(window.rem_size());
         let request = Rc::new(ShapeRequest {
@@ -1232,6 +1348,7 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_misspelled(cx);
         // A block editor swaps in place of the rendered markdown inside the
         // same `BlockView` wrapper, so it takes the view row's metrics: no
         // padding of its own and the ambient line height. Any extra inset
@@ -1274,6 +1391,7 @@ impl Render for TextInput {
             .when(self.markdown, |el| {
                 el.on_action(cx.listener(Self::bold))
                     .on_action(cx.listener(Self::italic))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1293,6 +1411,7 @@ impl Render for TextInput {
                     .bg(theme::input_bg())
                     .child(TextElement { input: cx.entity() }),
             )
+            .children(self.render_spell_menu(cx))
     }
 }
 
@@ -1352,6 +1471,17 @@ impl TextInput {
 
     pub(crate) fn line_height_for_test(&self) -> Option<Pixels> {
         self.last_layout.as_ref().map(|layout| layout.line_height)
+    }
+
+    /// A window point over the character starting at `offset`.
+    pub(crate) fn point_for_offset_for_test(&self, offset: usize) -> Option<Point<Pixels>> {
+        let bounds = self.last_bounds?;
+        let layout = self.last_layout.as_ref()?;
+        Some(
+            bounds.origin
+                + layout.position_for_caret(offset, CaretAffinity::Downstream)
+                + point(px(2.), layout.line_height / 2.),
+        )
     }
 }
 
@@ -1458,6 +1588,31 @@ pub fn bind_keys(cx: &mut App) {
 // lets us unit-test the edit semantics with no GPUI runtime. View methods
 // above delegate to these; view-only concerns (system bell, IME marking,
 // clipboard) stay in the methods.
+
+/// Splits `run` (covering the whole text) so each of `underlines` — sorted,
+/// non-overlapping byte ranges — gets its own underlined run.
+fn underlined_runs(run: &TextRun, underlines: &[(Range<usize>, UnderlineStyle)]) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let mut at = 0;
+    for (range, underline) in underlines {
+        runs.push(TextRun {
+            len: range.start - at,
+            ..run.clone()
+        });
+        runs.push(TextRun {
+            len: range.len(),
+            underline: Some(*underline),
+            ..run.clone()
+        });
+        at = range.end;
+    }
+    runs.push(TextRun {
+        len: run.len - at,
+        ..run.clone()
+    });
+    runs.retain(|run| run.len > 0);
+    runs
+}
 
 fn previous_grapheme_boundary(content: &str, offset: usize) -> usize {
     content
@@ -2404,5 +2559,84 @@ mod tests {
                 "page-picker-style inputs must retain one-line height",
             );
         });
+    }
+
+    #[test]
+    fn underlined_runs_split_around_each_range() {
+        let run = TextRun {
+            len: 10,
+            font: gpui::font("any"),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let wavy = UnderlineStyle {
+            wavy: true,
+            ..UnderlineStyle::default()
+        };
+        let runs = underlined_runs(&run, &[(0..3, wavy), (5..7, wavy)]);
+        let shape: Vec<(usize, bool)> = runs
+            .iter()
+            .map(|run| (run.len, run.underline.is_some()))
+            .collect();
+        assert_eq!(shape, [(3, true), (2, false), (2, true), (3, false)]);
+    }
+
+    #[gpui::test]
+    fn misspelled_words_are_underlined_until_added_to_the_dictionary(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dictionary.txt");
+        cx.update(|cx| cx.set_global(SpellChecker::new(Some(path.clone()))));
+        let (input, cx) = mount_wrapped_input(cx, "teh cat");
+        let underlined = |cx: &mut VisualTestContext| {
+            input.read_with(cx, |input, _| {
+                input
+                    .spelling_underlines()
+                    .into_iter()
+                    .map(|word| input.content()[word].to_string())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(underlined(cx), ["teh"]);
+
+        cx.simulate_keystrokes("home");
+        assert_eq!(
+            underlined(cx),
+            Vec::<String>::new(),
+            "the word at the caret may still be being typed",
+        );
+        cx.simulate_keystrokes("end");
+
+        let right_click = |cx: &mut VisualTestContext, offset: usize| {
+            let at = input.read_with(cx, |input, _| {
+                input.point_for_offset_for_test(offset).expect("painted")
+            });
+            cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::default());
+            cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::default());
+            cx.run_until_parked();
+        };
+        right_click(cx, 5);
+        assert!(
+            cx.debug_bounds("spell-menu-add").is_none(),
+            "a correct word opens no menu",
+        );
+
+        right_click(cx, 1);
+        let add = cx
+            .debug_bounds("spell-menu-add")
+            .expect("menu open")
+            .center();
+        cx.simulate_click(add, Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("spell-menu-add").is_none(), "menu closes");
+        assert_eq!(underlined(cx), Vec::<String>::new());
+        cx.update(|window, cx| {
+            let input = input.read(cx);
+            assert_eq!(input.content().as_ref(), "teh cat");
+            assert!(input.focus_handle.is_focused(window), "still editing");
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "teh\n");
     }
 }

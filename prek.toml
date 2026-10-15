@@ -3,7 +3,8 @@ repo = "https://github.com/pre-commit/pre-commit-hooks"
 rev = "v6.0.0"
 hooks = [
     { id = "trailing-whitespace" },
-    { id = "check-added-large-files" },
+    # The bundled en_US spell-check dictionary is ~550 KB, over the 500 KB default.
+    { id = "check-added-large-files", exclude = "^assets/dictionaries/" },
     { id = "end-of-file-fixer" },
     { id = "check-json" },
     { id = "check-toml" },

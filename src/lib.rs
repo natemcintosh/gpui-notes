@@ -30,6 +30,7 @@ pub mod registry;
 pub mod shortcut_bar;
 pub mod shortcut_hints;
 pub mod source;
+pub mod spellcheck;
 pub mod store;
 pub mod text_input;
 pub mod theme;

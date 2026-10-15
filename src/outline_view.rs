@@ -1863,6 +1863,44 @@ mod tests {
         assert!(cx.debug_bounds("bullet-menu-Copy").is_none(), "menu closed");
     }
 
+    /// Right-clicking a misspelled word mid-edit opens the spelling menu
+    /// without the block or outline taking focus and ending the edit.
+    #[gpui::test]
+    fn spelling_menu_keeps_the_block_editing(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dictionary.txt");
+        cx.update(|cx| {
+            cx.set_global(crate::spellcheck::SpellChecker::new(Some(path.clone())));
+        });
+        let (page, ov, cx) = mount(cx, "- teh cat\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let bv = cx.read(|cx| ov.read(cx).block_view(a).unwrap().clone());
+        let input = cx.read(|cx| bv.read(cx).input_entity_for_test().expect("editing"));
+        let word = cx.read(|cx| {
+            input
+                .read(cx)
+                .point_for_offset_for_test(1)
+                .expect("painted")
+        });
+        cx.simulate_mouse_down(word, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(word, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        let add = cx
+            .debug_bounds("spell-menu-add")
+            .expect("menu open")
+            .center();
+        cx.read(|cx| assert!(bv.read(cx).is_editing(), "right-click keeps editing"));
+
+        cx.simulate_click(add, Modifiers::default());
+        cx.run_until_parked();
+        cx.read(|cx| assert!(bv.read(cx).is_editing(), "choosing the item keeps editing"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "teh\n");
+    }
+
     /// Clicks the fold arrow on `id`'s row.
     fn click_fold_toggle(cx: &mut VisualTestContext, ov: &Entity<OutlineView>, id: BlockId) {
         let entity = cx.read(|cx| ov.read(cx).block_view(id).expect("row mounted").entity_id());

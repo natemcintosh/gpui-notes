@@ -243,6 +243,12 @@ pub fn error_fg() -> Rgba {
     rgb(0xff9999)
 }
 
+/// The wavy underline under a misspelled word.
+#[must_use]
+pub fn spell_underline() -> Rgba {
+    rgb(0xe06c75)
+}
+
 #[must_use]
 pub fn transparent() -> Rgba {
     rgba(0x0000_0000)

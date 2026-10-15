@@ -19,6 +19,7 @@ use gpui_notes::registry::{pick_next, save_all_on_quit, CurrentPage, PageRegistr
 use gpui_notes::shortcut_bar::{ShortcutBar, ShortcutOverlay};
 use gpui_notes::shortcut_hints::{self, ShortcutHint};
 use gpui_notes::source::{source_label, NoteSource};
+use gpui_notes::spellcheck::{self, SpellChecker};
 use gpui_notes::store::NotesStore;
 use gpui_notes::text_input;
 use gpui_notes::theme;
@@ -605,6 +606,11 @@ fn main() {
                 cx,
             );
         }
+        let mut spell_checker = SpellChecker::new(spellcheck::personal_dictionary_path());
+        if let Err(e) = spell_checker.load_personal_words() {
+            errors::report(format!("couldn't read the personal dictionary: {e}"), cx);
+        }
+        cx.set_global(spell_checker);
         cx.set_global(NavHistory::default());
         save_all_on_quit(cx);
         // Deliberately not `navigate_to`: the first page is not a history
