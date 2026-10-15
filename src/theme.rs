@@ -228,6 +228,12 @@ pub fn input_selection() -> Rgba {
     rgba(0x66b2_ff66)
 }
 
+/// Behind whole blocks selected by dragging across rows.
+#[must_use]
+pub fn block_selection() -> Rgba {
+    rgba(0x66b2_ff33)
+}
+
 #[must_use]
 pub fn error_bg() -> Rgba {
     rgb(0x3a2222)

@@ -6,12 +6,13 @@
 //! outline (deleted blocks) are pruned at render time.
 
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 
 use gpui::{
-    actions, anchored, deferred, div, px, relative, AnyElement, App, AppContext, ClipboardItem,
-    Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollHandle,
-    StatefulInteractiveElement, Styled, Subscription, Window,
+    actions, anchored, deferred, div, prelude::FluentBuilder, px, relative, AnyElement, App,
+    AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels,
+    Point, Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 use crate::block_render::theme;
@@ -33,7 +34,13 @@ actions!(
         ToggleCollapse,
         DeleteBlock,
         Undo,
-        Redo
+        Redo,
+        ClearBlockSelection,
+        ExtendSelectionUp,
+        ExtendSelectionDown,
+        CopyBlocks,
+        CutBlocks,
+        DeleteBlocks
     ]
 );
 
@@ -67,6 +74,11 @@ const THREAD_RADIUS: Pixels = px(8.0);
 /// (up/down/tab…) would leak into outline ops mid-edit.
 const BLOCK_CONTEXT: &str = "BlockView && !editing";
 const EDITING_CONTEXT: &str = "BlockView && editing";
+/// Block-selection keys: with a selection, focus sits on the outline itself.
+/// Shift-arrows also start one from a focused-but-viewing block; mid-edit
+/// they stay unbound.
+const SELECTION_CONTEXT: &str = "OutlineView && !BlockView";
+const EXTEND_CONTEXT: &str = "OutlineView && !TextInput";
 
 pub fn bind_keys(cx: &mut App) {
     let cmd = crate::cmd_key();
@@ -92,6 +104,13 @@ pub fn bind_keys(cx: &mut App) {
         // handler checks the caret); elsewhere it does nothing.
         KeyBinding::new("tab", IndentBlock, Some(EDITING_CONTEXT)),
         KeyBinding::new("shift-tab", OutdentBlock, Some(EDITING_CONTEXT)),
+        KeyBinding::new("escape", ClearBlockSelection, Some("OutlineView")),
+        KeyBinding::new("shift-up", ExtendSelectionUp, Some(EXTEND_CONTEXT)),
+        KeyBinding::new("shift-down", ExtendSelectionDown, Some(EXTEND_CONTEXT)),
+        KeyBinding::new(&format!("{cmd}-c"), CopyBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(&format!("{cmd}-x"), CutBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new("backspace", DeleteBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new("delete", DeleteBlocks, Some(SELECTION_CONTEXT)),
     ]);
 }
 
@@ -107,6 +126,24 @@ enum OutlineScope {
     Page,
     Embedded,
     Subtree(BlockId),
+}
+
+/// Whole-block selection, made by dragging out of the block a press began in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockSelection {
+    None,
+    /// The left button went down on `anchor`'s row and has not left it, so
+    /// any selection is still text inside that block's editor.
+    Pressed {
+        anchor: BlockId,
+    },
+    /// Every visible block from `anchor` to `head` in outline order.
+    /// `dragging` while the button that made it is still held.
+    Blocks {
+        anchor: BlockId,
+        head: BlockId,
+        dragging: bool,
+    },
 }
 
 /// The menu a right-click on a bullet opens, at the click position.
@@ -133,6 +170,7 @@ pub struct OutlineView {
     /// from `cx.entity()` before the page itself exists). `Page` scope only.
     linked_refs: Option<Entity<LinkedRefsView>>,
     bullet_menu: Option<BulletMenu>,
+    selection: BlockSelection,
     /// The block the last render threaded to, so tests can see what was drawn.
     #[cfg(test)]
     rendered_active: Option<BlockId>,
@@ -167,6 +205,7 @@ impl OutlineView {
             scroll: ScrollHandle::new(),
             linked_refs: None,
             bullet_menu: None,
+            selection: BlockSelection::None,
             #[cfg(test)]
             rendered_active: None,
             _page_sub: sub,
@@ -510,6 +549,274 @@ impl OutlineView {
         )
     }
 
+    /// A left press on `id`'s row starts a possible block drag and drops any
+    /// earlier block selection.
+    fn press_row(&mut self, id: BlockId, cx: &mut Context<Self>) {
+        if matches!(self.selection, BlockSelection::Blocks { .. }) {
+            cx.notify();
+        }
+        self.selection = BlockSelection::Pressed { anchor: id };
+    }
+
+    /// The pointer moved over `id`'s row. A drag that leaves the block it
+    /// began in turns into a whole-block selection, which then follows the
+    /// pointer row by row.
+    fn drag_over_row(
+        &mut self,
+        id: BlockId,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            // The release happened somewhere we didn't hear about.
+            self.release_drag();
+            return;
+        }
+        let anchor = match self.selection {
+            BlockSelection::Pressed { anchor } if anchor != id => {
+                // The editor's text selection gives way to whole blocks. Close
+                // it here rather than through its blur listener, which runs
+                // after drawing and would leave it on screen (see
+                // `move_edit_to_adjacent`).
+                if let Some(bv) = self.blocks.get(&anchor) {
+                    bv.update(cx, BlockView::end_editing_inner);
+                }
+                // Park focus on the outline so Escape reaches it.
+                window.focus(&self.focus_handle, cx);
+                anchor
+            }
+            BlockSelection::Blocks {
+                anchor,
+                dragging: true,
+                ..
+            } => anchor,
+            _ => return,
+        };
+        let next = BlockSelection::Blocks {
+            anchor,
+            head: id,
+            dragging: true,
+        };
+        if self.selection != next {
+            self.selection = next;
+            cx.notify();
+        }
+    }
+
+    /// Ends a drag, keeping whatever blocks it selected.
+    fn release_drag(&mut self) {
+        self.selection = match self.selection {
+            BlockSelection::Blocks { anchor, head, .. } => BlockSelection::Blocks {
+                anchor,
+                head,
+                dragging: false,
+            },
+            BlockSelection::None | BlockSelection::Pressed { .. } => BlockSelection::None,
+        };
+    }
+
+    /// Drops the block selection. Returns whether there was one.
+    fn clear_block_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let had = matches!(self.selection, BlockSelection::Blocks { .. });
+        if had {
+            self.selection = BlockSelection::None;
+            cx.notify();
+        }
+        had
+    }
+
+    /// The indices into `flat` of the selection's anchor and head. `None`
+    /// without a block selection, or when an end of it is no longer visible.
+    fn selection_ends(&self, flat: &[(usize, BlockId)]) -> Option<(usize, usize)> {
+        let BlockSelection::Blocks { anchor, head, .. } = self.selection else {
+            return None;
+        };
+        let position = |target| flat.iter().position(|&(_, id)| id == target);
+        Some((position(anchor)?, position(head)?))
+    }
+
+    /// The indices into `flat` of the selected rows: anchor to head, plus the
+    /// visible descendants of those blocks, since every operation on a
+    /// selected block takes its subtree along.
+    fn selected_rows(&self, flat: &[(usize, BlockId)]) -> Option<RangeInclusive<usize>> {
+        let (a, h) = self.selection_ends(flat)?;
+        let (start, mut end) = (a.min(h), a.max(h));
+        // Rows after the range deeper than its shallowest block all descend
+        // from the last block at that depth.
+        let shallowest = flat[start..=end].iter().map(|&(d, _)| d).min()?;
+        while flat.get(end + 1).is_some_and(|&(d, _)| d > shallowest) {
+            end += 1;
+        }
+        Some(start..=end)
+    }
+
+    /// The selected blocks whose parent is not selected, in outline order —
+    /// what copy, cut and delete act on, each with its whole subtree.
+    fn selection_roots(&self, cx: &App) -> Vec<BlockId> {
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let Some(rows) = self.selected_rows(&flat) else {
+            return Vec::new();
+        };
+        // A row's parent is in the range iff some earlier row in it is
+        // shallower.
+        let mut shallowest = usize::MAX;
+        flat[rows]
+            .iter()
+            .filter_map(|&(depth, id)| {
+                let root = depth <= shallowest;
+                shallowest = shallowest.min(depth);
+                root.then_some(id)
+            })
+            .collect()
+    }
+
+    /// Shift-Up/Down. Moves the selection's head one row, starting a
+    /// selection on the focused block if there is none. Extending downward
+    /// steps past the subtrees already selected, so every press adds a row.
+    fn extend_selection(
+        &mut self,
+        direction: VerticalDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.selection, BlockSelection::Blocks { .. }) {
+            let Some(focused) = self.focused_block_id(window, cx) else {
+                cx.propagate();
+                return;
+            };
+            self.selection = BlockSelection::Blocks {
+                anchor: focused,
+                head: focused,
+                dragging: false,
+            };
+            window.focus(&self.focus_handle, cx);
+        }
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let (Some((a, h)), Some(rows), BlockSelection::Blocks { anchor, .. }) = (
+            self.selection_ends(&flat),
+            self.selected_rows(&flat),
+            self.selection,
+        ) else {
+            return;
+        };
+        let next = match direction {
+            VerticalDirection::Up => h.checked_sub(1),
+            VerticalDirection::Down if h < a => Some(h + 1),
+            VerticalDirection::Down => Some(rows.end() + 1).filter(|&i| i < flat.len()),
+        };
+        if let Some(next) = next {
+            self.selection = BlockSelection::Blocks {
+                anchor,
+                head: flat[next].1,
+                dragging: false,
+            };
+            self.scroll.scroll_to_item(next);
+        }
+        cx.notify();
+    }
+
+    /// Puts the selected blocks, with their subtrees, on the clipboard as
+    /// markdown. Returns whether there was a selection.
+    fn copy_selection(&self, cx: &mut Context<Self>) -> bool {
+        let roots = self.selection_roots(cx);
+        if roots.is_empty() {
+            return false;
+        }
+        let outline = self.page.read(cx).outline();
+        let markdown: String = roots
+            .iter()
+            .filter_map(|&id| outline.subtree_markdown(id))
+            .collect();
+        cx.write_to_clipboard(ClipboardItem::new_string(markdown));
+        true
+    }
+
+    /// Deletes the selected blocks with their subtrees as one undo step, and
+    /// focuses the row before them (or, for a selection at the top, the one
+    /// after). Like `remove_block`, does nothing when no block would be left.
+    /// Returns whether there was a selection.
+    fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let Some(rows) = self.selected_rows(&flat) else {
+            return false;
+        };
+        let neighbor = rows
+            .start()
+            .checked_sub(1)
+            .or(Some(rows.end() + 1))
+            .and_then(|i| flat.get(i))
+            .map(|&(_, id)| id);
+        let Some(neighbor) = neighbor else {
+            return true;
+        };
+        let roots = self.selection_roots(cx);
+        self.selection = BlockSelection::None;
+        self.page
+            .update(cx, |page, cx| page.delete_blocks(&roots, cx));
+        let handle = self.get_or_create(neighbor, window, cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        true
+    }
+
+    /// The outline-wide half of the block selection: its keys, and the
+    /// presses no row records (see `with_selection_handlers`), which clear it.
+    fn with_block_selection_listeners(
+        root: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        root.on_action(cx.listener(|this, _: &ClearBlockSelection, _, cx| {
+            if !this.clear_block_selection(cx) {
+                cx.propagate();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &ExtendSelectionUp, window, cx| {
+            this.extend_selection(VerticalDirection::Up, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ExtendSelectionDown, window, cx| {
+            this.extend_selection(VerticalDirection::Down, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CopyBlocks, _, cx| {
+            if !this.copy_selection(cx) {
+                cx.propagate();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &CutBlocks, window, cx| {
+            if !(this.copy_selection(cx) && this.delete_selection(window, cx)) {
+                cx.propagate();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &DeleteBlocks, window, cx| {
+            if !this.delete_selection(window, cx) {
+                cx.propagate();
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.clear_block_selection(cx);
+            }),
+        )
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.clear_block_selection(cx);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, _| this.release_drag()),
+        )
+    }
+
+    /// Wires `id`'s row to the block-selection drag.
+    fn with_selection_handlers(id: BlockId, row: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        row.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| this.press_row(id, cx)),
+        )
+        .on_mouse_move(cx.listener(move |this, event, window, cx| {
+            this.drag_over_row(id, event, window, cx);
+        }))
+    }
+
     /// Steps the page's undo history (`Page::undo` or `Page::redo`) and
     /// focuses the block the step touched. A block being edited stops editing
     /// first, so its text is flushed and the step can replace it, then
@@ -543,6 +850,15 @@ impl OutlineView {
             window.focus(&bv.focus_handle(cx), cx);
         }
         self.scroll.scroll_to_item(idx);
+    }
+
+    /// The blocks the block selection covers, in outline order.
+    #[cfg(test)]
+    fn selected_ids_for_test(&self, cx: &App) -> Vec<BlockId> {
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        self.selected_rows(&flat)
+            .map(|rows| flat[rows].iter().map(|&(_, id)| id).collect())
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -673,11 +989,13 @@ impl Fold {
 }
 
 /// One outline row: indent, the fold arrow, the bullet with its guides and
-/// thread, and the block itself.
+/// thread, and the block itself — highlighted from the bullet on when
+/// `selected`.
 fn thread_row(
     depth: usize,
     thread: RowThread,
     fold: Fold,
+    selected: bool,
     on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     on_bullet_menu: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     bv: Entity<BlockView>,
@@ -709,11 +1027,6 @@ fn thread_row(
             .border_color(theme::accent())
             .rounded_bl(THREAD_RADIUS)
     });
-    let bullet_color = if thread.on_path {
-        theme::accent()
-    } else {
-        theme::fg_muted()
-    };
     let row_id = bv.entity_id();
     // Hidden until the row (or the arrow itself, which hangs left of a root
     // row's bounds) is hovered.
@@ -743,11 +1056,7 @@ fn thread_row(
             .on_click(on_toggle)
             .child(if fold == Fold::Folded { "▸" } else { "▾" })
     });
-    let ring = if fold == Fold::Folded {
-        theme::folded_bullet_ring()
-    } else {
-        theme::transparent()
-    };
+    let bullet = bullet(row_id, thread.on_path, fold, on_bullet_menu);
     div()
         .group(ROW_GROUP)
         .relative()
@@ -766,26 +1075,55 @@ fn thread_row(
         .children(toggle)
         .child(
             div()
-                .id(("bullet", row_id))
-                .debug_selector(move || format!("bullet-{row_id}"))
-                .on_mouse_down(MouseButton::Right, on_bullet_menu)
-                .w(BULLET_COLUMN_WIDTH)
-                .flex_none()
                 .flex()
-                .justify_center()
-                .pt(px(BULLET_CENTER_Y - FOLDED_RING_SIZE / 2.))
-                .child(
-                    div()
-                        .size(px(FOLDED_RING_SIZE))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(ring)
-                        .child(div().size(px(BULLET_SIZE)).rounded_full().bg(bullet_color)),
-                ),
+                .flex_row()
+                .flex_1()
+                .min_w_0()
+                .items_start()
+                .rounded_sm()
+                .when(selected, |el| el.bg(theme::block_selection()))
+                .child(bullet)
+                .child(bv),
         )
-        .child(bv)
+}
+
+/// The bullet dot, ringed when its block is folded. A right-click opens
+/// the bullet menu.
+fn bullet(
+    row_id: gpui::EntityId,
+    on_path: bool,
+    fold: Fold,
+    on_bullet_menu: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let bullet_color = if on_path {
+        theme::accent()
+    } else {
+        theme::fg_muted()
+    };
+    let ring = if fold == Fold::Folded {
+        theme::folded_bullet_ring()
+    } else {
+        theme::transparent()
+    };
+    div()
+        .id(("bullet", row_id))
+        .debug_selector(move || format!("bullet-{row_id}"))
+        .on_mouse_down(MouseButton::Right, on_bullet_menu)
+        .w(BULLET_COLUMN_WIDTH)
+        .flex_none()
+        .flex()
+        .justify_center()
+        .pt(px(BULLET_CENTER_Y - FOLDED_RING_SIZE / 2.))
+        .child(
+            div()
+                .size(px(FOLDED_RING_SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(ring)
+                .child(div().size(px(BULLET_SIZE)).rounded_full().bg(bullet_color)),
+        )
 }
 
 fn collect_folds(blocks: &[Block], out: &mut HashMap<BlockId, Fold>) {
@@ -813,6 +1151,7 @@ impl Render for OutlineView {
         let root = div()
             .id("outline")
             .track_focus(&self.focus_handle)
+            .key_context("OutlineView")
             .on_action(cx.listener(|this, _: &FocusUp, window, cx| {
                 this.move_focus(-1, window, cx);
             }))
@@ -848,6 +1187,7 @@ impl Render for OutlineView {
             .w_full()
             .line_height(relative(LINE_HEIGHT))
             .gap(ROW_GAP);
+        let root = Self::with_block_selection_listeners(root, cx);
 
         // Only the page-level view scrolls: a subtree view is rendered inside
         // that scroll container, and nesting a second one would trap the wheel.
@@ -866,21 +1206,25 @@ impl Render for OutlineView {
             self.rendered_active = active;
         }
         let threads = thread_rows(&flat, active);
-        for ((depth, id), thread) in flat.into_iter().zip(threads) {
+        let selected = self.selected_rows(&flat);
+        for (row, ((depth, id), thread)) in flat.into_iter().zip(threads).enumerate() {
             let bv = self.get_or_create(id, window, cx);
             let on_toggle =
                 cx.listener(move |this, _, window, cx| this.toggle_fold(id, window, cx));
             let on_bullet_menu = cx.listener(move |this, event, window, cx| {
                 this.open_bullet_menu(id, event, window, cx);
             });
-            root = root.child(thread_row(
+            let is_selected = selected.as_ref().is_some_and(|rows| rows.contains(&row));
+            let row = thread_row(
                 depth,
                 thread,
                 folds[&id],
+                is_selected,
                 on_toggle,
                 on_bullet_menu,
                 bv,
-            ));
+            );
+            root = root.child(Self::with_selection_handlers(id, row, cx));
         }
 
         if self.scope == OutlineScope::Page {
@@ -2260,6 +2604,283 @@ mod tests {
             let outline = page.read(cx).outline();
             assert_eq!(outline.roots.len(), 2, "tab mid-edit must not indent");
         });
+    }
+
+    // ── Block selection by dragging ────────────────────────────────────
+
+    fn block_center(cx: &mut VisualTestContext, id: BlockId) -> Point<Pixels> {
+        cx.debug_bounds(format!("block-view-{id:?}").leak())
+            .expect("block painted")
+            .center()
+    }
+
+    fn drag_to(cx: &mut VisualTestContext, id: BlockId) {
+        let to = block_center(cx, id);
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    fn selected(cx: &mut VisualTestContext, ov: &Entity<OutlineView>) -> Vec<BlockId> {
+        cx.read(|cx| ov.read(cx).selected_ids_for_test(cx))
+    }
+
+    fn root_ids(cx: &mut VisualTestContext, page: &Entity<Page>) -> Vec<BlockId> {
+        cx.read(|cx| page.read(cx).outline().roots.iter().map(|b| b.id).collect())
+    }
+
+    /// Presses on `id` — entering its editor, as a real click does — and
+    /// settles, leaving the button held.
+    fn press(cx: &mut VisualTestContext, id: BlockId) {
+        let at = block_center(cx, id);
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn dragging_out_of_an_edited_block_selects_whole_blocks(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- alpha\n- beta\n- gamma\n");
+        let ids = root_ids(cx, &page);
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+
+        press(cx, a);
+        let inside = block_center(cx, a) + point(px(10.), px(0.));
+        cx.simulate_mouse_move(inside, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let bv = ov.read(cx).block_view(a).expect("mounted").read(cx);
+            assert!(bv.is_editing(), "a drag inside the block selects text");
+        });
+        assert!(selected(cx, &ov).is_empty(), "no blocks while inside");
+
+        drag_to(cx, b);
+        assert_eq!(selected(cx, &ov), vec![a, b], "leaving selects both blocks");
+        cx.update(|window, cx| {
+            let ov = ov.read(cx);
+            assert!(
+                !ov.block_view(a).expect("mounted").read(cx).is_editing(),
+                "the editor gives way to the block selection",
+            );
+            assert!(
+                ov.focus_handle.is_focused(window),
+                "focus parks on the outline"
+            );
+        });
+
+        drag_to(cx, c);
+        assert_eq!(
+            selected(cx, &ov),
+            vec![a, b, c],
+            "whole blocks follow the pointer"
+        );
+
+        drag_to(cx, a);
+        assert_eq!(
+            selected(cx, &ov),
+            vec![a],
+            "back on the start, only it stays"
+        );
+
+        let at = block_center(cx, a);
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        let to = block_center(cx, c);
+        cx.simulate_mouse_move(to, None, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            selected(cx, &ov),
+            vec![a],
+            "the selection survives the release"
+        );
+    }
+
+    #[gpui::test]
+    fn dragging_upward_selects_back_to_the_start(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- alpha\n- beta\n- gamma\n");
+        let ids = root_ids(cx, &page);
+
+        press(cx, ids[2]);
+        drag_to(cx, ids[0]);
+
+        assert_eq!(
+            selected(cx, &ov),
+            ids,
+            "outline order, whichever way the drag went"
+        );
+    }
+
+    #[gpui::test]
+    fn escape_or_a_click_clears_the_block_selection(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- alpha\n- beta\n- gamma\n");
+        let ids = root_ids(cx, &page);
+
+        press(cx, ids[0]);
+        drag_to(cx, ids[1]);
+        let at = block_center(cx, ids[1]);
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(selected(cx, &ov).is_empty(), "escape clears it");
+
+        press(cx, ids[0]);
+        drag_to(cx, ids[1]);
+        let at = block_center(cx, ids[1]);
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        let at = block_center(cx, ids[2]);
+        cx.simulate_click(at, Modifiers::default());
+        cx.run_until_parked();
+        assert!(selected(cx, &ov).is_empty(), "a click clears it");
+        cx.read(|cx| {
+            let bv = ov.read(cx).block_view(ids[2]).expect("mounted").read(cx);
+            assert!(bv.is_editing(), "and edits the clicked block as usual");
+        });
+    }
+
+    fn serialized(cx: &mut VisualTestContext, page: &Entity<Page>) -> String {
+        cx.read(|cx| page.read(cx).outline().serialize())
+    }
+
+    #[gpui::test]
+    fn shift_arrows_select_from_the_focused_block(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n- c\n");
+        let ids = root_ids(cx, &page);
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+
+        focus_block(cx, &ov, b);
+        cx.simulate_keystrokes("shift-down");
+        cx.run_until_parked();
+        assert_eq!(selected(cx, &ov), vec![b, c], "it and the next block");
+        cx.update(|window, cx| {
+            assert!(
+                ov.read(cx).focus_handle.is_focused(window),
+                "focus parks on the outline"
+            );
+        });
+
+        cx.simulate_keystrokes("shift-down");
+        cx.run_until_parked();
+        assert_eq!(selected(cx, &ov), vec![b, c], "clamped at the last block");
+
+        cx.simulate_keystrokes("shift-up shift-up");
+        cx.run_until_parked();
+        assert_eq!(
+            selected(cx, &ov),
+            vec![a, b],
+            "the head crosses back over the start"
+        );
+
+        cx.simulate_keystrokes("shift-up");
+        cx.run_until_parked();
+        assert_eq!(selected(cx, &ov), vec![a, b], "clamped at the first block");
+    }
+
+    #[gpui::test]
+    fn shift_arrows_adjust_a_dragged_selection(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n- c\n");
+        let ids = root_ids(cx, &page);
+
+        press(cx, ids[0]);
+        drag_to(cx, ids[1]);
+        let at = block_center(cx, ids[1]);
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        cx.simulate_keystrokes("shift-down");
+        cx.run_until_parked();
+
+        assert_eq!(selected(cx, &ov), ids);
+    }
+
+    /// Operations take a selected block's subtree along, so the highlight
+    /// covers it and Shift-Down steps past it.
+    #[gpui::test]
+    fn a_selected_block_brings_its_children(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n  - a1\n- b\n- c\n");
+        let (a, a1, b) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (
+                outline.roots[0].id,
+                outline.roots[0].children[0].id,
+                outline.roots[1].id,
+            )
+        });
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("shift-down");
+        cx.run_until_parked();
+        assert_eq!(selected(cx, &ov), vec![a, a1, b]);
+
+        cx.simulate_keystrokes(&format!("{}-c", crate::cmd_key()));
+        cx.run_until_parked();
+        assert_eq!(clipboard(cx).as_deref(), Some("- a\n  - a1\n- b\n"));
+        assert_eq!(
+            serialized(cx, &page),
+            "- a\n  - a1\n- b\n- c\n",
+            "copy leaves the page"
+        );
+        assert_eq!(selected(cx, &ov), vec![a, a1, b], "and the selection");
+    }
+
+    /// A child selected without its parent is copied as a block of its own.
+    #[gpui::test]
+    fn copy_reroots_a_selection_that_starts_inside_a_parent(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n  - a1\n- b\n");
+        let a1 = cx.read(|cx| page.read(cx).outline().roots[0].children[0].id);
+
+        focus_block(cx, &ov, a1);
+        cx.simulate_keystrokes(&format!("shift-down {}-c", crate::cmd_key()));
+        cx.run_until_parked();
+
+        assert_eq!(clipboard(cx).as_deref(), Some("- a1\n- b\n"));
+    }
+
+    #[gpui::test]
+    fn cut_removes_the_selection_in_one_undo_step(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n- c\n");
+        let ids = root_ids(cx, &page);
+        let cmd = crate::cmd_key();
+
+        focus_block(cx, &ov, ids[0]);
+        cx.simulate_keystrokes(&format!("shift-down {cmd}-x"));
+        cx.run_until_parked();
+
+        assert_eq!(clipboard(cx).as_deref(), Some("- a\n- b\n"));
+        assert_eq!(serialized(cx, &page), "- c\n");
+        assert_eq!(
+            focused_id(cx, &ov),
+            Some(ids[2]),
+            "focus lands after the cut"
+        );
+        assert_eq!(
+            selected(cx, &ov),
+            Vec::<BlockId>::new(),
+            "the selection is gone"
+        );
+
+        cx.simulate_keystrokes(&format!("{cmd}-z"));
+        cx.run_until_parked();
+        assert_eq!(
+            serialized(cx, &page),
+            "- a\n- b\n- c\n",
+            "one undo restores both"
+        );
+    }
+
+    #[gpui::test]
+    fn backspace_deletes_the_selected_blocks(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n  - b1\n- c\n");
+        let ids = root_ids(cx, &page);
+
+        focus_block(cx, &ov, ids[1]);
+        cx.simulate_keystrokes("shift-down backspace");
+        cx.run_until_parked();
+
+        assert_eq!(
+            serialized(cx, &page),
+            "- a\n",
+            "b, its child and c are gone"
+        );
+        assert_eq!(
+            focused_id(cx, &ov),
+            Some(ids[0]),
+            "focus moves to the block above"
+        );
     }
 
     #[test]

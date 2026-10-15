@@ -207,6 +207,19 @@ impl Page {
         self.apply_outline_edit(id, cx, |o| o.delete(id).is_some())
     }
 
+    /// Deletes each of `ids` with its subtree, as one undo step that
+    /// refocuses the first.
+    pub fn delete_blocks(&mut self, ids: &[BlockId], cx: &mut Context<Self>) -> bool {
+        let Some(&first) = ids.first() else {
+            return false;
+        };
+        self.apply_outline_edit(first, cx, |o| {
+            // Not `any`, which would stop after the first deletion.
+            let deleted = ids.iter().filter(|&&id| o.delete(id).is_some()).count();
+            deleted > 0
+        })
+    }
+
     /// Steps back to the outline before the most recent edit. Returns the
     /// block that edit touched, for the view to focus, or `None` when there
     /// is nothing to undo.
