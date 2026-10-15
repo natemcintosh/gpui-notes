@@ -22,7 +22,7 @@ There are no releases yet. Once one is tagged, install or upgrade with [`cargo-b
 cargo binstall --git https://github.com/natemcintosh/gpui-notes gpui-notes
 ```
 
-`--git` is required because GPUI is a git dependency, so the crate can't be published to crates.io. Prebuilt binaries cover `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. On any other target binstall falls back to building from source, which needs the platform setup below. The Linux binaries are built on Ubuntu 24.04 and link against its glibc, Wayland, xkbcommon and fontconfig.
+`--git` is required because GPUI is a git dependency, so the crate can't be published to crates.io. Prebuilt binaries cover `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. On any other target binstall falls back to building from source, which needs the platform setup below. The Linux binaries are built on Ubuntu 24.04 and link against its glibc, Wayland, xkbcommon and fontconfig.
 
 Upgrading replaces only the binary. Your notes and settings are kept, because neither is stored next to the binary.
 
@@ -45,7 +45,7 @@ The same directory also holds `dictionary.txt`, the words added with "Add to dic
 
 ## Releasing
 
-`just release 0.2.0` bumps the version in `Cargo.toml`, commits, tags `v0.2.0` and pushes. Pushing the tag runs `.github/workflows/release.yml`, which creates the GitHub release and uploads one `gpui-notes-<target>-v<version>.tar.gz` per target (plus a `.sha256`). Those names are what `[package.metadata.binstall]` in `Cargo.toml` expects, so change both together.
+`just release 0.2.0` bumps the version in `Cargo.toml`, commits, tags `v0.2.0` and pushes. Pushing the tag runs `.github/workflows/release.yml`, which creates the GitHub release and uploads one `gpui-notes-<target>-v<version>.tar.gz` (`.zip` on Windows) per target (plus a `.sha256`). Those names are what `[package.metadata.binstall]` in `Cargo.toml` expects, so change both together.
 
 ## macOS setup
 

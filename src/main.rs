@@ -1,4 +1,7 @@
 #![allow(clippy::unreadable_literal)]
+// Release builds on Windows are GUI-subsystem apps, so launching one doesn't
+// also open a console window. Debug builds keep the console for logs.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use gpui::{
     actions, div, prelude::*, px, size, App, AppContext, Bounds, Context, Div, ElementId, Entity,

@@ -1,6 +1,7 @@
 # Pushing a `v*` tag (see `just release`) creates a GitHub release and attaches
 # a prebuilt binary per target, named to match `[package.metadata.binstall]`
-# in Cargo.toml: `gpui-notes-<target>-v<version>.tar.gz`, binary at the root.
+# in Cargo.toml: `gpui-notes-<target>-v<version>.tar.gz` (`.zip` on Windows),
+# binary at the root.
 name: Release
 
 on:
@@ -40,6 +41,10 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+          # Uploaded as .zip (the action's default on Windows); see the
+          # binstall override in Cargo.toml.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
