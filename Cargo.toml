@@ -2,6 +2,8 @@
 name = "gpui-notes"
 version = "0.1.0"
 edition = "2021"
+description = "A Logseq-inspired outliner for plain-markdown notes, built on GPUI"
+repository = "https://github.com/natemcintosh/gpui-notes"
 
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3" }
@@ -15,6 +17,8 @@ pulldown-cmark = { version = "0.11", default-features = false }
 regex = "1"
 unicode-segmentation = "1.13.2"
 spellbook = "0.4.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 
 # font-kit is required on macOS — without it gpui_macos falls back to a
 # NoopTextSystem and text never paints. See README "GPUI dependency".
@@ -31,3 +35,11 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3
 gpui = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3", features = ["test-support"] }
 rstest = "0.26.1"
 tempfile = "3"
+
+# Prebuilt binaries for `cargo binstall`, published by .github/workflows/release.yml.
+# gpui is a git dependency, so this crate can't go on crates.io; install with
+# `cargo binstall --git https://github.com/natemcintosh/gpui-notes gpui-notes`.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"

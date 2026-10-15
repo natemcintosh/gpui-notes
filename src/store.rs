@@ -3,6 +3,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::config::{self, Config};
+
 const PAGES_DIR: &str = "pages";
 const JOURNALS_DIR: &str = "journals";
 /// Journal filenames on disk use Logseq's underscore form. Journal *titles* in
@@ -29,27 +31,26 @@ impl NotesStore {
         &self.root
     }
 
+    /// The notes root: `GPUI_NOTES_ROOT` if set, else `notes_root` from
+    /// `config.toml`, else `~/Desktop/logseq-test-zone`.
+    ///
+    /// Debug builds skip `config.toml`, so a bare `cargo run` during
+    /// development can't write to the graph an installed copy points at.
+    ///
     /// # Errors
-    /// Returns an error if `GPUI_NOTES_ROOT` is set but not absolute, or if the
-    /// home directory cannot be determined.
+    /// Returns an error if `GPUI_NOTES_ROOT` or `notes_root` is not absolute,
+    /// if `config.toml` can't be read or parsed, or if the home directory
+    /// cannot be determined.
     pub fn default_root() -> io::Result<PathBuf> {
-        if let Some(override_root) = std::env::var_os("GPUI_NOTES_ROOT") {
-            let p = PathBuf::from(override_root);
-            if !p.is_absolute() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "GPUI_NOTES_ROOT must be an absolute path",
-                ));
-            }
-            return Ok(p);
-        }
-        let home_dir = dirs::home_dir().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "could not determine home directory",
-            )
-        })?;
-        Ok(home_dir.join("Desktop").join("logseq-test-zone"))
+        let config = match config::config_path() {
+            Some(path) if !cfg!(debug_assertions) => Config::load(&path)?,
+            _ => Config::default(),
+        };
+        resolve_root(
+            std::env::var_os("GPUI_NOTES_ROOT").map(PathBuf::from),
+            &config,
+            dirs::home_dir().as_deref(),
+        )
     }
 
     /// # Errors
@@ -153,6 +154,36 @@ impl NotesStore {
     }
 }
 
+/// [`NotesStore::default_root`]'s precedence, with its inputs passed in.
+fn resolve_root(
+    env_root: Option<PathBuf>,
+    config: &Config,
+    home: Option<&Path>,
+) -> io::Result<PathBuf> {
+    let no_home = || {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "could not determine home directory",
+        )
+    };
+    let (root, source) = if let Some(root) = env_root {
+        (root, "GPUI_NOTES_ROOT")
+    } else if let Some(root) = &config.notes_root {
+        let root = config::expand_home(root, home).ok_or_else(no_home)?;
+        (root, "notes_root in config.toml")
+    } else {
+        let home = home.ok_or_else(no_home)?;
+        return Ok(home.join("Desktop").join("logseq-test-zone"));
+    };
+    if !root.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{source} must be an absolute path"),
+        ));
+    }
+    Ok(root)
+}
+
 fn atomic_write(final_path: &Path, body: &str) -> io::Result<()> {
     let mut tmp_path = final_path.to_path_buf();
     let tmp_name = format!(
@@ -212,9 +243,56 @@ fn decode_page_name(encoded: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_page_name, encode_page_name};
+    use super::{decode_page_name, encode_page_name, resolve_root};
+    use crate::config::Config;
 
     use rstest::rstest;
+    use std::path::{Path, PathBuf};
+
+    const HOME: &str = "/home/me";
+
+    fn config(notes_root: &str) -> Config {
+        Config {
+            notes_root: Some(notes_root.into()),
+        }
+    }
+
+    #[test]
+    fn env_var_beats_config() {
+        let root = resolve_root(
+            Some("/env/notes".into()),
+            &config("/config/notes"),
+            Some(Path::new(HOME)),
+        );
+        assert_eq!(root.unwrap(), PathBuf::from("/env/notes"));
+    }
+
+    #[test]
+    fn config_beats_the_default_and_expands_tilde() {
+        let root = resolve_root(None, &config("~/logseq"), Some(Path::new(HOME)));
+        assert_eq!(root.unwrap(), PathBuf::from("/home/me/logseq"));
+    }
+
+    #[test]
+    fn default_is_the_test_zone() {
+        let root = resolve_root(None, &Config::default(), Some(Path::new(HOME)));
+        assert_eq!(
+            root.unwrap(),
+            PathBuf::from("/home/me/Desktop/logseq-test-zone")
+        );
+    }
+
+    #[rstest]
+    #[case::env(Some("relative".into()), Config::default(), "GPUI_NOTES_ROOT")]
+    #[case::config(None, config("relative"), "config.toml")]
+    fn relative_roots_are_rejected(
+        #[case] env_root: Option<PathBuf>,
+        #[case] config: Config,
+        #[case] names: &str,
+    ) {
+        let err = resolve_root(env_root, &config, Some(Path::new(HOME))).unwrap_err();
+        assert!(err.to_string().contains(names), "{err}");
+    }
 
     #[test]
     fn encode_roundtrips_slash() {

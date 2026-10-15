@@ -16,24 +16,10 @@ use unicode_segmentation::UnicodeSegmentation;
 const EN_US_AFF: &str = include_str!("../assets/dictionaries/en_US.aff");
 const EN_US_DIC: &str = include_str!("../assets/dictionaries/en_US.dic");
 
-/// The app's per-machine config directory: `~/.config/gpui-notes` on Linux
-/// (respecting `$XDG_CONFIG_HOME`) and macOS, `%APPDATA%\gpui-notes` on
-/// Windows. `None` if the home directory can't be determined.
-#[must_use]
-pub fn config_dir() -> Option<PathBuf> {
-    let base = if cfg!(target_os = "macos") {
-        // `dirs::config_dir` is `~/Library/Application Support` on macOS.
-        dirs::home_dir().map(|home| home.join(".config"))
-    } else {
-        dirs::config_dir()
-    };
-    base.map(|dir| dir.join("gpui-notes"))
-}
-
 /// The personal word list ("Add to dictionary"), one word per line.
 #[must_use]
 pub fn personal_dictionary_path() -> Option<PathBuf> {
-    config_dir().map(|dir| dir.join("dictionary.txt"))
+    crate::config::config_dir().map(|dir| dir.join("dictionary.txt"))
 }
 
 /// How many corrections the spelling menu offers.

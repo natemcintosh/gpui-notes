@@ -14,12 +14,38 @@ A Rust + [GPUI](https://www.gpui.rs/) note-taking app inspired by [Logseq](https
 
 Not currently planned (may be revisited later): graph view, query blocks, task states, flashcards, PDF annotation, whiteboards, and a plugin ecosystem.
 
-## Notes storage
+## Installing
 
-Pages are stored as plain `.md` files in a notes root directory, which defaults to
-`~/Desktop/logseq-test-zone`.
+There are no releases yet. Once one is tagged, install or upgrade with [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
 
-Override the location with the `GPUI_NOTES_ROOT` environment variable (must be an absolute path).
+```sh
+cargo binstall --git https://github.com/natemcintosh/gpui-notes gpui-notes
+```
+
+`--git` is required because GPUI is a git dependency, so the crate can't be published to crates.io. Prebuilt binaries cover `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. On any other target binstall falls back to building from source, which needs the platform setup below. The Linux binaries are built on Ubuntu 24.04 and link against its glibc, Wayland, xkbcommon and fontconfig.
+
+Upgrading replaces only the binary. Your notes and settings are kept, because neither is stored next to the binary.
+
+## Notes storage and settings
+
+Pages are stored as plain `.md` files in a notes root directory. The app picks the first of these that applies:
+
+1. the `GPUI_NOTES_ROOT` environment variable (must be an absolute path);
+2. `notes_root` in `config.toml` (absolute, or starting with `~/`), read by release builds only, so a bare `cargo run` during development never touches your real graph;
+3. `~/Desktop/logseq-test-zone`.
+
+To point an installed copy at your Logseq graph, create `config.toml`:
+
+```toml
+# ~/.config/gpui-notes/config.toml   (%APPDATA%\gpui-notes\config.toml on Windows)
+notes_root = "~/logseq"
+```
+
+The same directory also holds `dictionary.txt`, the words added with "Add to dictionary".
+
+## Releasing
+
+`just release 0.2.0` bumps the version in `Cargo.toml`, commits, tags `v0.2.0` and pushes. Pushing the tag runs `.github/workflows/release.yml`, which creates the GitHub release and uploads one `gpui-notes-<target>-v<version>.tar.gz` per target (plus a `.sha256`). Those names are what `[package.metadata.binstall]` in `Cargo.toml` expects, so change both together.
 
 ## macOS setup
 

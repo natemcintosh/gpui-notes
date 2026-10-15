@@ -15,6 +15,7 @@ pub fn cmd_key() -> &'static str {
 pub mod block_render;
 pub mod block_view;
 pub mod calc;
+pub mod config;
 pub mod errors;
 pub mod history;
 pub mod journal;
