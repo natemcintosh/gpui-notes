@@ -40,6 +40,9 @@ release version:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "$(git status --porcelain)" ]; then echo "working tree not clean" >&2; exit 1; fi
+    if git rev-parse -q --verify "refs/tags/v{{version}}" >/dev/null; then echo "tag v{{version}} already exists" >&2; exit 1; fi
+    current=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+    if [ "$current" = "{{version}}" ]; then echo "Cargo.toml is already at version {{version}}; pick a new version" >&2; exit 1; fi
     # First `version =` line only: that's [package]'s.
     perl -0pi -e 's/^version = ".*?"$/version = "{{version}}"/m' Cargo.toml
     grep -q '^version = "{{version}}"$' Cargo.toml || { echo "couldn't set version in Cargo.toml" >&2; exit 1; }
