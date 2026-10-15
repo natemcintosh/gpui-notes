@@ -37,7 +37,9 @@ actions!(
         ToggleShortcuts,
         NavigateBack,
         NavigateForward,
-        Quit
+        Quit,
+        Hide,
+        HideOtherApps
     ]
 );
 
@@ -587,7 +589,17 @@ fn main() {
             KeyBinding::new("alt-left", NavigateBack, Some("RootView && !TextInput")),
             KeyBinding::new("alt-right", NavigateForward, Some("RootView && !TextInput")),
         ]);
+        // macOS apps conventionally hide with cmd-h (and hide everything
+        // else with cmd-alt-h); there is no such convention on Linux, where
+        // ctrl-h is just a key.
+        #[cfg(target_os = "macos")]
+        cx.bind_keys([
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("cmd-alt-h", HideOtherApps, None),
+        ]);
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+        cx.on_action(|_: &Hide, cx: &mut App| cx.hide());
+        cx.on_action(|_: &HideOtherApps, cx: &mut App| cx.hide_other_apps());
 
         let root_dir = NotesStore::default_root().expect("resolve notes root");
         let store = NotesStore::new(root_dir).expect("init notes store");
