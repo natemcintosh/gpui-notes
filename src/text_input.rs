@@ -350,9 +350,13 @@ pub struct TextInput {
     spell_menu: Option<SpellMenu>,
 }
 
-/// The "Add to dictionary" menu a right-click on a misspelled word opens.
+/// The menu a right-click on a misspelled word opens: corrections, then
+/// "Add to dictionary".
 struct SpellMenu {
     word: SharedString,
+    /// Where `word` is in `content`, for replacing it with a suggestion.
+    range: Range<usize>,
+    suggestions: Vec<SharedString>,
     position: Point<Pixels>,
 }
 
@@ -664,15 +668,23 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) {
         let (offset, _) = self.caret_for_mouse_position(event.position);
-        let Some(word) = self
+        let Some(range) = self
             .misspelled
             .iter()
             .find(|word| word.contains(&offset) || word.end == offset)
+            .cloned()
         else {
             return;
         };
+        let word = &self.content[range.clone()];
+        let suggestions = cx
+            .try_global::<SpellChecker>()
+            .map(|checker| checker.suggest(word))
+            .unwrap_or_default();
         self.spell_menu = Some(SpellMenu {
-            word: self.content[word.clone()].to_string().into(),
+            word: word.to_string().into(),
+            range,
+            suggestions: suggestions.into_iter().map(Into::into).collect(),
             position: event.position,
         });
         cx.notify();
@@ -704,11 +716,45 @@ impl TextInput {
             .collect()
     }
 
+    /// Replaces the menu's word with `suggestion`, unless the text under it
+    /// changed while the menu was open.
+    fn apply_suggestion(&mut self, suggestion: &str, cx: &mut Context<Self>) {
+        let Some(menu) = self.spell_menu.take() else {
+            return;
+        };
+        if self.content.get(menu.range.clone()) == Some(menu.word.as_ref()) {
+            self.replace_range(menu.range, suggestion, suggestion.len(), cx);
+        }
+        cx.notify();
+    }
+
     fn render_spell_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.spell_menu.as_ref()?;
         let word = menu.word.clone();
+        let item = |id: SharedString| {
+            div()
+                .id(id.clone())
+                .debug_selector(move || id.to_string())
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .text_color(theme::header_fg())
+                .hover(|s| s.bg(theme::row_hover()))
+        };
+        let suggestions = menu.suggestions.iter().enumerate().map(|(i, suggestion)| {
+            let suggestion = suggestion.clone();
+            item(format!("spell-menu-suggestion-{i}").into())
+                .child(suggestion.clone())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.apply_suggestion(&suggestion, cx);
+                }))
+        });
         let list = div()
             .id("spell-menu")
+            .flex()
+            .flex_col()
+            .gap_0p5()
             .bg(theme::overlay_bg())
             .border_1()
             .border_color(theme::overlay_border())
@@ -720,16 +766,12 @@ impl TextInput {
                 this.spell_menu = None;
                 cx.notify();
             }))
+            .children(suggestions)
+            .when(!menu.suggestions.is_empty(), |el| {
+                el.child(div().h(px(1.)).my_0p5().bg(theme::overlay_border()))
+            })
             .child(
-                div()
-                    .id("spell-menu-add")
-                    .debug_selector(|| "spell-menu-add".into())
-                    .cursor_pointer()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_sm()
-                    .text_color(theme::header_fg())
-                    .hover(|s| s.bg(theme::row_hover()))
+                item("spell-menu-add".into())
                     .child(format!("Add \u{201c}{word}\u{201d} to dictionary"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.spell_menu = None;
@@ -2638,5 +2680,38 @@ mod tests {
             assert!(input.focus_handle.is_focused(window), "still editing");
         });
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "teh\n");
+    }
+
+    #[gpui::test]
+    fn choosing_a_suggestion_replaces_the_word(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(SpellChecker::new(None)));
+        let (input, cx) = mount_wrapped_input(cx, "teh cat");
+        let the = cx.update(|_, cx| {
+            cx.global::<SpellChecker>()
+                .suggest("teh")
+                .iter()
+                .position(|s| s == "the")
+                .expect("`the` is suggested")
+        });
+
+        let at = input.read_with(cx, |input, _| {
+            input.point_for_offset_for_test(1).expect("painted")
+        });
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        let pick = cx
+            .debug_bounds(format!("spell-menu-suggestion-{the}").leak())
+            .expect("suggestion listed")
+            .center();
+        cx.simulate_click(pick, Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("spell-menu-add").is_none(), "menu closes");
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.content().as_ref(), "the cat");
+            assert_eq!(input.cursor_offset_for_test(), 3, "caret after the word");
+            assert_eq!(input.spelling_underlines(), Vec::<Range<usize>>::new());
+        });
     }
 }

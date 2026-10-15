@@ -36,6 +36,9 @@ pub fn personal_dictionary_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("dictionary.txt"))
 }
 
+/// How many corrections the spelling menu offers.
+pub const MAX_SUGGESTIONS: usize = 5;
+
 pub struct SpellChecker {
     dictionary: Dictionary,
     /// Where added words are appended. `None` keeps them in memory only.
@@ -122,6 +125,15 @@ impl SpellChecker {
     #[must_use]
     pub fn check(&self, word: &str) -> bool {
         self.dictionary.check(word)
+    }
+
+    /// Up to [`MAX_SUGGESTIONS`] corrections for `word`, best first.
+    #[must_use]
+    pub fn suggest(&self, word: &str) -> Vec<String> {
+        let mut suggestions = Vec::new();
+        self.dictionary.suggest(word, &mut suggestions);
+        suggestions.truncate(MAX_SUGGESTIONS);
+        suggestions
     }
 
     /// The byte ranges of `text`'s misspelled words.
@@ -236,6 +248,13 @@ mod tests {
             .map(|r| &text[r])
             .collect();
         assert_eq!(flagged, ["Teh"]);
+    }
+
+    #[test]
+    fn suggests_corrections() {
+        let suggestions = checker().suggest("teh");
+        assert!(suggestions.iter().any(|s| s == "the"), "{suggestions:?}");
+        assert!(suggestions.len() <= MAX_SUGGESTIONS);
     }
 
     #[test]
