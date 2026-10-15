@@ -120,7 +120,7 @@ pub fn bind_keys(cx: &mut App) {
 /// its descendants from some *other* page, are not their own scroll root, and
 /// carry no references section of their own. `Embedded` views back the days
 /// in journals mode: the whole page, but likewise inside someone else's
-/// scroll container and without references.
+/// scroll container; like `Page`, they end with the page's references.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OutlineScope {
     Page,
@@ -167,7 +167,8 @@ pub struct OutlineView {
     /// target row. Child indices line up with `flatten_visible` order.
     scroll: ScrollHandle,
     /// Built on first render (not in `new`: `Page::new` constructs its view
-    /// from `cx.entity()` before the page itself exists). `Page` scope only.
+    /// from `cx.entity()` before the page itself exists). `Page` and
+    /// `Embedded` scopes only.
     linked_refs: Option<Entity<LinkedRefsView>>,
     bullet_menu: Option<BulletMenu>,
     selection: BlockSelection,
@@ -1227,7 +1228,7 @@ impl Render for OutlineView {
             root = root.child(Self::with_selection_handlers(id, row, cx));
         }
 
-        if self.scope == OutlineScope::Page {
+        if matches!(self.scope, OutlineScope::Page | OutlineScope::Embedded) {
             let page = self.page.clone();
             let refs = self
                 .linked_refs

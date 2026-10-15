@@ -4,8 +4,9 @@
 //!
 //! Each day is an `OutlineScope::Embedded` `OutlineView` over the journal's
 //! `Page`, so blocks are edited in place and saved through the registry like
-//! any other page. Only dates with a journal on disk are listed (plus today),
-//! so scrolling never creates empty files for the days in between.
+//! any other page, and ends with that day's linked references. Only dates
+//! with a journal on disk are listed (plus today), so scrolling never creates
+//! empty files for the days in between.
 
 use std::io;
 
@@ -249,6 +250,47 @@ mod tests {
     use crate::{block_view, outline_view, text_input};
     use gpui::{size, TestAppContext};
     use tempfile::TempDir;
+
+    #[gpui::test]
+    fn a_day_lists_references_to_it_from_another_day(cx: &mut TestAppContext) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let today = journal::today();
+        let yesterday = today.pred_opt().unwrap();
+        let (_view, cx) = cx.add_window_view(move |_window, cx| {
+            text_input::bind_keys(cx);
+            block_view::bind_keys(cx);
+            outline_view::bind_keys(cx);
+            let store = NotesStore::new(&root).unwrap();
+            store.write_journal(today, "- today\n").unwrap();
+            store
+                .write_journal(
+                    yesterday,
+                    &format!("- plan for [[{}]]\n", today.format("%Y-%m-%d")),
+                )
+                .unwrap();
+            cx.set_global(LinkIndex::rebuild_from(&store).unwrap().0);
+            cx.set_global(PageRegistry::new(store));
+            let mut current = CurrentPage::default();
+            current.show_journals();
+            cx.set_global(current);
+            cx.set_global(LastError::default());
+            cx.set_global(NavHistory::default());
+            JournalsView::new(cx)
+        });
+        cx.run_until_parked();
+        let label = crate::source::source_label(&crate::source::NoteSource::Journal(yesterday));
+        let reference: &'static str = format!("linked-ref-block-{label}-0").leak();
+        let today_name: &'static str = format!("journal-day-{today}").leak();
+        let day = cx.debug_bounds(today_name).expect("today painted");
+        let row = cx
+            .debug_bounds(reference)
+            .expect("yesterday's reference is listed under today");
+        assert!(
+            day.contains(&row.origin),
+            "the reference sits inside today's entry: day {day:?}, row {row:?}",
+        );
+    }
 
     #[gpui::test]
     fn a_long_day_pushes_the_next_day_below_it(cx: &mut TestAppContext) {
