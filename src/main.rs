@@ -20,8 +20,8 @@ use gpui_notes::page_links::{self, LinkIndex, OpenPage};
 use gpui_notes::page_picker::{self, PageEntry, PagePicker, PagePickerEvent};
 use gpui_notes::registry::{pick_next, save_all_on_quit, CurrentPage, PageRegistry};
 use gpui_notes::search::{self, SearchCorpus, SearchEvent, SearchTarget, SearchView};
-use gpui_notes::shortcut_bar::{ShortcutBar, ShortcutOverlay};
 use gpui_notes::shortcut_hints::{self, ShortcutHint};
+use gpui_notes::shortcut_overlay::ShortcutOverlay;
 use gpui_notes::source::{source_label, NoteSource};
 use gpui_notes::spellcheck::{self, SpellChecker};
 use gpui_notes::store::NotesStore;
@@ -113,7 +113,6 @@ impl OverlayMode {
 
 struct RootView {
     focus_handle: FocusHandle,
-    shortcut_bar: Entity<ShortcutBar>,
     /// Kept across mode switches so back/forward returns to the same days
     /// and scroll position.
     journals: Entity<JournalsView>,
@@ -126,12 +125,11 @@ struct RootView {
 }
 
 impl RootView {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(cx: &mut Context<Self>) -> Self {
         let current_observer = cx.observe_global::<CurrentPage>(|_, cx| cx.notify());
         let error_observer = cx.observe_global::<LastError>(|_, cx| cx.notify());
         Self {
             focus_handle: cx.focus_handle(),
-            shortcut_bar: cx.new(|cx| ShortcutBar::new(window, cx)),
             journals: cx.new(JournalsView::new),
             overlay: OverlayMode::None,
             _current_observer: current_observer,
@@ -590,14 +588,12 @@ impl Render for RootView {
                 let p = page.read(cx);
                 (p.name().clone(), p.dirty(), p.view().clone().into())
             } else {
-                return root
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_color(theme::header_fg())
-                            .child("No page open."),
-                    )
-                    .child(self.shortcut_bar.clone());
+                return root.child(
+                    div()
+                        .flex_1()
+                        .text_color(theme::header_fg())
+                        .child("No page open."),
+                );
             };
         let header_text = if dirty {
             format!("{name} •")
@@ -621,7 +617,7 @@ impl Render for RootView {
 
         // `OutlineView` and `JournalsView` own their scroll containers (it needs the handle on
         // the element whose children are the block rows).
-        let body = root.child(view).child(self.shortcut_bar.clone());
+        let body = root.child(view);
 
         let overlay_child: Option<gpui::AnyElement> = match &self.overlay {
             OverlayMode::PagePicker { entity, .. } => Some(entity.clone().into_any_element()),
@@ -670,10 +666,9 @@ fn main() {
             KeyBinding::new("?", ToggleShortcuts, Some("RootView && !TextInput")),
             KeyBinding::new(&format!("{cmd}-/"), ToggleShortcuts, None),
             KeyBinding::new(&format!("{cmd}-q"), Quit, None),
-            // Registered last so the four-slot shortcut bar keeps showing the
-            // bindings above. `!TextInput` keeps a block edit from being
-            // navigated out from under the user, and on macOS leaves alt-arrow
-            // free for `WordLeft`/`WordRight` (see `text_input::bind_keys`).
+            // `!TextInput` keeps a block edit from being navigated out from
+            // under the user, and on macOS leaves alt-arrow free for
+            // `WordLeft`/`WordRight` (see `text_input::bind_keys`).
             KeyBinding::new("alt-left", NavigateBack, Some("RootView && !TextInput")),
             KeyBinding::new("alt-right", NavigateForward, Some("RootView && !TextInput")),
             KeyBinding::new(&format!("{cmd}-shift-t"), ToggleTheme, Some("RootView")),
@@ -744,7 +739,7 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                let root = cx.new(|cx| RootView::new(window, cx));
+                let root = cx.new(RootView::new);
                 root.update(cx, |view, cx| view.park_focus(window, cx));
                 cx.activate(true);
                 cx.new(|_| WindowFrame::new("GPUI Notes", root))
@@ -766,7 +761,7 @@ mod tests {
         tmp: &TempDir,
     ) -> (Entity<RootView>, &'a mut VisualTestContext) {
         let root_dir = tmp.path().to_path_buf();
-        let (root, vcx) = cx.add_window_view(move |window, cx| {
+        let (root, vcx) = cx.add_window_view(move |_window, cx| {
             text_input::bind_keys(cx);
             block_view::bind_keys(cx);
             outline_view::bind_keys(cx);
@@ -796,7 +791,7 @@ mod tests {
             save_all_on_quit(cx);
             // Setup, not navigation: matches `main`'s startup, back stack empty.
             set_current_page(&NoteSource::Page("Home".into()), cx).unwrap();
-            RootView::new(window, cx)
+            RootView::new(cx)
         });
         vcx.update(|window, cx| {
             window.activate_window();

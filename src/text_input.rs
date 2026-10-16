@@ -1577,7 +1577,7 @@ pub fn bind_keys(cx: &mut App) {
     let cmd = crate::cmd_key();
 
     // Register the primary native motions before their aliases so the
-    // shortcut bar presents the most familiar spelling first.
+    // shortcut overlay presents the most familiar spelling first.
     cx.bind_keys([
         KeyBinding::new("left", Left, Some("TextInput")),
         KeyBinding::new("right", Right, Some("TextInput")),

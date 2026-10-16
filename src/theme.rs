@@ -169,7 +169,7 @@ pub fn toggle(cx: &mut App) {
 /// from these.
 struct Palette {
     window_bg: Rgba,
-    /// Overlays, menus and the shortcut bar.
+    /// Overlays and menus.
     overlay_bg: Rgba,
     overlay_border: Rgba,
     /// List rows and inputs.
