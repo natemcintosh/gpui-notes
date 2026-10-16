@@ -9,12 +9,13 @@ use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
 use gpui::{
-    actions, anchored, deferred, div, prelude::FluentBuilder, px, relative, AnyElement, App,
-    AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    actions, anchored, canvas, deferred, div, prelude::FluentBuilder, px, relative, AnyElement,
+    App, AppContext, ClipboardItem, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels,
     Point, Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
+use crate::autoscroll::{self, RevealBounds};
 use crate::block_render::theme;
 use crate::block_view::{BlockView, BlockViewEvent};
 use crate::linked_refs::LinkedRefsView;
@@ -163,9 +164,12 @@ pub struct OutlineView {
     /// focus and vertical edit transfers. Pruned alongside `blocks` when ids
     /// disappear from the outline.
     block_subs: HashMap<BlockId, Subscription>,
-    /// Attached to the scrolling root so keyboard focus moves can reveal the
-    /// target row. Child indices line up with `flatten_visible` order.
+    /// Attached to the scrolling root (`Page` scope only).
     scroll: ScrollHandle,
+    /// The row a keyboard focus or selection move landed on, scrolled into
+    /// view by the next frame (see `autoscroll`). Moves into an editor are
+    /// left to its caret, which reveals itself.
+    reveal_row: Option<BlockId>,
     /// Built on first render (not in `new`: `Page::new` constructs its view
     /// from `cx.entity()` before the page itself exists). `Page` and
     /// `Embedded` scopes only.
@@ -204,6 +208,7 @@ impl OutlineView {
             blocks: HashMap::new(),
             block_subs: HashMap::new(),
             scroll: ScrollHandle::new(),
+            reveal_row: None,
             linked_refs: None,
             bullet_menu: None,
             selection: BlockSelection::None,
@@ -269,16 +274,13 @@ impl OutlineView {
             blocks = &block.children;
         }
         let flat = flatten_visible(roots);
-        let Some((idx, target)) = target.and_then(|target| {
-            flat.iter()
-                .position(|&(_, b)| b == target)
-                .map(|i| (i, target))
-        }) else {
+        let Some(target) = target.filter(|&target| flat.iter().any(|&(_, b)| b == target)) else {
             return false;
         };
         let bv = self.get_or_create(target, window, cx);
         window.focus(&bv.focus_handle(cx), cx);
-        self.scroll.scroll_to_item(idx);
+        self.reveal_row = Some(target);
+        cx.notify();
         true
     }
 
@@ -371,7 +373,6 @@ impl OutlineView {
         target_bv.update(cx, |block, cx| {
             block.begin_editing_at(placement, window, cx);
         });
-        self.scroll.scroll_to_item(target_index);
     }
 
     /// The id of the block whose wrapper currently holds focus (i.e. the
@@ -411,7 +412,8 @@ impl OutlineView {
         let bv = self.get_or_create(target, window, cx);
         let handle = bv.focus_handle(cx);
         window.focus(&handle, cx);
-        self.scroll.scroll_to_item(new_idx);
+        self.reveal_row = Some(target);
+        cx.notify();
     }
 
     /// Fold or unfold `id` from its arrow. Folding away the block that holds
@@ -752,7 +754,7 @@ impl OutlineView {
                 head: flat[next].1,
                 dragging: false,
             };
-            self.scroll.scroll_to_item(next);
+            self.reveal_row = Some(flat[next].1);
         }
         cx.notify();
     }
@@ -889,8 +891,9 @@ impl OutlineView {
             bv.update(cx, |bv, cx| bv.begin_editing(window, cx));
         } else {
             window.focus(&bv.focus_handle(cx), cx);
+            self.reveal_row = Some(flat[idx].1);
+            cx.notify();
         }
-        self.scroll.scroll_to_item(idx);
     }
 
     /// The blocks the block selection covers, in outline order.
@@ -1126,6 +1129,16 @@ fn thread_row(
         )
 }
 
+/// Covers a row so its prepaint sees the row's bounds, and asks for them to
+/// be scrolled into view.
+fn reveal_marker() -> impl IntoElement {
+    canvas(autoscroll::request, |_, (), _, _| {})
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+}
+
 /// The bullet dot, ringed when its block is folded. A right-click opens
 /// the bullet menu.
 fn bullet(
@@ -1239,11 +1252,12 @@ impl Render for OutlineView {
                 .min_h_0()
                 .px(theme::content_gutter(window))
                 .overflow_y_scroll()
-                .track_scroll(
-                    // Child indices line up with `flat`, so the refs section
-                    // must stay the last child (see below).
-                    &self.scroll,
-                ),
+                .track_scroll(&self.scroll)
+                .on_action(cx.listener(|this, action: &RevealBounds, _, cx| {
+                    if autoscroll::reveal(&this.scroll, action.bounds) {
+                        cx.notify();
+                    }
+                })),
             OutlineScope::Embedded | OutlineScope::Subtree(_) => root,
         };
 
@@ -1254,6 +1268,7 @@ impl Render for OutlineView {
         }
         let threads = thread_rows(&flat, active);
         let selected = self.selected_rows(&flat);
+        let reveal_row = self.reveal_row.take();
         for (row, ((depth, id), thread)) in flat.into_iter().zip(threads).enumerate() {
             let bv = self.get_or_create(id, window, cx);
             let on_toggle =
@@ -1270,7 +1285,8 @@ impl Render for OutlineView {
                 on_toggle,
                 on_bullet_menu,
                 bv,
-            );
+            )
+            .when(reveal_row == Some(id), |row| row.child(reveal_marker()));
             root = root.child(Self::with_selection_handlers(id, row, cx));
         }
 
@@ -1281,8 +1297,6 @@ impl Render for OutlineView {
                 .get_or_insert_with(|| cx.new(|cx| LinkedRefsView::new(page, cx)));
             root = root.child(div().w_full().child(refs.clone()));
         }
-        // After the rows (and refs), so it doesn't shift `scroll_to_item`
-        // indices.
         root.children(self.render_bullet_menu(cx))
     }
 }
@@ -1708,6 +1722,115 @@ mod tests {
                 .input_entity_for_test()
                 .expect("block should be editing")
         })
+    }
+
+    /// Holds the outline to the window's height, as `RootView` does, so it
+    /// scrolls instead of growing.
+    struct WindowSized(Entity<OutlineView>);
+    impl Render for WindowSized {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().flex().flex_col().child(self.0.clone())
+        }
+    }
+
+    /// A page of `n` one-line blocks in a window too short to show them all.
+    fn mount_tall(
+        cx: &mut TestAppContext,
+        n: usize,
+    ) -> (Vec<BlockId>, Entity<OutlineView>, &mut VisualTestContext) {
+        let body = (0..n)
+            .map(|i| format!("- block {i}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let (root, vcx) = cx.add_window_view(move |_window, cx| {
+            text_input::bind_keys(cx);
+            crate::block_view::bind_keys(cx);
+            super::bind_keys(cx);
+            let page = cx.new(|cx| Page::new("foo".into(), &body, cx));
+            WindowSized(cx.new(|cx| OutlineView::new(page, cx)))
+        });
+        vcx.update(|window, _| window.activate_window());
+        vcx.simulate_resize(size(px(600.), px(200.)));
+        vcx.run_until_parked();
+        let ov = vcx.read(|cx| root.read(cx).0.clone());
+        let ids = vcx.read(|cx| {
+            let page = ov.read(cx).page.read(cx);
+            page.outline().roots.iter().map(|b| b.id).collect()
+        });
+        (ids, ov, vcx)
+    }
+
+    fn assert_on_screen(cx: &mut VisualTestContext, id: BlockId) {
+        let block = cx
+            .debug_bounds(format!("block-view-{id:?}").leak())
+            .expect("block painted");
+        let height = cx.update(|window, _| window.viewport_size().height);
+        assert!(
+            block.top() >= px(0.) && block.bottom() <= height,
+            "{block:?} is outside a {height:?} window",
+        );
+    }
+
+    /// The block's last line, where a caret at the end of its text sits, is
+    /// on screen, even if the block is taller than the window.
+    fn assert_last_line_on_screen(cx: &mut VisualTestContext, id: BlockId) {
+        let block = cx
+            .debug_bounds(format!("block-view-{id:?}").leak())
+            .expect("block painted");
+        let height = cx.update(|window, _| window.viewport_size().height);
+        assert!(
+            block.bottom() - px(24.) >= px(0.) && block.bottom() <= height,
+            "{block:?}'s last line is outside a {height:?} window",
+        );
+    }
+
+    #[gpui::test]
+    fn arrowing_past_the_bottom_scrolls_the_focused_block_into_view(cx: &mut TestAppContext) {
+        let (ids, ov, cx) = mount_tall(cx, 30);
+        focus_block(cx, &ov, ids[0]);
+        for _ in 0..20 {
+            cx.simulate_keystrokes("down");
+        }
+        cx.run_until_parked();
+        assert_eq!(focused_id(cx, &ov), Some(ids[20]));
+        assert_on_screen(cx, ids[20]);
+
+        for _ in 0..20 {
+            cx.simulate_keystrokes("up");
+        }
+        cx.run_until_parked();
+        assert_on_screen(cx, ids[0]);
+    }
+
+    #[gpui::test]
+    fn typing_keeps_the_caret_line_in_view(cx: &mut TestAppContext) {
+        let (ids, ov, cx) = mount_tall(cx, 30);
+        // Focused directly, so only the editor's caret can scroll to it.
+        focus_block(cx, &ov, ids[20]);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_on_screen(cx, ids[20]);
+
+        // Wrap onto several more lines below the bottom of the window.
+        cx.simulate_input(&" and more words".repeat(8));
+        cx.run_until_parked();
+        assert_last_line_on_screen(cx, ids[20]);
+
+        // Enter starts a new block below; its editor reveals itself too.
+        cx.simulate_keystrokes("end enter");
+        cx.run_until_parked();
+        let new_id = cx.read(|cx| {
+            ov.read(cx)
+                .page
+                .read(cx)
+                .outline()
+                .roots
+                .get(21)
+                .map(|b| b.id)
+        });
+        let new_id = new_id.expect("enter inserted a block");
+        assert_ne!(new_id, ids[21]);
+        assert_on_screen(cx, new_id);
     }
 
     #[gpui::test]

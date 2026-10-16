@@ -12,6 +12,7 @@ pub fn cmd_key() -> &'static str {
     }
 }
 
+pub mod autoscroll;
 pub mod block_render;
 pub mod block_view;
 pub mod calc;

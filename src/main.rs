@@ -2004,6 +2004,55 @@ mod tests {
         assert_eq!(loaded_journal_dates(&root, cx).len(), 7);
     }
 
+    /// A day's outline doesn't scroll itself, so the arrow keys and the caret
+    /// have to reach `JournalsView`'s scroll container.
+    #[gpui::test]
+    fn journals_mode_follows_focus_and_caret_past_the_bottom(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let today = write_journal(&tmp, 0, 12);
+        let (root, cx) = mount_root(cx, &tmp);
+        cx.simulate_resize(gpui::size(px(600.), px(300.)));
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+        let target = cx.read(|cx| {
+            let journals = root.read(cx).journals.read(cx);
+            let (_, page) = journals.pages().find(|(date, _)| *date == today).unwrap();
+            page.read(cx).outline().roots[10].id
+        });
+        let bounds = |cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("block-view-{target:?}").leak())
+                .expect("block painted")
+        };
+
+        for _ in 0..10 {
+            cx.simulate_keystrokes("down");
+        }
+        cx.run_until_parked();
+        // The scroll container ends above the window's bottom (the shortcut
+        // bar is below it). The reveal left the row `autoscroll`'s 4px margin
+        // above that end, which is how the typing check finds it.
+        let revealed = bounds(cx);
+        let viewport_bottom = revealed.bottom() + px(4.);
+        let height = cx.update(|window, _| window.viewport_size().height);
+        assert!(
+            revealed.top() >= px(0.) && revealed.bottom() <= height,
+            "{revealed:?} is outside a {height:?} window",
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input(&" and more words".repeat(8));
+        cx.run_until_parked();
+        let typed = bounds(cx);
+        assert!(
+            typed.size.height > revealed.size.height,
+            "the text should wrap: {typed:?}"
+        );
+        assert!(
+            typed.bottom() <= viewport_bottom,
+            "the caret line went below {viewport_bottom:?}: {typed:?}",
+        );
+    }
+
     /// An edit to any listed journal is saved when navigating away, not just
     /// one to today's.
     #[gpui::test]

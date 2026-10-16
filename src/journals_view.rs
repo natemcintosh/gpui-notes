@@ -17,6 +17,7 @@ use gpui::{
     Subscription, Window,
 };
 
+use crate::autoscroll::{self, RevealBounds};
 use crate::errors;
 use crate::journal;
 use crate::outline_view::OutlineView;
@@ -199,7 +200,12 @@ impl Render for JournalsView {
             .min_h_0()
             .w_full()
             .overflow_y_scroll()
-            .track_scroll(&self.scroll);
+            .track_scroll(&self.scroll)
+            .on_action(cx.listener(|this, action: &RevealBounds, _, cx| {
+                if autoscroll::reveal(&this.scroll, action.bounds) {
+                    cx.notify();
+                }
+            }));
         for (i, day) in self.days.iter().enumerate() {
             let title = div()
                 .text_size(px(32.))

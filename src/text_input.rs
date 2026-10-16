@@ -16,7 +16,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::spellcheck::SpellChecker;
-use crate::{errors, theme};
+use crate::{autoscroll, errors, theme};
 
 actions!(
     text_input,
@@ -349,6 +349,10 @@ pub struct TextInput {
     misspelled: Vec<Range<usize>>,
     misspelled_key: Option<(SharedString, u64)>,
     spell_menu: Option<SpellMenu>,
+    /// The caret offset and content the caret was last scrolled into view
+    /// for. The caret is revealed only when one of them changes, so scrolling
+    /// away with the wheel doesn't snap back.
+    revealed: Option<(usize, SharedString)>,
 }
 
 /// The menu a right-click on a misspelled word opens: corrections, then
@@ -411,6 +415,7 @@ impl TextInput {
             misspelled: Vec::new(),
             misspelled_key: None,
             spell_menu: None,
+            revealed: None,
         }
     }
 
@@ -1392,16 +1397,27 @@ impl Element for TextElement {
                 .unwrap();
         }
 
-        if focus_handle.is_focused(window) {
+        let focused = focus_handle.is_focused(window);
+        if focused {
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
         }
 
-        self.input.update(cx, |input, _| {
+        let reveal = self.input.update(cx, |input, _| {
+            let key = (input.selection.head, input.content.clone());
+            let reveal = (focused && input.revealed.as_ref() != Some(&key)).then(|| {
+                input.revealed = Some(key);
+                let caret = layout.position_for_caret(input.selection.head, input.caret_affinity);
+                Bounds::new(bounds.origin + caret, size(px(2.), layout.line_height))
+            });
             input.last_layout = Some(layout);
             input.last_bounds = Some(bounds);
+            reveal
         });
+        if let Some(caret) = reveal {
+            autoscroll::request(caret, window, cx);
+        }
     }
 }
 
