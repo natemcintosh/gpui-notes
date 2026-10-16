@@ -631,6 +631,8 @@ impl Render for RootView {
         if let Some(child) = overlay_child {
             body.child(
                 div()
+                    // Keeps scroll wheel (and clicks) from reaching the page behind.
+                    .occlude()
                     .absolute()
                     .top_0()
                     .left_0()
@@ -1983,6 +1985,40 @@ mod tests {
             dates.len(),
         );
         assert!(dates.is_sorted_by(|a, b| a > b), "still newest first");
+    }
+
+    /// A scroll over an open overlay scrolls the overlay, never the page
+    /// behind it: here, the journals would load more days if it leaked.
+    #[gpui::test]
+    fn scrolling_an_overlay_leaves_the_page_behind_alone(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        for days_ago in 1..=12 {
+            write_journal(&tmp, days_ago, 80);
+        }
+        let (root, cx) = mount_root(cx, &tmp);
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+
+        for open in ["ctrl-/", "ctrl-o"] {
+            cx.simulate_keystrokes(open);
+            cx.run_until_parked();
+            let viewport = cx.update(|window, _| window.viewport_size());
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                // Inside the overlay, which hangs from the top centre.
+                position: point(viewport.width / 2., px(120.)),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
+                modifiers: Modifiers::none(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                loaded_journal_dates(&root, cx).len(),
+                gpui_notes::journals_view::DAYS_PER_LOAD,
+                "scrolling the {open} overlay scrolled the journals behind it",
+            );
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
     }
 
     /// Short days that leave the window unfilled keep loading without a
