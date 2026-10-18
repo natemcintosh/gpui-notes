@@ -469,7 +469,7 @@ impl BlockView {
         let Some(input) = self.take_input_on_exit() else {
             return;
         };
-        let text = input.read(cx).content().to_string();
+        let text = finished_text(&input, cx);
         let block_id = self.block_id;
         let new_id = self.page.update(cx, |p, cx| {
             p.set_block_text(block_id, text, cx);
@@ -505,7 +505,7 @@ impl BlockView {
         let Some(input) = self.take_input_on_exit() else {
             return;
         };
-        let text = input.read(cx).content().to_string();
+        let text = finished_text(&input, cx);
         let block_id = self.block_id;
         self.page.update(cx, |p, cx| {
             p.set_block_text(block_id, text, cx);
@@ -513,6 +513,11 @@ impl BlockView {
         });
         cx.notify();
     }
+}
+
+/// The block's text as an edit leaves it: trailing whitespace is trimmed.
+fn finished_text(input: &Entity<TextInput>, cx: &App) -> String {
+    input.read(cx).content().trim_end().to_string()
 }
 
 impl Focusable for BlockView {
@@ -1356,6 +1361,32 @@ mod tests {
                 "enter re-enters editing from focused-Viewing",
             );
         });
+    }
+
+    /// Leaving a block trims its trailing whitespace, whether by Escape or
+    /// by Enter into a new block.
+    #[gpui::test]
+    fn exiting_a_block_trims_trailing_whitespace(cx: &mut TestAppContext) {
+        for exit in ["escape", "enter"] {
+            let (page, bv, cx) = mount(cx, "- hi\n");
+            focus_block(cx, &bv);
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+            cx.simulate_input(" there  ");
+            cx.run_until_parked();
+
+            cx.simulate_keystrokes(exit);
+            cx.run_until_parked();
+
+            cx.read(|cx| {
+                let block_id = bv.read(cx).block_id;
+                assert_eq!(
+                    page.read(cx).outline().get(block_id),
+                    Some("hi there"),
+                    "{exit}",
+                );
+            });
+        }
     }
 
     /// Regression test for #38: typing must flush to the page's outline on
