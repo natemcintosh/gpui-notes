@@ -912,7 +912,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn open_page_action_creates_missing_target_and_navigates(cx: &mut TestAppContext) {
+    fn open_page_action_opens_missing_target_without_creating_it(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let (root, cx) = mount_root(cx, &tmp);
 
@@ -932,10 +932,10 @@ mod tests {
         cx.read(|cx| {
             let current = cx.global::<CurrentPage>().get().unwrap();
             assert_eq!(current.read(cx).name().as_ref(), "New Target");
-            assert!(cx.global::<LinkIndex>().page_exists("New Target"));
+            assert!(!cx.global::<LinkIndex>().page_exists("New Target"));
             assert!(root.read(cx).overlay().is_none());
         });
-        assert!(tmp.path().join("pages/New Target.md").is_file());
+        assert!(!tmp.path().join("pages/New Target.md").exists());
     }
 
     #[gpui::test]
@@ -1929,9 +1929,9 @@ mod tests {
         })
     }
 
-    /// Today first (created, since it has no file yet), then only the journals
-    /// that exist, newest first: the empty days between are neither shown nor
-    /// written to disk.
+    /// Today first (in memory, since it has no file yet), then only the
+    /// journals that exist, newest first: the empty days between are neither
+    /// shown nor written to disk.
     #[gpui::test]
     fn journals_mode_lists_today_then_existing_journals_newest_first(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
@@ -1948,7 +1948,7 @@ mod tests {
         let files = std::fs::read_dir(tmp.path().join("journals"))
             .unwrap()
             .count();
-        assert_eq!(files, 3, "only today's journal is created");
+        assert_eq!(files, 2, "not even today's journal is created (#71)");
     }
 
     /// Days arrive `DAYS_PER_LOAD` at a time, and scrolling toward the end of

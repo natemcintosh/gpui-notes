@@ -45,55 +45,44 @@ impl PageRegistry {
             return Ok(entity.clone());
         }
         let body = self.store.read(name)?;
-        Ok(self.insert(key, &body, cx))
+        Ok(self.insert(key, Some(&body), cx))
     }
 
-    /// Opens a page, creating it (empty) on disk if it does not yet exist.
+    /// Opens a page, or a blank one in memory if it does not exist yet. The
+    /// file is created by the first save with content, as in Logseq (#71):
+    /// following a link or opening today's journal must not leave empty
+    /// files behind, which Syncthing would turn into conflicts.
     ///
     /// # Errors
-    /// Returns any I/O error from the underlying store other than `NotFound`
-    /// (which triggers creation).
+    /// Returns any I/O error from the underlying store other than `NotFound`.
     pub fn open_or_create(&mut self, name: &str, cx: &mut App) -> io::Result<Entity<Page>> {
-        let key = NoteSource::Page(name.to_string().into());
-        if let Some(entity) = self.open.get(&key) {
-            return Ok(entity.clone());
-        }
-        let body = match self.store.read(name) {
-            Ok(body) => body,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                self.store.write(name, "")?;
-                String::new()
-            }
-            Err(err) => return Err(err),
-        };
-        Ok(self.insert(key, &body, cx))
+        self.open_or_blank(NoteSource::Page(name.to_string().into()), cx)
     }
 
-    /// Opens the journal for `date`, creating it (empty) on disk if it does not
-    /// yet exist. The page's display name is the ISO-8601 date (`YYYY-MM-DD`),
-    /// and saves route to the store's journal directory.
+    /// Opens the journal for `date`, as `open_or_create` does a page. The
+    /// page's display name is the ISO-8601 date (`YYYY-MM-DD`), and saves
+    /// route to the store's journal directory.
     ///
     /// # Errors
-    /// Returns any I/O error from the underlying store other than `NotFound`
-    /// (which triggers creation).
+    /// Returns any I/O error from the underlying store other than `NotFound`.
     pub fn open_or_create_journal(
         &mut self,
         date: NaiveDate,
         cx: &mut App,
     ) -> io::Result<Entity<Page>> {
-        let key = NoteSource::Journal(date);
+        self.open_or_blank(NoteSource::Journal(date), cx)
+    }
+
+    fn open_or_blank(&mut self, key: NoteSource, cx: &mut App) -> io::Result<Entity<Page>> {
         if let Some(entity) = self.open.get(&key) {
             return Ok(entity.clone());
         }
-        let body = match self.store.read_journal(date) {
-            Ok(body) => body,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                self.store.write_journal(date, "")?;
-                String::new()
-            }
+        let body = match self.read_source(&key) {
+            Ok(body) => Some(body),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => return Err(err),
         };
-        Ok(self.insert(key, &body, cx))
+        Ok(self.insert(key, body.as_deref(), cx))
     }
 
     /// Lists all page names available on disk.
@@ -137,6 +126,18 @@ impl PageRegistry {
         let key = self
             .key_for(page)
             .unwrap_or_else(|| NoteSource::Page(name.clone()));
+        // Never saved and still blank: the file is only created once there
+        // is something to keep (#71).
+        let blank = page
+            .read(cx)
+            .outline()
+            .preorder()
+            .iter()
+            .all(|b| b.text.trim().is_empty());
+        if blank && !self.on_disk.contains_key(&key) {
+            page.update(cx, Page::mark_saved);
+            return Ok(());
+        }
         self.keep_outside_change(&key, cx)?;
         match &key {
             NoteSource::Page(name) => self.store.write(name, &body)?,
@@ -231,12 +232,16 @@ impl PageRegistry {
             .unwrap_or_else(|| NoteSource::Page(page.read(cx).name().clone()))
     }
 
-    fn insert(&mut self, key: NoteSource, body: &str, cx: &mut App) -> Entity<Page> {
-        let source = key.clone();
-        let page = cx.new(|cx| Page::new(source_label(&key), body, cx));
-        self.on_disk.insert(key.clone(), body.to_string());
+    /// Opens `key` with its file's `body`, or blank when it has no file yet.
+    /// A blank page stays out of `on_disk` and the link index until saved,
+    /// so it doesn't count as existing.
+    fn insert(&mut self, key: NoteSource, body: Option<&str>, cx: &mut App) -> Entity<Page> {
+        let page = cx.new(|cx| Page::new(source_label(&key), body.unwrap_or_default(), cx));
+        if let Some(body) = body {
+            self.on_disk.insert(key.clone(), body.to_string());
+            page_links::reindex_global_for_page(&page, &key, cx);
+        }
         self.open.insert(key, page.clone());
-        page_links::reindex_global_for_page(&page, &source, cx);
         page
     }
 }
@@ -332,7 +337,7 @@ pub fn save_all_on_quit(cx: &mut App) {
     .detach();
 }
 
-/// Saves the outgoing current page if dirty, opens `source` (creating if
+/// Saves the outgoing current page if dirty, opens `source` (blank if
 /// missing), and sets it as the current page.
 ///
 /// # Errors
@@ -470,7 +475,13 @@ mod tests {
             assert_eq!(cx.global::<LinkIndex>().backlinks("B").len(), 1);
             assert!(!cx.global::<LinkIndex>().page_exists("B"));
 
-            reg.open_or_create("B", cx).unwrap();
+            let page_b = reg.open_or_create("B", cx).unwrap();
+            assert!(
+                !cx.global::<LinkIndex>().page_exists("B"),
+                "an unsaved page does not exist yet",
+            );
+            page_b.update(cx, |p, cx| p.set_body_for_test("b", cx));
+            reg.save(&page_b, cx).unwrap();
             assert!(cx.global::<LinkIndex>().page_exists("B"));
 
             let first = page_a.read(cx).outline().first_block_id().unwrap();
@@ -651,11 +662,57 @@ mod tests {
             std::fs::read_to_string(root.join("pages/2026-01-02.md")).unwrap(),
             "- page-body\n",
         );
-        assert_eq!(
-            std::fs::read_to_string(root.join("journals/2026_01_02.md")).unwrap(),
-            "",
+        assert!(
+            !root.join("journals/2026_01_02.md").exists(),
             "journal file must not receive the page's body",
         );
+    }
+
+    /// #71: opening a missing page or journal, even saving it while still
+    /// blank, writes nothing; the first save with content creates the file.
+    #[gpui::test]
+    fn missing_notes_are_created_by_the_first_save_with_content(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let date = NaiveDate::from_ymd_opt(2026, 3, 4).unwrap();
+
+        cx.update(|cx| {
+            let mut reg = PageRegistry::new(NotesStore::new(&root).unwrap());
+            let page = reg.open_or_create("new", cx).unwrap();
+            let journal = reg.open_or_create_journal(date, cx).unwrap();
+            assert!(!root.join("pages/new.md").exists());
+            assert!(!root.join("journals/2026_03_04.md").exists());
+
+            // Typed then deleted: dirty, but nothing worth a file.
+            page.update(cx, |p, cx| p.set_body_for_test("  ", cx));
+            reg.save_all(cx).unwrap();
+            assert!(!page.read(cx).dirty());
+            assert!(!root.join("pages/new.md").exists());
+
+            journal.update(cx, |p, cx| p.set_body_for_test("today", cx));
+            reg.save_all(cx).unwrap();
+        });
+
+        assert!(!root.join("pages/new.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("journals/2026_03_04.md")).unwrap(),
+            "- today\n",
+        );
+    }
+
+    /// A page that has a file is still written when emptied: that is an edit.
+    #[gpui::test]
+    fn emptying_an_existing_page_still_saves(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(&tmp);
+        store.write("foo", "- something\n").unwrap();
+        cx.update(|cx| {
+            let mut reg = PageRegistry::new(make_store(&tmp));
+            let page = reg.open("foo", cx).unwrap();
+            page.update(cx, |p, cx| p.set_body_for_test("", cx));
+            reg.save(&page, cx).unwrap();
+        });
+        assert_eq!(store.read("foo").unwrap(), "-\n");
     }
 
     #[gpui::test]
