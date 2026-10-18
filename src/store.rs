@@ -147,6 +147,22 @@ impl NotesStore {
         Ok(self.root.join(PAGES_DIR).join(format!("{encoded}.md")))
     }
 
+    /// Writes `body` beside `date`'s journal, as `<date><suffix>.md`, and
+    /// returns that filename. `list_journals` skips it, as it isn't a date.
+    ///
+    /// # Errors
+    /// Returns an I/O error if the write or atomic rename fails.
+    pub fn write_journal_copy(
+        &self,
+        date: NaiveDate,
+        suffix: &str,
+        body: &str,
+    ) -> io::Result<String> {
+        let file_name = format!("{}{suffix}.md", date.format(JOURNAL_DATE_FMT));
+        atomic_write(&self.root.join(JOURNALS_DIR).join(&file_name), body)?;
+        Ok(file_name)
+    }
+
     fn journal_path(&self, date: NaiveDate) -> PathBuf {
         self.root
             .join(JOURNALS_DIR)

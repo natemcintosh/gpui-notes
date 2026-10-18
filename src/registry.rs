@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::io;
 
-use chrono::NaiveDate;
+use chrono::{Local, NaiveDate};
 use gpui::{App, AppContext, BorrowAppContext, Entity, Global, SharedString};
 
+use crate::errors;
 use crate::page::Page;
 use crate::page_links;
 use crate::source::{source_label, NoteSource};
@@ -16,6 +17,10 @@ pub struct PageRegistry {
     /// in different directories; keying by name let whichever opened first
     /// win and routed the other's saves to the wrong directory (#40).
     open: HashMap<NoteSource, Entity<Page>>,
+    /// Each open page's file as last read or written here. A save that finds
+    /// the file no longer matching knows it was changed outside the app
+    /// (Logseq, Syncthing) and keeps that version as a conflict copy (#65).
+    on_disk: HashMap<NoteSource, String>,
 }
 
 impl Global for PageRegistry {}
@@ -26,6 +31,7 @@ impl PageRegistry {
         Self {
             store,
             open: HashMap::new(),
+            on_disk: HashMap::new(),
         }
     }
 
@@ -113,8 +119,13 @@ impl PageRegistry {
 
     /// Writes the page's body to disk if dirty and clears the dirty flag.
     ///
+    /// If the file changed outside the app since it was read, the app's
+    /// version still wins, but the outside version is first written to a
+    /// conflict page (`<name> (conflict <time>)`) and reported, so neither
+    /// is lost.
+    ///
     /// # Errors
-    /// Returns an I/O error if the write fails.
+    /// Returns an I/O error if a read or write fails.
     pub fn save(&mut self, page: &Entity<Page>, cx: &mut App) -> io::Result<()> {
         let (name, body, dirty) = {
             let page = page.read(cx);
@@ -126,12 +137,49 @@ impl PageRegistry {
         let key = self
             .key_for(page)
             .unwrap_or_else(|| NoteSource::Page(name.clone()));
+        self.keep_outside_change(&key, cx)?;
         match &key {
             NoteSource::Page(name) => self.store.write(name, &body)?,
             NoteSource::Journal(date) => self.store.write_journal(*date, &body)?,
         }
+        self.on_disk.insert(key.clone(), body.to_string());
         page.update(cx, Page::mark_saved);
         page_links::reindex_global_for_page(page, &key, cx);
+        Ok(())
+    }
+
+    /// If `key`'s file no longer matches what was last read or written here,
+    /// copies it to a new conflict file beside it before it gets overwritten.
+    /// A missing file has nothing to keep.
+    fn keep_outside_change(&self, key: &NoteSource, cx: &mut App) -> io::Result<()> {
+        let current = match self.read_source(key) {
+            Ok(current) => current,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        if self.on_disk.get(key) == Some(&current) {
+            return Ok(());
+        }
+        let suffix = format!(" (conflict {})", Local::now().format("%Y-%m-%d %H-%M-%S"));
+        let copy = match key {
+            NoteSource::Page(name) => {
+                let copy = format!("{name}{suffix}");
+                self.store.write(&copy, &current)?;
+                copy
+            }
+            // Not a page, and not listed as a journal, so name the file.
+            NoteSource::Journal(date) => format!(
+                "journals/{}",
+                self.store.write_journal_copy(*date, &suffix, &current)?
+            ),
+        };
+        errors::report(
+            format!(
+                "{} changed outside the app; kept that version as \"{copy}\"",
+                source_label(key)
+            ),
+            cx,
+        );
         Ok(())
     }
 
@@ -186,6 +234,7 @@ impl PageRegistry {
     fn insert(&mut self, key: NoteSource, body: &str, cx: &mut App) -> Entity<Page> {
         let source = key.clone();
         let page = cx.new(|cx| Page::new(source_label(&key), body, cx));
+        self.on_disk.insert(key.clone(), body.to_string());
         self.open.insert(key, page.clone());
         page_links::reindex_global_for_page(&page, &source, cx);
         page
@@ -630,5 +679,107 @@ mod tests {
             let page = reg.open("a", cx).unwrap();
             assert_eq!(page.read(cx).body().as_ref(), "- from-a\n");
         });
+    }
+
+    /// Every file in `pages/` or `journals/` whose name marks it as a
+    /// conflict copy, as `dir/filename`, with its contents.
+    fn conflict_copies(store: &NotesStore) -> Vec<(String, String)> {
+        let mut copies = Vec::new();
+        for dir in ["pages", "journals"] {
+            for entry in std::fs::read_dir(store.root().join(dir)).unwrap() {
+                let path = entry.unwrap().path();
+                let file_name = path.file_name().unwrap().to_string_lossy();
+                if file_name.contains("(conflict ") {
+                    let body = std::fs::read_to_string(&path).unwrap();
+                    copies.push((format!("{dir}/{file_name}"), body));
+                }
+            }
+        }
+        copies
+    }
+
+    #[gpui::test]
+    fn save_keeps_an_outside_page_change_as_a_conflict_copy(cx: &mut TestAppContext) {
+        assert_outside_change_kept(
+            &NoteSource::Page("foo".into()),
+            "pages/foo (conflict ",
+            "foo (conflict ",
+            cx,
+        );
+    }
+
+    #[gpui::test]
+    fn save_keeps_an_outside_journal_change_as_a_conflict_copy(cx: &mut TestAppContext) {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 13).unwrap();
+        assert_outside_change_kept(
+            &NoteSource::Journal(date),
+            "journals/2026_07_13 (conflict ",
+            "journals/2026_07_13 (conflict ",
+            cx,
+        );
+    }
+
+    /// `copy_prefix` starts the copy's `dir/filename`; `reported` is how the
+    /// error line names it.
+    fn assert_outside_change_kept(
+        source: &NoteSource,
+        copy_prefix: &str,
+        reported: &str,
+        cx: &mut TestAppContext,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(&tmp);
+        let write = |body: &str| match source {
+            NoteSource::Page(name) => store.write(name, body).unwrap(),
+            NoteSource::Journal(date) => store.write_journal(*date, body).unwrap(),
+        };
+        write("- original\n");
+
+        cx.update(|cx| {
+            cx.set_global(crate::errors::LastError::default());
+            let mut reg = PageRegistry::new(make_store(&tmp));
+            let page = match source {
+                NoteSource::Page(name) => reg.open(name, cx).unwrap(),
+                NoteSource::Journal(date) => reg.open_or_create_journal(*date, cx).unwrap(),
+            };
+            write("- from logseq\n");
+            page.update(cx, |p, cx| p.set_body_for_test("from here", cx));
+            reg.save(&page, cx).unwrap();
+
+            assert_eq!(reg.read_source(source).unwrap(), "- from here\n");
+            let copies = conflict_copies(&store);
+            assert_eq!(copies.len(), 1, "{copies:?}");
+            assert!(copies[0].0.starts_with(copy_prefix), "{copies:?}");
+            assert_eq!(copies[0].1, "- from logseq\n");
+            let message = &cx
+                .global::<crate::errors::LastError>()
+                .get()
+                .unwrap()
+                .message;
+            assert!(message.contains(reported), "{message}");
+            assert!(
+                store.list_journals().unwrap().len() <= 1,
+                "nor a new journal"
+            );
+
+            // The save itself is now what's on disk: saving again is no conflict.
+            page.update(cx, |p, cx| p.set_body_for_test("again", cx));
+            reg.save(&page, cx).unwrap();
+            assert_eq!(conflict_copies(&store).len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn save_without_outside_change_makes_no_conflict_copy(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(&tmp);
+        store.write("foo", "* not our bullet style\n").unwrap();
+        cx.update(|cx| {
+            let mut reg = PageRegistry::new(make_store(&tmp));
+            let page = reg.open("foo", cx).unwrap();
+            page.update(cx, |p, cx| p.set_body_for_test("edited", cx));
+            reg.save(&page, cx).unwrap();
+        });
+        assert_eq!(conflict_copies(&store), Vec::new());
     }
 }
