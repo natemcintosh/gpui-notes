@@ -188,6 +188,13 @@ struct Palette {
     error_hover_bg: Rgba,
     error_fg: Rgba,
     spell_underline: Rgba,
+    /// Syntax-highlighted code: strings, other literals, keywords, types and
+    /// function names. Comments use `fg_muted`.
+    syntax_string: Rgba,
+    syntax_constant: Rgba,
+    syntax_keyword: Rgba,
+    syntax_type: Rgba,
+    syntax_function: Rgba,
 }
 
 /// `0xRRGGBB` as an opaque colour; `gpui::rgb` isn't `const`.
@@ -210,8 +217,12 @@ const BASE0: u32 = 0x839496;
 const BASE1: u32 = 0x93a1a1;
 const BASE2: u32 = 0xeee8d5;
 const BASE3: u32 = 0xfdf6e3;
-const BLUE: u32 = 0x268bd2;
+const YELLOW: u32 = 0xb58900;
 const RED: u32 = 0xdc322f;
+const MAGENTA: u32 = 0xd33682;
+const BLUE: u32 = 0x268bd2;
+const CYAN: u32 = 0x2aa198;
+const GREEN: u32 = 0x859900;
 
 // Solarized has only two background tones per mode, and the UI needs a few
 // more: the extra tones below are blends of neighbouring base colours (or of
@@ -231,6 +242,11 @@ const SOLARIZED_DARK: Palette = Palette {
     error_hover_bg: hex(0x582e33),
     error_fg: hex(RED),
     spell_underline: hex(RED),
+    syntax_string: hex(CYAN),
+    syntax_constant: hex(MAGENTA),
+    syntax_keyword: hex(GREEN),
+    syntax_type: hex(YELLOW),
+    syntax_function: hex(BLUE),
 };
 
 const SOLARIZED_LIGHT: Palette = Palette {
@@ -248,6 +264,11 @@ const SOLARIZED_LIGHT: Palette = Palette {
     error_hover_bg: hex(0xf5c5b6),
     error_fg: hex(RED),
     spell_underline: hex(RED),
+    syntax_string: hex(CYAN),
+    syntax_constant: hex(MAGENTA),
+    syntax_keyword: hex(GREEN),
+    syntax_type: hex(YELLOW),
+    syntax_function: hex(BLUE),
 };
 
 fn palette() -> &'static Palette {
@@ -373,6 +394,31 @@ pub fn heading_rule() -> Rgba {
 #[must_use]
 pub fn code_bg() -> Rgba {
     window_bg()
+}
+
+#[must_use]
+pub fn syntax_string() -> Rgba {
+    palette().syntax_string
+}
+
+#[must_use]
+pub fn syntax_constant() -> Rgba {
+    palette().syntax_constant
+}
+
+#[must_use]
+pub fn syntax_keyword() -> Rgba {
+    palette().syntax_keyword
+}
+
+#[must_use]
+pub fn syntax_type() -> Rgba {
+    palette().syntax_type
+}
+
+#[must_use]
+pub fn syntax_function() -> Rgba {
+    palette().syntax_function
 }
 
 #[must_use]

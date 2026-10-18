@@ -19,6 +19,8 @@ unicode-segmentation = "1.13.2"
 spellbook = "0.4.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy"] }
 
 # font-kit is required on macOS — without it gpui_macos falls back to a
 # NoopTextSystem and text never paints. See README "GPUI dependency".

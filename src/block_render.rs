@@ -1,8 +1,9 @@
 //! Render a single block's markdown text as inline GPUI elements.
 //!
 //! v1 coverage: bold, italic, inline code, links (http/https open via
-//! `cx.open_url`), headings, fenced code blocks, blockquotes. List events from
-//! the markdown parser are ignored — outline composition owns bullet nesting.
+//! `cx.open_url`), headings, fenced code blocks (highlighted by `syntax`),
+//! blockquotes. List events from the markdown parser are ignored — outline
+//! composition owns bullet nesting.
 //!
 //! Extensions (see `InlineExtension`) are the single hook for downstream
 //! tokens like `[[PageName]]` (#8) and `((block-id))` (#10). They
@@ -25,7 +26,7 @@ use gpui::{
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use crate::calc;
+use crate::{calc, syntax};
 
 /// Compatibility re-export for existing block-render callers. New code should
 /// import [`crate::theme`] directly.
@@ -445,13 +446,16 @@ fn render_block_node(
         {
             calc::render(text, window, cx)
         }
-        BlockNode::CodeBlock { lang: _, text } => div()
+        BlockNode::CodeBlock { lang, text } => div()
             .bg(theme::code_bg())
-            .text_color(theme::fg())
-            .font_family(theme::mono_font_family(cx))
             .p_2()
             .rounded_sm()
-            .child(text)
+            .child(render_code(
+                lang.as_ref().map(SharedString::as_ref),
+                text,
+                window,
+                cx,
+            ))
             .into_any_element(),
         BlockNode::Quote(children) => {
             let mut wrap = div()
@@ -473,6 +477,33 @@ fn render_block_node(
             wrap.into_any_element()
         }
     }
+}
+
+/// A fenced block's text, coloured by `syntax` when its language is known.
+/// Like a paragraph, the colour and font ride in the runs.
+fn render_code(lang: Option<&str>, text: String, window: &mut Window, cx: &mut App) -> StyledText {
+    let mut base = window.text_style();
+    base.color = theme::fg().into();
+    base.font_family = theme::mono_font_family(cx);
+    let runs: Vec<TextRun> = match lang.and_then(|lang| syntax::highlight(lang, &text)) {
+        Some(spans) => spans
+            .iter()
+            .map(|(range, class)| {
+                let mut run = base.to_run(range.len());
+                run.color = class.color().into();
+                if *class == syntax::Class::Comment {
+                    run.font.style = FontStyle::Italic;
+                }
+                run
+            })
+            .collect(),
+        None => vec![base.to_run(text.len())],
+    };
+
+    #[cfg(test)]
+    record_runs(&runs);
+
+    StyledText::new(SharedString::from(text)).with_runs(runs)
 }
 
 // Every `TextRun` built by `render_block` since the last drain. Lets the
@@ -1175,7 +1206,8 @@ mod runtime_tests {
     fn every_run_carries_a_theme_colour(cx: &mut TestAppContext) {
         let (_view, cx) = mount(
             cx,
-            "plain **bold** *italic* `code` [link](https://x.y) X\n\n# heading\n\n> quoted **bold** text\n",
+            "plain **bold** *italic* `code` [link](https://x.y) X\n\n# heading\n\n> quoted **bold** text\n\n\
+             ```python\ndef f(x):  # note\n    return \"s\" + 1\n```\n\n```\nplain\n```\n",
             Some(Box::new(CountingExt)),
         );
         cx.run_until_parked();
@@ -1187,6 +1219,11 @@ mod runtime_tests {
             Hsla::from(theme::fg()),
             Hsla::from(theme::fg_muted()),
             Hsla::from(theme::accent()),
+            Hsla::from(theme::syntax_string()),
+            Hsla::from(theme::syntax_constant()),
+            Hsla::from(theme::syntax_keyword()),
+            Hsla::from(theme::syntax_type()),
+            Hsla::from(theme::syntax_function()),
         ];
         for run in &runs {
             assert!(
@@ -1195,6 +1232,23 @@ mod runtime_tests {
                 run.color,
             );
         }
+    }
+
+    #[gpui::test]
+    fn fenced_code_is_highlighted_by_its_language(cx: &mut TestAppContext) {
+        let (_view, cx) = mount(cx, "```python\nreturn 1\n```\n", None);
+        cx.run_until_parked();
+
+        let runs = cx.update(|_, _| take_recorded_runs());
+        let colours: Vec<Hsla> = runs.iter().map(|r| r.color).collect();
+        assert!(
+            colours.contains(&theme::syntax_keyword().into()),
+            "{runs:?}"
+        );
+        assert!(
+            colours.contains(&theme::syntax_constant().into()),
+            "{runs:?}"
+        );
     }
 
     #[gpui::test]

@@ -35,6 +35,7 @@ pub mod shortcut_overlay;
 pub mod source;
 pub mod spellcheck;
 pub mod store;
+pub mod syntax;
 pub mod text_input;
 pub mod theme;
 pub mod window_frame;
