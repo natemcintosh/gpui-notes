@@ -22,7 +22,16 @@ There are no releases yet. Once one is tagged, install or upgrade with [`cargo-b
 cargo binstall --git https://github.com/natemcintosh/gpui-notes gpui-notes
 ```
 
-`--git` is required because GPUI is a git dependency, so the crate can't be published to crates.io. Prebuilt binaries cover `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. On any other target binstall falls back to building from source, which needs the platform setup below. The Linux binaries are built on Ubuntu 24.04 and link against its glibc, Wayland, xkbcommon and fontconfig.
+`--git` is required because GPUI is a git dependency, so the crate can't be published to crates.io. Prebuilt binaries cover `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. On any other target binstall falls back to building from source, which needs the platform setup below.
+
+The Linux binaries need:
+
+- **A Wayland session.** X11 is not supported: only GPUI's Wayland backend is compiled in, and under X11 the app starts with no window and no error message.
+- **glibc 2.39 or newer** (Ubuntu 24.04, Fedora 40, Debian 13 or later), because the binaries are built on Ubuntu 24.04. Older systems fail at launch with `GLIBC_2.39 not found`; build from source there instead.
+- **A Vulkan driver** (`libvulkan.so.1` plus Mesa's or your GPU vendor's driver), or EGL as a fallback. These are loaded at runtime, so `ldd` won't list them.
+- **`libxkbcommon` and `libwayland-client`**, which any Wayland desktop already has.
+
+Fonts are read straight from the system font directories, so the fontconfig library isn't needed at runtime.
 
 Upgrading replaces only the binary. Your notes and settings are kept, because neither is stored next to the binary.
 
