@@ -72,7 +72,7 @@ impl PageRegistry {
     /// creating `helix.md` beside it (#66).
     fn page_source(&self, name: &str) -> io::Result<NoteSource> {
         let exact = NoteSource::Page(name.to_string().into());
-        if self.open.contains_key(&exact) || self.store.exists(name) {
+        if self.open.contains_key(&exact) {
             return Ok(exact);
         }
         let key = page_links::page_key(name);
@@ -82,9 +82,14 @@ impl PageRegistry {
         if let Some(source) = open {
             return Ok(source.clone());
         }
-        let on_disk = self
-            .store
-            .list()?
+        // Spell it as the listing does, not via `store.exists`: on a
+        // case-insensitive filesystem (macOS, Windows) `exists("helix")` is
+        // true for `Helix.md`, which would open the page as `helix`.
+        let pages = self.store.list()?;
+        if pages.iter().any(|page| page == name) {
+            return Ok(exact);
+        }
+        let on_disk = pages
             .into_iter()
             .find(|page| page_links::page_key(page) == key);
         Ok(on_disk.map_or(exact, |page| NoteSource::Page(page.into())))
