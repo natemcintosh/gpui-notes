@@ -23,7 +23,7 @@ Prefer a `just` recipe over the overlapping `cargo` command (`just --list`).
 - `just pre` runs the pre-commit hooks (`prek run --all-files`).
 - `cargo check` is the quickest feedback, given the heavy gpui dependency.
 - `just run` resets `~/Desktop/logseq-test-zone` from `~/logseq` and runs the app against that copy. `just real` runs against the real graph and saves into the user's actual notes; don't use it unless asked.
-- `just release <version>` bumps the version, commits, tags `v<version>` and **pushes**; CI then builds the binaries. Don't run it unless asked. `.github/workflows/release.yml`'s asset names must match `[package.metadata.binstall]` in `Cargo.toml`, or `cargo binstall` can't find them.
+- `just release <major|minor|patch>` bumps the version, commits, tags `v<version>` and **pushes**; CI then builds the binaries. Don't run it unless asked. `.github/workflows/release.yml`'s asset names must match `[package.metadata.binstall]` in `Cargo.toml`, or `cargo binstall` can't find them.
 
 ## Testing
 

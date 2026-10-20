@@ -35,18 +35,25 @@ unblocked:
 test-zone:
     rsync -a --delete --exclude .stfolder ~/logseq/ "$HOME/Desktop/logseq-test-zone/"
 
-# Cut a release: bump Cargo.toml to <version>, commit, tag v<version> and push; CI then builds and uploads binaries
-release version:
+# Cut a release: bump Cargo.toml's version (major, minor or patch), commit, tag v<version> and push; CI then builds and uploads binaries
+release bump:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "$(git status --porcelain)" ]; then echo "working tree not clean" >&2; exit 1; fi
-    if git rev-parse -q --verify "refs/tags/v{{version}}" >/dev/null; then echo "tag v{{version}} already exists" >&2; exit 1; fi
     current=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-    if [ "$current" = "{{version}}" ]; then echo "Cargo.toml is already at version {{version}}; pick a new version" >&2; exit 1; fi
+    IFS=. read -r major minor patch <<< "$current"
+    case "{{bump}}" in
+        major) version="$((major + 1)).0.0" ;;
+        minor) version="$major.$((minor + 1)).0" ;;
+        patch) version="$major.$minor.$((patch + 1))" ;;
+        *) echo "unknown bump '{{bump}}'; use major, minor or patch" >&2; exit 1 ;;
+    esac
+    if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then echo "tag v$version already exists" >&2; exit 1; fi
+    echo "Releasing $current => $version"
     # First `version =` line only: that's [package]'s.
-    perl -0pi -e 's/^version = ".*?"$/version = "{{version}}"/m' Cargo.toml
-    grep -q '^version = "{{version}}"$' Cargo.toml || { echo "couldn't set version in Cargo.toml" >&2; exit 1; }
+    perl -0pi -e "s/^version = \".*?\"\$/version = \"$version\"/m" Cargo.toml
+    grep -q "^version = \"$version\"\$" Cargo.toml || { echo "couldn't set version in Cargo.toml" >&2; exit 1; }
     cargo check --quiet
-    git commit -am "chore(release): v{{version}}"
-    git tag -a "v{{version}}" -m "v{{version}}"
-    git push origin main "v{{version}}"
+    git commit -am "chore(release): v$version"
+    git tag -a "v$version" -m "v$version"
+    git push origin main "v$version"

@@ -54,7 +54,7 @@ The same directory also holds `dictionary.txt`, the words added with "Add to dic
 
 ## Releasing
 
-`just release 0.2.0` bumps the version in `Cargo.toml`, commits, tags `v0.2.0` and pushes. Pushing the tag runs `.github/workflows/release.yml`, which creates the GitHub release and uploads one `gpui-notes-<target>-v<version>.tar.gz` (`.zip` on Windows) per target (plus a `.sha256`). Those names are what `[package.metadata.binstall]` in `Cargo.toml` expects, so change both together.
+`just release patch` (or `minor`, `major`) bumps the version in `Cargo.toml` (e.g. 0.2.1 => 0.2.2), commits, tags `v0.2.2` and pushes. Pushing the tag runs `.github/workflows/release.yml`, which creates the GitHub release and uploads one `gpui-notes-<target>-v<version>.tar.gz` (`.zip` on Windows) per target (plus a `.sha256`). Those names are what `[package.metadata.binstall]` in `Cargo.toml` expects, so change both together.
 
 ## macOS setup
 
