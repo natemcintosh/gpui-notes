@@ -2352,6 +2352,24 @@ mod tests {
         cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- abc\n"));
     }
 
+    /// Multi-line plain text keeps its line breaks instead of being joined
+    /// onto one line (#79).
+    #[gpui::test]
+    fn plain_text_paste_keeps_newlines(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("b\r\nc".into()));
+        });
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_keystrokes(&format!("{}-v", crate::cmd_key()));
+        cx.run_until_parked();
+
+        cx.read(|cx| assert_eq!(page.read(cx).outline().roots[0].text, "ab\nc"));
+    }
+
     #[gpui::test]
     fn clicking_outside_the_bullet_menu_closes_it(cx: &mut TestAppContext) {
         let (page, ov, cx) = mount(cx, "- a\n- b\n");

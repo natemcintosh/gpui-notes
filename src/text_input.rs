@@ -564,8 +564,9 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            // The buffer is one logical line even when it is visually wrapped.
-            self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
+            // Newlines are kept, as `insert_newline` would type them; CRLF
+            // from a Windows clipboard would otherwise leave stray `\r`s.
+            self.replace_text_in_range(None, &text.replace("\r\n", "\n"), window, cx);
         }
     }
 
