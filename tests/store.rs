@@ -102,16 +102,25 @@ fn namespaced_page_writes_encoded_file_and_lists_decoded() {
     let (tmp, store) = new_store();
     store.write("Projects/Alpha", "hi").unwrap();
 
-    assert!(tmp.path().join("pages/Projects%2FAlpha.md").is_file());
+    assert!(tmp.path().join("pages/Projects___Alpha.md").is_file());
     assert_eq!(store.read("Projects/Alpha").unwrap(), "hi");
     assert_eq!(store.list().unwrap(), vec!["Projects/Alpha"]);
     assert!(store.exists("Projects/Alpha"));
 }
 
 #[test]
+fn reserved_char_page_reads_existing_encoded_file() {
+    let (tmp, store) = new_store();
+    fs::write(tmp.path().join("pages/Why%3F.md"), "because").unwrap();
+
+    assert_eq!(store.read("Why?").unwrap(), "because");
+    assert_eq!(store.list().unwrap(), vec!["Why?"]);
+}
+
+#[test]
 fn namespaced_page_reads_existing_encoded_file() {
     let (tmp, store) = new_store();
-    fs::write(tmp.path().join("pages/A%2FB%2FC.md"), "deep").unwrap();
+    fs::write(tmp.path().join("pages/A___B___C.md"), "deep").unwrap();
 
     assert_eq!(store.read("A/B/C").unwrap(), "deep");
     assert_eq!(store.list().unwrap(), vec!["A/B/C"]);
@@ -179,7 +188,7 @@ fn opens_existing_logseq_style_graph() {
     fs::create_dir_all(root.join("assets")).unwrap();
     fs::create_dir_all(root.join("logseq")).unwrap();
     fs::write(root.join("pages/Welcome.md"), "hi").unwrap();
-    fs::write(root.join("pages/Projects%2FAlpha.md"), "alpha body").unwrap();
+    fs::write(root.join("pages/Projects___Alpha.md"), "alpha body").unwrap();
     fs::write(root.join("journals/2026_04_18.md"), "j").unwrap();
     fs::write(root.join("assets/ignored.md"), "x").unwrap();
 

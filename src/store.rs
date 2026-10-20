@@ -1,4 +1,5 @@
 use chrono::NaiveDate;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -245,16 +246,73 @@ fn validate_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-// Logseq uses URL-encoded `/` (`%2F`) in page filenames to represent namespaces.
-// We only substitute `/` here — literal `%` in names round-trips as-is, matching
-// Logseq's on-disk behavior. A name containing a literal `%2F` substring would
-// collide with an encoded `/`; that edge case is out of scope (see issue #14).
+/// Characters Logseq percent-encodes in page filenames, as
+/// `multiplatform-reserved-chars` in its `frontend/util/fs.cljs`.
+const RESERVED_FILE_CHARS: &str = ":*?\"<>|#\\";
+
+const WINDOWS_RESERVED_FILE_BODIES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Logseq's `:file/name-format :triple-lowbar` (`tri-lb-file-name-sanity`):
+/// a `%XX` already in the title becomes `%25XX`, reserved characters and a
+/// leading `.` are percent-encoded, and the namespace `/` becomes `___`, with
+/// any `_` that would make that ambiguous encoded as `%5F`.
 fn encode_page_name(name: &str) -> String {
-    name.replace('/', "%2F")
+    let mut out = String::with_capacity(name.len());
+    for (i, c) in name.char_indices() {
+        if c == '%' && percent_escape(&name[i..]).is_some() {
+            out.push_str("%25");
+        } else if RESERVED_FILE_CHARS.contains(c) || (i == 0 && c == '.') {
+            let _ = write!(out, "%{:02X}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    // The trailing `/` becomes `___`, which decoding drops as an empty
+    // namespace: Windows can't create these file bodies as they are.
+    if WINDOWS_RESERVED_FILE_BODIES.contains(&out.as_str()) || out.ends_with('.') {
+        out.push('/');
+    }
+    out.replace("___", "%5F%5F%5F")
+        .replace("_/", "%5F/")
+        .replace("/_", "/%5F")
+        .replace('/', "___")
 }
 
+/// The inverse of [`encode_page_name`], as Logseq's `tri-lb-title-parsing`.
+/// It also reads the legacy format's `%2F` namespaces.
 fn decode_page_name(encoded: &str) -> String {
-    encoded.replace("%2F", "/")
+    let slashed = encoded.replace("___", "/");
+    let mut decoded = String::with_capacity(slashed.len());
+    let mut rest = slashed.as_str();
+    while let Some(i) = rest.find('%') {
+        decoded.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if let Some(c) = percent_escape(rest) {
+            decoded.push(c);
+            rest = &rest[3..];
+        } else {
+            decoded.push('%');
+            rest = &rest[1..];
+        }
+    }
+    decoded.push_str(rest);
+    let namespaces: Vec<&str> = decoded.split('/').filter(|s| !s.is_empty()).collect();
+    namespaces.join("/")
+}
+
+/// The ASCII character `s` starts with as a `%XX` escape, if it is one.
+/// Escapes of non-ASCII bytes are left alone, as a lone one isn't valid
+/// UTF-8 and Logseq's decoder leaves it too.
+fn percent_escape(s: &str) -> Option<char> {
+    let hex = s.strip_prefix('%')?.get(..2)?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = u8::from_str_radix(hex, 16).ok()?;
+    byte.is_ascii().then_some(char::from(byte))
 }
 
 #[cfg(test)]
@@ -310,12 +368,38 @@ mod tests {
         assert!(err.to_string().contains(names), "{err}");
     }
 
+    #[rstest]
+    #[case::question_mark("What am I grateful for?", "What am I grateful for%3F")]
+    #[case::namespace("Projects/Alpha", "Projects___Alpha")]
+    #[case::reserved_chars("a:b*c\"d<e>f|g#h", "a%3Ab%2Ac%22d%3Ce%3Ef%7Cg%23h")]
+    #[case::escape_in_title("100%25 sure", "100%2525 sure")]
+    #[case::lone_percent("a%b", "a%b")]
+    #[case::leading_dot(".hidden", "%2Ehidden")]
+    #[case::windows_reserved("CON", "CON___")]
+    #[case::trailing_dot("etc.", "etc.___")]
+    #[case::triple_lowbar("a___b", "a%5F%5F%5Fb")]
+    #[case::lowbar_by_slash("a_/_b", "a%5F___%5Fb")]
+    fn encodes_like_logseq_triple_lowbar(#[case] name: &str, #[case] file_body: &str) {
+        assert_eq!(encode_page_name(name), file_body);
+        assert_eq!(decode_page_name(file_body), name);
+    }
+
+    /// The five `%3F` pages in the real graph (#64).
+    #[rstest]
+    #[case("How do I lower the log level of the M3 tests%3F")]
+    #[case("What am I grateful for%3F")]
+    #[case("What am I worried about%3F")]
+    #[case("what could have gone better%3F")]
+    #[case("What would make today great%3F")]
+    fn real_graph_question_pages_decode(#[case] file_body: &str) {
+        let name = decode_page_name(file_body);
+        assert_eq!(name, file_body.replace("%3F", "?"));
+        assert_eq!(encode_page_name(&name), file_body);
+    }
+
     #[test]
-    fn encode_roundtrips_slash() {
-        let name = "Projects/Alpha";
-        let encoded = encode_page_name(name);
-        assert_eq!(encoded, "Projects%2FAlpha");
-        assert_eq!(decode_page_name(&encoded), name);
+    fn legacy_namespace_files_still_decode() {
+        assert_eq!(decode_page_name("Projects%2FAlpha"), "Projects/Alpha");
     }
 
     #[rstest]
@@ -323,6 +407,7 @@ mod tests {
     #[case::literal_percent("a%b")]
     #[case::plain_ascii("plain")]
     #[case::multiple_slashes("a/b/c")]
+    #[case::four_lowbars("a____b")]
     fn encode_decode_is_identity(#[case] name: &str) {
         assert_eq!(decode_page_name(&encode_page_name(name)), name);
     }
