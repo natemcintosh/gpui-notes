@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::io;
+use std::time::Duration;
 
 use chrono::{Local, NaiveDate};
-use gpui::{App, AppContext, BorrowAppContext, Entity, Global, SharedString};
+use gpui::{App, AppContext, BorrowAppContext, Entity, EntityId, Global, SharedString, Task};
 
 use crate::errors;
 use crate::page::Page;
@@ -265,9 +266,45 @@ impl PageRegistry {
             self.on_disk.insert(key.clone(), body.to_string());
             page_links::reindex_global_for_page(&page, &key, cx);
         }
+        cx.observe(&page, |page, cx| schedule_autosave(&page, cx))
+            .detach();
         self.open.insert(key, page.clone());
         page
     }
+}
+
+/// How long a dirty page waits after its last change before it is written,
+/// so a crash or logout loses at most this much typing (#72).
+const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
+
+/// Each open page's pending autosave. Replacing a page's task drops the old
+/// one, which cancels it, so a run of edits saves once after the last.
+#[derive(Default)]
+struct Autosaves(HashMap<EntityId, Task<()>>);
+
+impl Global for Autosaves {}
+
+/// Restarts `page`'s autosave countdown if it has unsaved changes.
+fn schedule_autosave(page: &Entity<Page>, cx: &mut App) {
+    if !page.read(cx).dirty() {
+        return;
+    }
+    let weak = page.downgrade();
+    let task = cx.spawn(async move |cx| {
+        cx.background_executor().timer(AUTOSAVE_DELAY).await;
+        cx.update(|cx| {
+            let Some(page) = weak.upgrade() else {
+                return;
+            };
+            let result = cx.update_global::<PageRegistry, _>(|reg, cx| reg.save(&page, cx));
+            if let Err(err) = result {
+                errors::report(format!("autosave failed: {err}"), cx);
+            }
+        });
+    });
+    cx.default_global::<Autosaves>()
+        .0
+        .insert(page.entity_id(), task);
 }
 
 /// What the main pane shows. One enum, so "a single page" and "the journals
@@ -799,6 +836,29 @@ mod tests {
             let page = reg.open("a", cx).unwrap();
             assert_eq!(page.read(cx).body().as_ref(), "- from-a\n");
         });
+    }
+
+    /// #72: an edit reaches disk once the page has been idle for
+    /// `AUTOSAVE_DELAY`, and each further edit restarts the wait.
+    #[gpui::test]
+    fn idle_dirty_page_is_autosaved(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(&tmp);
+        let page = cx.update(|cx| {
+            cx.set_global(PageRegistry::new(make_store(&tmp)));
+            cx.update_global::<PageRegistry, _>(|reg, cx| reg.open_or_create("foo", cx))
+                .unwrap()
+        });
+
+        page.update(cx, |p, cx| p.set_body_for_test("one", cx));
+        cx.executor().advance_clock(AUTOSAVE_DELAY / 2);
+        page.update(cx, |p, cx| p.set_body_for_test("two", cx));
+        cx.executor().advance_clock(AUTOSAVE_DELAY / 2);
+        assert!(!store.exists("foo"), "an edit restarts the wait");
+
+        cx.executor().advance_clock(AUTOSAVE_DELAY / 2);
+        assert_eq!(store.read("foo").unwrap(), "- two\n");
+        assert!(cx.read(|cx| !page.read(cx).dirty()));
     }
 
     /// Every file in `pages/` or `journals/` whose name marks it as a
