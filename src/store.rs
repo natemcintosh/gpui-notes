@@ -33,7 +33,8 @@ impl NotesStore {
     }
 
     /// The notes root: `GPUI_NOTES_ROOT` if set, else `notes_root` from
-    /// `config.toml`, else `~/Desktop/logseq-test-zone`.
+    /// `config.toml`, else `gpui-notes` in the per-user data directory
+    /// (`~/.local/share/gpui-notes` on Linux).
     ///
     /// Debug builds skip `config.toml`, so a bare `cargo run` during
     /// development can't write to the graph an installed copy points at.
@@ -41,7 +42,7 @@ impl NotesStore {
     /// # Errors
     /// Returns an error if `GPUI_NOTES_ROOT` or `notes_root` is not absolute,
     /// if `config.toml` can't be read or parsed, or if the home directory
-    /// cannot be determined.
+    /// or data directory cannot be determined.
     pub fn default_root() -> io::Result<PathBuf> {
         let config = match config::config_path() {
             Some(path) if !cfg!(debug_assertions) => Config::load(&path)?,
@@ -51,6 +52,7 @@ impl NotesStore {
             std::env::var_os("GPUI_NOTES_ROOT").map(PathBuf::from),
             &config,
             dirs::home_dir().as_deref(),
+            dirs::data_dir().as_deref(),
         )
     }
 
@@ -176,6 +178,7 @@ fn resolve_root(
     env_root: Option<PathBuf>,
     config: &Config,
     home: Option<&Path>,
+    data_dir: Option<&Path>,
 ) -> io::Result<PathBuf> {
     let no_home = || {
         io::Error::new(
@@ -189,8 +192,13 @@ fn resolve_root(
         let root = config::expand_home(root, home).ok_or_else(no_home)?;
         (root, "notes_root in config.toml")
     } else {
-        let home = home.ok_or_else(no_home)?;
-        return Ok(home.join("Desktop").join("logseq-test-zone"));
+        let data_dir = data_dir.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "could not determine data directory",
+            )
+        })?;
+        return Ok(data_dir.join("gpui-notes"));
     };
     if !root.is_absolute() {
         return Err(io::Error::new(
@@ -324,6 +332,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     const HOME: &str = "/home/me";
+    const DATA: &str = "/home/me/.local/share";
 
     fn config(notes_root: &str) -> Config {
         Config {
@@ -337,22 +346,33 @@ mod tests {
             Some("/env/notes".into()),
             &config("/config/notes"),
             Some(Path::new(HOME)),
+            Some(Path::new(DATA)),
         );
         assert_eq!(root.unwrap(), PathBuf::from("/env/notes"));
     }
 
     #[test]
     fn config_beats_the_default_and_expands_tilde() {
-        let root = resolve_root(None, &config("~/logseq"), Some(Path::new(HOME)));
+        let root = resolve_root(
+            None,
+            &config("~/logseq"),
+            Some(Path::new(HOME)),
+            Some(Path::new(DATA)),
+        );
         assert_eq!(root.unwrap(), PathBuf::from("/home/me/logseq"));
     }
 
     #[test]
-    fn default_is_the_test_zone() {
-        let root = resolve_root(None, &Config::default(), Some(Path::new(HOME)));
+    fn default_is_in_the_data_dir() {
+        let root = resolve_root(
+            None,
+            &Config::default(),
+            Some(Path::new(HOME)),
+            Some(Path::new(DATA)),
+        );
         assert_eq!(
             root.unwrap(),
-            PathBuf::from("/home/me/Desktop/logseq-test-zone")
+            PathBuf::from("/home/me/.local/share/gpui-notes")
         );
     }
 
@@ -364,7 +384,13 @@ mod tests {
         #[case] config: Config,
         #[case] names: &str,
     ) {
-        let err = resolve_root(env_root, &config, Some(Path::new(HOME))).unwrap_err();
+        let err = resolve_root(
+            env_root,
+            &config,
+            Some(Path::new(HOME)),
+            Some(Path::new(DATA)),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains(names), "{err}");
     }
 

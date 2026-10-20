@@ -41,7 +41,7 @@ Pages are stored as plain `.md` files in a notes root directory. The app picks t
 
 1. the `GPUI_NOTES_ROOT` environment variable (must be an absolute path);
 2. `notes_root` in `config.toml` (absolute, or starting with `~/`), read by release builds only, so a bare `cargo run` during development never touches your real graph;
-3. `~/Desktop/logseq-test-zone`.
+3. `gpui-notes` in the per-user data directory (`~/.local/share/gpui-notes` on Linux, `~/Library/Application Support/gpui-notes` on macOS, `%APPDATA%\gpui-notes` on Windows), created empty on first run.
 
 To point an installed copy at your Logseq graph, create `config.toml`:
 

@@ -1244,10 +1244,9 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // OverlayMode state-transition tests. One test per discrete transition
-    // listed in the plan; see /home/natemcintosh/.claude/plans/there-
-    // seem-to-be-abundant-peach.md. The shape is always: set the
-    // precondition, fire a simulated input, assert the resulting variant.
+    // OverlayMode state-transition tests, one per discrete transition. The
+    // shape is always: set the precondition, fire a simulated input, assert
+    // the resulting variant.
     // ────────────────────────────────────────────────────────────────────
 
     /// `None` → `PagePicker` via Ctrl-O.
