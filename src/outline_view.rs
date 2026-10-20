@@ -1767,6 +1767,28 @@ mod tests {
         (ids, ov, vcx)
     }
 
+    /// Perf baseline (#23): redraw a page of 1000 plain-text blocks, as every
+    /// keystroke does. Headless, so this times render and layout but not the
+    /// GPU. Run with
+    /// `cargo nextest run --release --run-ignored only --no-capture redraw_1000`.
+    #[gpui::test]
+    #[ignore = "timing baseline, not a pass/fail check"]
+    fn redraw_1000_plain_blocks_baseline(cx: &mut TestAppContext) {
+        const FRAMES: u32 = 20;
+        let body = (0..1000)
+            .map(|i| format!("- plain text block number {i}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let (_page, _ov, cx) = mount(cx, &body);
+        let start = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            // A test app draws every dirty window when the update ends.
+            cx.update(|window, _| window.refresh());
+        }
+        let per_frame = start.elapsed() / FRAMES;
+        println!("1000 plain blocks: {per_frame:?} per redraw (target < 16ms)");
+    }
+
     fn assert_on_screen(cx: &mut VisualTestContext, id: BlockId) {
         let block = cx
             .debug_bounds(format!("block-view-{id:?}").leak())
