@@ -321,6 +321,11 @@ impl RootView {
     }
 
     fn render_header(header_text: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let root = cx.global::<PageRegistry>().root();
+        let location = format!(
+            "notes in {}",
+            display_root(root, dirs::home_dir().as_deref())
+        );
         div()
             .flex()
             .flex_row()
@@ -329,6 +334,12 @@ impl RootView {
             .text_color(theme::header_fg())
             .text_size(px(14.))
             .child(div().flex_1().child(header_text))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::fg_muted())
+                    .child(location),
+            )
             .child(
                 div()
                     .id(ElementId::Name(SharedString::from("show-shortcuts")))
@@ -646,6 +657,14 @@ impl Render for RootView {
         } else {
             body
         }
+    }
+}
+
+/// `root` with the home directory shortened to `~`, for the header.
+fn display_root(root: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.and_then(|home| root.strip_prefix(home).ok()) {
+        Some(rest) => std::path::Path::new("~").join(rest).display().to_string(),
+        None => root.display().to_string(),
     }
 }
 
@@ -1727,6 +1746,19 @@ mod tests {
     // Tagged), and `ctrl-.` reaches a journal — the two target shapes that
     // must stay distinguishable through a round trip.
     // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn display_root_shortens_home_to_tilde() {
+        let home = std::path::Path::new("/home/me");
+        assert_eq!(
+            display_root(std::path::Path::new("/home/me/logseq"), Some(home)),
+            "~/logseq"
+        );
+        assert_eq!(
+            display_root(std::path::Path::new("/srv/notes"), Some(home)),
+            "/srv/notes"
+        );
+    }
 
     /// The current page's name, or `"Journals"` in journals mode.
     fn current_page_name(cx: &mut VisualTestContext) -> String {

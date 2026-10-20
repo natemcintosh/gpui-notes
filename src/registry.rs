@@ -36,6 +36,12 @@ impl PageRegistry {
         }
     }
 
+    /// The notes root every page is read from and saved to.
+    #[must_use]
+    pub fn root(&self) -> &std::path::Path {
+        self.store.root()
+    }
+
     /// Opens an existing page.
     ///
     /// # Errors
