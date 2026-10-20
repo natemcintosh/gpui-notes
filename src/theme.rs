@@ -396,6 +396,19 @@ pub fn code_bg() -> Rgba {
     window_bg()
 }
 
+/// Behind a ```` ```calc ```` block: a tint off the page, so it reads as a
+/// live panel rather than plain code.
+#[must_use]
+pub fn calc_bg() -> Rgba {
+    row_bg()
+}
+
+/// A calc block's outline and the hairline before its result column.
+#[must_use]
+pub fn calc_border() -> Rgba {
+    overlay_border()
+}
+
 #[must_use]
 pub fn syntax_string() -> Rgba {
     palette().syntax_string

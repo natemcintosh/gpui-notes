@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use gpui::{div, AnyElement, App, IntoElement, ParentElement, Styled, Window};
+use gpui::{div, px, AnyElement, App, IntoElement, ParentElement, Styled, Window};
 
 use crate::theme;
 
@@ -390,15 +390,19 @@ fn call(name: &str, args: &[f64]) -> Result<f64, String> {
 
 // --- Rendering ------------------------------------------------------------
 
-/// Renders a calc block: each source line on the left, its result on the right.
+/// Renders a calc block: each source line on the left, its result in a
+/// fixed column on the right behind a hairline, so the results scan as one
+/// column however long each line is.
 //
 // ponytail: re-evaluated every render; memoize on block text if a large page
 // ever stutters.
 pub fn render(body: &str, _window: &mut Window, cx: &mut App) -> AnyElement {
     let mut root = div()
-        .bg(theme::code_bg())
+        .bg(theme::calc_bg())
+        .border_1()
+        .border_color(theme::calc_border())
         .font_family(theme::mono_font_family(cx))
-        .p_2()
+        .py_1()
         .rounded_sm()
         .flex()
         .flex_col();
@@ -411,14 +415,34 @@ pub fn render(body: &str, _window: &mut Window, cx: &mut App) -> AnyElement {
         root = root.child(
             div()
                 .flex()
-                .justify_between()
-                .gap_4()
-                .child(div().text_color(theme::fg()).child(line.to_string()))
-                .child(div().text_color(color).child(result)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px_2()
+                        .text_color(theme::fg())
+                        .child(line.to_string()),
+                )
+                .child(
+                    // A definite pixel width: a percentage here collapses
+                    // when nested, as the journals overlap showed.
+                    div()
+                        .flex_none()
+                        .w(px(RESULT_COLUMN_WIDTH))
+                        .px_2()
+                        .border_l_1()
+                        .border_color(theme::calc_border())
+                        .text_right()
+                        .text_color(color)
+                        .child(result),
+                ),
         );
     }
     root.into_any_element()
 }
+
+/// Wide enough for a dozen-digit result; longer errors wrap inside it.
+const RESULT_COLUMN_WIDTH: f32 = 160.;
 
 #[cfg(test)]
 mod tests {
