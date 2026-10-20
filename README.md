@@ -16,13 +16,20 @@ Not currently planned (may be revisited later): graph view, query blocks, task s
 
 ## Installing
 
-There are no releases yet. Once one is tagged, install or upgrade with [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
+Install or upgrade with either command (`--git` is required because GPUI is a git dependency, so the crate can't be published to crates.io):
 
 ```sh
+# Prebuilt binary via cargo-binstall (https://github.com/cargo-bins/cargo-binstall).
+# Covers aarch64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+# and x86_64-pc-windows-msvc; other targets fall back to building from source.
 cargo binstall --git https://github.com/natemcintosh/gpui-notes gpui-notes
+
+# Or build from source with plain cargo. Slow the first time, and needs the
+# platform setup below. Add `--tag v<version>` to pin a release instead of main.
+cargo install --locked --git https://github.com/natemcintosh/gpui-notes gpui-notes
 ```
 
-`--git` is required because GPUI is a git dependency, so the crate can't be published to crates.io. Prebuilt binaries cover `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. On any other target binstall falls back to building from source, which needs the platform setup below.
+### Linux requirements
 
 The Linux binaries need:
 
