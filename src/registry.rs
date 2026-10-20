@@ -40,11 +40,11 @@ impl PageRegistry {
     /// # Errors
     /// Returns `NotFound` if the page does not exist on disk, or a store I/O error.
     pub fn open(&mut self, name: &str, cx: &mut App) -> io::Result<Entity<Page>> {
-        let key = NoteSource::Page(name.to_string().into());
+        let key = self.page_source(name)?;
         if let Some(entity) = self.open.get(&key) {
             return Ok(entity.clone());
         }
-        let body = self.store.read(name)?;
+        let body = self.read_source(&key)?;
         Ok(self.insert(key, Some(&body), cx))
     }
 
@@ -56,7 +56,31 @@ impl PageRegistry {
     /// # Errors
     /// Returns any I/O error from the underlying store other than `NotFound`.
     pub fn open_or_create(&mut self, name: &str, cx: &mut App) -> io::Result<Entity<Page>> {
-        self.open_or_blank(NoteSource::Page(name.to_string().into()), cx)
+        let key = self.page_source(name)?;
+        self.open_or_blank(key, cx)
+    }
+
+    /// The page `name` refers to, spelled as the page already open or on
+    /// disk under any case, so `[[helix]]` opens `Helix.md` rather than
+    /// creating `helix.md` beside it (#66).
+    fn page_source(&self, name: &str) -> io::Result<NoteSource> {
+        let exact = NoteSource::Page(name.to_string().into());
+        if self.open.contains_key(&exact) || self.store.exists(name) {
+            return Ok(exact);
+        }
+        let key = page_links::page_key(name);
+        let open = self.open.keys().find(
+            |source| matches!(source, NoteSource::Page(open) if page_links::page_key(open) == key),
+        );
+        if let Some(source) = open {
+            return Ok(source.clone());
+        }
+        let on_disk = self
+            .store
+            .list()?
+            .into_iter()
+            .find(|page| page_links::page_key(page) == key);
+        Ok(on_disk.map_or(exact, |page| NoteSource::Page(page.into())))
     }
 
     /// Opens the journal for `date`, as `open_or_create` does a page. The
@@ -374,6 +398,45 @@ mod tests {
             let mut reg = PageRegistry::new(make_store(&tmp));
             let a = reg.open_or_create("foo", cx).unwrap();
             let b = reg.open_or_create("foo", cx).unwrap();
+            assert_eq!(a.entity_id(), b.entity_id());
+        });
+    }
+
+    /// `[[helix]]` opens the existing `Helix.md`, and saving it doesn't
+    /// create `helix.md` beside it (#66).
+    #[gpui::test]
+    fn open_or_create_resolves_an_existing_page_in_any_case(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = make_store(&tmp);
+        store.write("Helix", "- body\n").unwrap();
+        cx.update(|cx| {
+            let mut reg = PageRegistry::new(store);
+            let page = reg.open_or_create("helix", cx).unwrap();
+            assert_eq!(page.read(cx).name().as_ref(), "Helix");
+            assert_eq!(page.read(cx).outline().serialize(), "- body\n");
+            assert_eq!(
+                reg.open_or_create("HELIX", cx).unwrap().entity_id(),
+                page.entity_id()
+            );
+
+            page.update(cx, |p, cx| p.set_body_for_test("- edited\n", cx));
+            reg.save(&page, cx).unwrap();
+        });
+        let pages: Vec<_> = std::fs::read_dir(tmp.path().join("pages"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(pages, ["Helix.md"]);
+    }
+
+    /// A page not saved yet is matched in any case too.
+    #[gpui::test]
+    fn open_or_create_matches_an_unsaved_page_in_any_case(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            let mut reg = PageRegistry::new(make_store(&tmp));
+            let a = reg.open_or_create("Stan", cx).unwrap();
+            let b = reg.open_or_create("stan", cx).unwrap();
             assert_eq!(a.entity_id(), b.entity_id());
         });
     }

@@ -30,8 +30,10 @@ pub struct OpenPage {
 
 /// Forward and reverse page-link lookups.
 ///
-/// Page names are case-preserving and case-sensitive. The separate `pages`
-/// set backs the `[[` completion list without touching disk.
+/// Page names are case-insensitive, as in Logseq: `[[helix]]` and `[[Helix]]`
+/// are the same page. Both maps are keyed by [`page_key`] and keep a spelling
+/// to show. The separate `pages` map backs the `[[` completion list without
+/// touching disk.
 ///
 /// The reverse map records only *which* sources link to a target, never the
 /// referencing `BlockId`s: ids minted by `rebuild_from`'s throwaway
@@ -40,13 +42,27 @@ pub struct OpenPage {
 /// (`blocks_linking_to`).
 #[derive(Default)]
 pub struct LinkIndex {
-    reverse: HashMap<String, BTreeSet<NoteSource>>,
+    reverse: HashMap<String, Backlinks>,
     /// Keyed by `NoteSource` rather than by display name so that a page named
     /// `2026-07-23` cannot purge the reverse entries of that date's journal.
     forward: BTreeMap<NoteSource, HashSet<SharedString>>,
     /// Page names only: journals are indexed as link sources above but kept
-    /// out of here, since this drives the `[[` completion list.
-    pages: HashSet<String>,
+    /// out of here, since this drives the `[[` completion list. Values are
+    /// the names as spelled on disk.
+    pages: HashMap<String, String>,
+}
+
+/// The sources linking to one target, and the first spelling seen for it.
+struct Backlinks {
+    name: String,
+    sources: BTreeSet<NoteSource>,
+}
+
+/// The case-insensitive identity of a page name: two names with the same key
+/// are the same page.
+#[must_use]
+pub fn page_key(name: &str) -> String {
+    name.to_lowercase()
 }
 
 impl Global for LinkIndex {}
@@ -60,7 +76,9 @@ impl LinkIndex {
     /// Returns the sources that link to `target`.
     #[must_use]
     pub fn backlinks(&self, target: &str) -> &BTreeSet<NoteSource> {
-        self.reverse.get(target).unwrap_or(&EMPTY_BACKLINKS)
+        self.reverse
+            .get(&page_key(target))
+            .map_or(&EMPTY_BACKLINKS, |backlinks| &backlinks.sources)
     }
 
     /// Returns the unique page names referenced by `source`.
@@ -70,14 +88,19 @@ impl LinkIndex {
     }
 
     /// Every `[[target]]` linked from at least one page or journal, whether
-    /// or not a file exists for it.
+    /// or not a file exists for it. Each is listed once, spelled as its page
+    /// is when there is one.
     pub fn link_targets(&self) -> impl Iterator<Item = &str> {
-        self.reverse.keys().map(String::as_str)
+        self.reverse.iter().map(|(key, backlinks)| {
+            self.pages
+                .get(key)
+                .map_or(backlinks.name.as_str(), String::as_str)
+        })
     }
 
     #[must_use]
     pub fn page_exists(&self, name: &str) -> bool {
-        self.pages.contains(name)
+        self.pages.contains_key(&page_key(name))
     }
 
     /// Every page name the index knows about — pages on disk plus link
@@ -91,7 +114,7 @@ impl LinkIndex {
             .filter(|target| journal::parse_journal_name(target).is_none());
         let mut names: Vec<SharedString> = self
             .pages
-            .iter()
+            .values()
             .map(String::as_str)
             .chain(linked)
             .collect::<HashSet<_>>()
@@ -139,13 +162,13 @@ impl LinkIndex {
         // this source, avoiding a sweep over unrelated targets.
         if let Some(old_targets) = self.forward.remove(source) {
             for target in old_targets {
-                let target = target.to_string();
-                let remove_entry = self.reverse.get_mut(&target).is_some_and(|backlinks| {
-                    backlinks.remove(source);
-                    backlinks.is_empty()
+                let key = page_key(&target);
+                let remove_entry = self.reverse.get_mut(&key).is_some_and(|backlinks| {
+                    backlinks.sources.remove(source);
+                    backlinks.sources.is_empty()
                 });
                 if remove_entry {
-                    self.reverse.remove(&target);
+                    self.reverse.remove(&key);
                 }
             }
         }
@@ -153,23 +176,27 @@ impl LinkIndex {
         let mut targets = HashSet::new();
         for block in outline.preorder() {
             for target in page_links_in_text(&block.text) {
-                targets.insert(target.clone());
                 self.reverse
-                    .entry(target.to_string())
-                    .or_default()
+                    .entry(page_key(&target))
+                    .or_insert_with(|| Backlinks {
+                        name: target.to_string(),
+                        sources: BTreeSet::new(),
+                    })
+                    .sources
                     .insert(source.clone());
+                targets.insert(target);
             }
         }
 
         if let NoteSource::Page(name) = source {
-            self.pages.insert(name.to_string());
+            self.pages.insert(page_key(name), name.to_string());
         }
         self.forward.insert(source.clone(), targets);
     }
 }
 
-/// Ids of the blocks in `outline` whose text links to `target`, in document
-/// order. Resolved against a live outline, so the ids are always current.
+/// Ids of the blocks in `outline` whose text links to `target`, in any case,
+/// in document order. Resolved against a live outline, so the ids are always current.
 ///
 /// A hit's descendants are not searched: each id becomes a subtree row in
 /// Linked References, so a linking descendant is already on screen (#69).
@@ -185,7 +212,7 @@ pub fn blocks_linking_to(outline: &Outline, target: &str) -> Vec<BlockId> {
             let links = block.text.contains("[[")
                 && page_links_in_text(&block.text)
                     .iter()
-                    .any(|link| link.as_ref() == target);
+                    .any(|link| page_key(link) == target);
             if links {
                 out.push(block.id);
             } else {
@@ -195,7 +222,7 @@ pub fn blocks_linking_to(outline: &Outline, target: &str) -> Vec<BlockId> {
     }
 
     let mut out = Vec::new();
-    walk(&mut out, &outline.roots, target);
+    walk(&mut out, &outline.roots, &page_key(target));
     out
 }
 
@@ -398,7 +425,7 @@ mod tests {
         );
         assert_eq!(index.backlinks("C").len(), 1);
         assert!(index.page_exists("A"));
-        assert!(!index.page_exists("a"));
+        assert!(index.page_exists("a"), "page names are case-insensitive");
         assert!(!index.page_exists("B"));
 
         let second = Outline::parse("- only [[C]]\n");
@@ -480,6 +507,53 @@ mod tests {
         );
     }
 
+    /// `[[helix]]` and `[[Helix]]` are one page, listed as spelled on disk
+    /// (#66).
+    #[test]
+    fn link_case_variants_are_one_page() {
+        let mut index = LinkIndex::default();
+        index.reindex_outline(
+            &page("A"),
+            &Outline::parse(
+                "- [[helix]]
+",
+            ),
+        );
+        index.reindex_outline(
+            &page("B"),
+            &Outline::parse(
+                "- [[HELIX]]
+",
+            ),
+        );
+        index.reindex_outline(
+            &page("Helix"),
+            &Outline::parse(
+                "- body
+",
+            ),
+        );
+
+        assert_eq!(
+            index.backlinks("Helix").iter().collect::<Vec<_>>(),
+            [&page("A"), &page("B")]
+        );
+        assert_eq!(index.link_targets().collect::<Vec<_>>(), ["Helix"]);
+        assert_eq!(
+            index.page_names(),
+            ["A", "B", "Helix"].map(SharedString::from)
+        );
+
+        index.reindex_outline(
+            &page("A"),
+            &Outline::parse(
+                "- gone
+",
+            ),
+        );
+        assert_eq!(index.backlinks("helix").len(), 1);
+    }
+
     #[test]
     fn same_named_page_and_journal_do_not_purge_each_other() {
         let mut index = LinkIndex::default();
@@ -491,6 +565,16 @@ mod tests {
         );
 
         assert_eq!(index.backlinks("Target").len(), 2);
+    }
+
+    #[test]
+    fn blocks_linking_to_ignores_case() {
+        let outline = Outline::parse(
+            "- [[helix]]
+- [[Other]]
+",
+        );
+        assert_eq!(blocks_linking_to(&outline, "Helix"), [outline.roots[0].id]);
     }
 
     #[test]
