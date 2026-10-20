@@ -429,6 +429,12 @@ impl TextInput {
         self.selection.range()
     }
 
+    /// Selects `range`, with the caret at its end.
+    pub(crate) fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.move_to(range.start, cx);
+        self.select_to(range.end, cx);
+    }
+
     pub(crate) fn set_pending_vertical_placement(&mut self, placement: PendingVerticalPlacement) {
         self.preferred_screen_x = Some(placement.preferred_screen_x);
         self.pending_vertical_placement = Some(placement);

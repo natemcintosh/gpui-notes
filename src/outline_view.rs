@@ -912,7 +912,6 @@ impl OutlineView {
             .unwrap_or_default()
     }
 
-    #[cfg(test)]
     #[must_use]
     pub fn block_view(&self, id: BlockId) -> Option<&Entity<BlockView>> {
         self.blocks.get(&id)

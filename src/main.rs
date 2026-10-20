@@ -5,12 +5,13 @@
 
 use gpui::{
     actions, div, prelude::*, px, size, App, AppContext, Bounds, Context, Div, ElementId, Entity,
-    FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, NavigationDirection,
+    FocusHandle, Focusable, IntoElement, KeyBinding, Keystroke, MouseButton, NavigationDirection,
     ParentElement, Render, SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions,
 };
 use gpui_notes::block_view;
 use gpui_notes::cmd_key;
 use gpui_notes::errors::{self, LastError};
+use gpui_notes::goto_word::{self, GotoWord, Labels, Step};
 use gpui_notes::history::{self, NavHistory, NavTarget};
 use gpui_notes::journal;
 use gpui_notes::journals_view::JournalsView;
@@ -55,7 +56,8 @@ actions!(
 ///
 /// `PagePicker`, `Search` and `ShortcutsHelp` are absolute-positioned overlays. The
 /// enum collapses them into the same axis so that opening any one always
-/// dismisses the others.
+/// dismisses the others. `goto_word`'s labels are one too: they sit over the
+/// page, and nothing else can open while they intercept every keystroke.
 pub enum OverlayMode {
     None,
     PagePicker {
@@ -68,6 +70,13 @@ pub enum OverlayMode {
     },
     ShortcutsHelp {
         hints: Vec<ShortcutHint>,
+    },
+    /// `g w` was pressed; the frame being drawn records the words on screen.
+    JumpCollecting,
+    JumpLabels {
+        labels: Labels,
+        /// Drops with the labels. Eats every keystroke while they are up.
+        _intercept: Subscription,
     },
 }
 
@@ -98,6 +107,16 @@ impl OverlayMode {
     #[must_use]
     pub fn is_shortcuts(&self) -> bool {
         matches!(self, Self::ShortcutsHelp { .. })
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn jump_labels(&self) -> Option<&Labels> {
+        if let Self::JumpLabels { labels, .. } = self {
+            Some(labels)
+        } else {
+            None
+        }
     }
 
     #[cfg(test)]
@@ -159,6 +178,8 @@ impl RootView {
             OverlayMode::ShortcutsHelp { .. } => {
                 window.focus(&self.focus_handle, cx);
             }
+            // Focus stays on the block `g w` was pressed on.
+            OverlayMode::JumpCollecting | OverlayMode::JumpLabels { .. } => {}
             OverlayMode::None => {
                 if cx.global::<CurrentPage>().is_journals() {
                     let focused = self
@@ -318,6 +339,80 @@ impl RootView {
             self.park_focus(window, cx);
         }
         cx.notify();
+    }
+
+    /// `g w`. The labels need the words' positions on screen, so the next
+    /// frame collects them and `show_jump_labels` takes over once it is drawn.
+    fn goto_word(&mut self, _: &GotoWord, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.overlay.is_none() {
+            return;
+        }
+        self.overlay = OverlayMode::JumpCollecting;
+        goto_word::start_collecting(cx);
+        cx.notify();
+    }
+
+    /// Labels the words the last frame collected. Focus stays where it was;
+    /// keystrokes are intercepted instead, so a typed letter can't reach any
+    /// binding on the way.
+    fn show_jump_labels(&mut self, cx: &mut Context<Self>) {
+        // Taken even when the overlay has moved on, so collecting stops.
+        let labels = Labels::take_collected(cx);
+        if !matches!(self.overlay, OverlayMode::JumpCollecting) {
+            return;
+        }
+        self.overlay = match labels {
+            Some(labels) => {
+                let root = cx.entity().downgrade();
+                let intercept = cx.intercept_keystrokes(move |event, window, cx| {
+                    cx.stop_propagation();
+                    root.update(cx, |root, cx| root.jump_key(&event.keystroke, window, cx))
+                        .ok();
+                });
+                OverlayMode::JumpLabels {
+                    labels,
+                    _intercept: intercept,
+                }
+            }
+            None => OverlayMode::None,
+        };
+        cx.notify();
+    }
+
+    fn jump_key(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let OverlayMode::JumpLabels { labels, .. } = &mut self.overlay else {
+            return;
+        };
+        match labels.key(keystroke) {
+            Step::Pending => {}
+            Step::Jump(target) => {
+                self.overlay = OverlayMode::None;
+                goto_word::jump(&target, window, cx);
+            }
+            Step::Cancel => self.overlay = OverlayMode::None,
+        }
+        cx.notify();
+    }
+
+    /// The labels over the page. Split out of `render` to keep that method
+    /// within the `too_many_lines` budget.
+    fn render_jump_labels(labels: &Labels, cx: &mut Context<Self>) -> Div {
+        div()
+            // A click anywhere puts the labels away, and reaches nothing
+            // behind them.
+            .occlude()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.overlay = OverlayMode::None;
+                    cx.notify();
+                }),
+            )
+            .children(labels.render(theme::mono_font_family(cx)))
     }
 
     fn render_header(header_text: String, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -527,6 +622,9 @@ impl RootView {
             OverlayMode::PagePicker { .. } => ("page picker input", "not applicable"),
             OverlayMode::Search { .. } => ("search input", "not applicable"),
             OverlayMode::ShortcutsHelp { .. } => ("root", "not applicable"),
+            OverlayMode::JumpCollecting | OverlayMode::JumpLabels { .. } => {
+                ("block", "jump labels")
+            }
             OverlayMode::None if cx.global::<CurrentPage>().is_journals() => {
                 self.journals.read(cx).debug_focus_status(window, cx)
             }
@@ -580,6 +678,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::toggle_shortcuts))
             .on_action(cx.listener(Self::navigate_back))
             .on_action(cx.listener(Self::navigate_forward))
+            .on_action(cx.listener(Self::goto_word))
             .on_action(|_: &ToggleTheme, _, cx| theme::toggle(cx));
         let mut root = Self::bind_navigation_mouse(root, cx)
             .relative()
@@ -636,6 +735,17 @@ impl Render for RootView {
             OverlayMode::ShortcutsHelp { hints } => {
                 Some(ShortcutOverlay::new(hints.clone()).into_any_element())
             }
+            OverlayMode::JumpCollecting => {
+                // Spawned mid-draw, so it runs once this frame is done.
+                cx.spawn(async move |this, cx| {
+                    this.update(cx, RootView::show_jump_labels).ok();
+                })
+                .detach();
+                None
+            }
+            OverlayMode::JumpLabels { labels, .. } => {
+                return body.child(Self::render_jump_labels(labels, cx));
+            }
             OverlayMode::None => None,
         };
 
@@ -675,6 +785,7 @@ fn main() {
         outline_view::bind_keys(cx);
         page_picker::bind_keys(cx);
         search::bind_keys(cx);
+        goto_word::bind_keys(cx);
         let cmd = cmd_key();
         cx.bind_keys([
             KeyBinding::new(&format!("{cmd}-s"), SavePage, Some("RootView")),
@@ -774,6 +885,7 @@ fn main() {
 mod tests {
     use super::*;
     use gpui::{point, Modifiers, TestAppContext, VisualTestContext};
+    use gpui_notes::block_view::BlockMode;
     use gpui_notes::registry::set_current_page;
     use tempfile::TempDir;
 
@@ -788,6 +900,7 @@ mod tests {
             outline_view::bind_keys(cx);
             page_picker::bind_keys(cx);
             search::bind_keys(cx);
+            goto_word::bind_keys(cx);
             cx.bind_keys([
                 KeyBinding::new("ctrl-s", SavePage, Some("RootView")),
                 KeyBinding::new("ctrl-p", NextPage, Some("RootView")),
@@ -2178,5 +2291,132 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(theme::current(), theme::Theme::SolarizedDark);
         assert_eq!(theme::window_bg(), dark_bg);
+    }
+
+    /// Replaces the Home page's outline with one block per entry of `texts`.
+    fn set_home_blocks(cx: &mut VisualTestContext, texts: &[&str]) {
+        cx.update(|_, cx| {
+            let page = cx.global::<CurrentPage>().get().cloned().unwrap();
+            page.update(cx, |page, cx| {
+                let mut id = page.outline().first_block_id().unwrap();
+                page.set_block_text(id, texts[0], cx);
+                for text in &texts[1..] {
+                    id = page.insert_block_after(id, *text, cx).unwrap();
+                }
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    /// The current page's block being edited: its text and selected text.
+    fn edited_selection(cx: &mut VisualTestContext) -> Option<(String, String)> {
+        cx.read(|cx| {
+            let page = cx.global::<CurrentPage>().get().cloned()?;
+            let page = page.read(cx);
+            let view = page.view().read(cx);
+            page.outline().roots.iter().find_map(|block| {
+                let BlockMode::Editing { input, .. } = view.block_view(block.id)?.read(cx).mode()
+                else {
+                    return None;
+                };
+                let input = input.read(cx);
+                Some((
+                    input.content().to_string(),
+                    input.content()[input.selected_range()].to_string(),
+                ))
+            })
+        })
+    }
+
+    /// `g w` labels the words on screen in order; typing one selects its word
+    /// in the block's source, skipping the markup the label sat beside.
+    #[gpui::test]
+    fn goto_word_selects_the_labelled_word(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+        set_home_blocks(cx, &["alpha **beta**", "a gamma"]);
+        assert_eq!(focused_text(cx).as_deref(), Some("alpha **beta**"));
+
+        cx.simulate_keystrokes("g w");
+        cx.run_until_parked();
+        let count = cx.read(|cx| root.read(cx).overlay().jump_labels().map(Labels::len));
+        assert_eq!(count, Some(3), "alpha, beta and gamma; `a` is too short");
+
+        // `ac` is gamma, in the second block.
+        cx.simulate_keystrokes("a c");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+        assert_eq!(
+            edited_selection(cx),
+            Some(("a gamma".into(), "gamma".into())),
+            "the label's letters must not reach the block",
+        );
+    }
+
+    /// A key that starts no label puts the labels away, and is eaten: the
+    /// block stays focused and in viewing mode.
+    #[gpui::test]
+    fn goto_word_unknown_label_cancels(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+        set_home_blocks(cx, &["alpha beta"]);
+
+        cx.simulate_keystrokes("g w");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().jump_labels().is_some()));
+
+        cx.simulate_keystrokes("a escape");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+        assert_eq!(edited_selection(cx), None, "nothing entered editing");
+        assert_eq!(focused_text(cx).as_deref(), Some("alpha beta"));
+
+        cx.simulate_keystrokes("g w");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("q");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+        assert_eq!(focused_text(cx).as_deref(), Some("alpha beta"));
+    }
+
+    /// A click puts the labels away without reaching the block under it.
+    #[gpui::test]
+    fn goto_word_click_cancels(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+        set_home_blocks(cx, &["alpha beta"]);
+        let first = cx.read(|cx| {
+            let page = cx.global::<CurrentPage>().get().cloned().unwrap();
+            page.read(cx).outline().roots[0].id
+        });
+
+        cx.simulate_keystrokes("g w");
+        cx.run_until_parked();
+        let block = cx
+            .debug_bounds(format!("block-view-{first:?}").leak())
+            .expect("block painted");
+        cx.simulate_click(block.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+        assert_eq!(edited_selection(cx), None, "the click didn't start an edit");
+    }
+
+    /// Only words fully inside the scroll container get labels.
+    #[gpui::test]
+    fn goto_word_labels_only_visible_words(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+        cx.simulate_resize(gpui::size(px(600.), px(300.)));
+        let texts: Vec<String> = (0..60).map(|i| format!("word{i}")).collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        set_home_blocks(cx, &texts);
+
+        cx.simulate_keystrokes("g w");
+        cx.run_until_parked();
+        let count = cx
+            .read(|cx| root.read(cx).overlay().jump_labels().map(Labels::len))
+            .unwrap();
+        assert!(count > 0 && count < 60, "labelled {count} of 60 blocks");
     }
 }

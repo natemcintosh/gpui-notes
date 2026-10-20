@@ -645,7 +645,7 @@ mod tests {
                     });
                 })
                 .size_full()
-                .child(render_block(&self.text, &extensions, window, cx))
+                .child(render_block(&self.text, &extensions, None, window, cx))
         }
     }
 

@@ -18,6 +18,7 @@ pub mod block_view;
 pub mod calc;
 pub mod config;
 pub mod errors;
+pub mod goto_word;
 pub mod history;
 pub mod journal;
 pub mod journals_view;

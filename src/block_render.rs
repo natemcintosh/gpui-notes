@@ -19,13 +19,14 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    div, px, Action, AnyElement, App, ElementId, FontStyle, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, Point, Rgba, SharedString,
-    StatefulInteractiveElement, StrikethroughStyle, Styled, StyledText, TextLayout, TextRun,
-    TextStyle, UnderlineStyle, Window,
+    canvas, div, prelude::FluentBuilder, px, Action, AnyElement, App, ElementId, FontStyle,
+    FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Rgba,
+    SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledText, TextLayout,
+    TextRun, TextStyle, UnderlineStyle, Window,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
+use crate::goto_word::{self, JumpSource};
 use crate::{calc, syntax};
 
 /// Compatibility re-export for existing block-render callers. New code should
@@ -380,9 +381,11 @@ fn apply_extensions(
     out
 }
 
+/// With `jump`, each paragraph also records its words for `goto_word`.
 pub fn render_block(
     text: &str,
     extensions: &[&dyn InlineExtension],
+    jump: Option<JumpSource>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -390,6 +393,7 @@ pub fn render_block(
     let mut ctx = RenderCtx {
         paragraph_counter: 0,
         extensions,
+        jump,
     };
     let mut root = div().flex().flex_col().gap_1().text_color(theme::fg());
     for block in blocks {
@@ -409,6 +413,7 @@ struct RenderCtx<'a> {
     /// element id for its click handling.
     paragraph_counter: usize,
     extensions: &'a [&'a dyn InlineExtension],
+    jump: Option<JumpSource>,
 }
 
 fn render_block_node(
@@ -729,6 +734,7 @@ fn render_paragraph(
     #[cfg(test)]
     record_runs(&paragraph.runs);
 
+    let words = ctx.jump.as_mut().map(|jump| jump.locate(&paragraph.text));
     let text = StyledText::new(SharedString::from(paragraph.text)).with_runs(paragraph.runs);
     let layout = text.layout().clone();
     let targets: Rc<[(Range<usize>, ClickTarget)]> = paragraph.targets.into();
@@ -741,6 +747,17 @@ fn render_paragraph(
         ))
         .w_full()
         .child(text)
+        // After the text, so its prepaint sees the text laid out.
+        .when_some(words, |el, words| {
+            let layout = layout.clone();
+            el.child(
+                canvas(
+                    move |_, window, cx| goto_word::record(&layout, &words, window, cx),
+                    |_, (), _, _| {},
+                )
+                .absolute(),
+            )
+        })
         // Links used to be their own elements, which stopped the press from
         // reaching `BlockView`. Now the hit test has to do it: without this
         // the block enters edit mode on mouse-down and this element is gone
@@ -1033,9 +1050,9 @@ mod runtime_tests {
             // the inner flex layout sizes its content.
             let body: AnyElement = if let Some(ext) = self.ext.as_deref() {
                 let exts: [&dyn InlineExtension; 1] = [ext];
-                render_block(&self.text, &exts, window, cx)
+                render_block(&self.text, &exts, None, window, cx)
             } else {
-                render_block(&self.text, &[], window, cx)
+                render_block(&self.text, &[], None, window, cx)
             };
             div()
                 .track_focus(&self.focus_handle)

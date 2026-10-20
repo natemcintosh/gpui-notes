@@ -19,6 +19,7 @@ use gpui::{
 };
 
 use crate::block_render::{render_block, theme};
+use crate::goto_word::{self, JumpSource};
 use crate::outline::{self, BlockId, Outline};
 use crate::page::Page;
 use crate::page_completion::{self, CompletionState};
@@ -174,6 +175,19 @@ impl BlockView {
         cx: &mut Context<Self>,
     ) {
         self.begin_editing_with_placement(Some(placement), window, cx);
+    }
+
+    /// Starts editing with `range` of the block's text selected.
+    pub(crate) fn begin_editing_selecting(
+        &mut self,
+        range: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_editing(window, cx);
+        if let BlockMode::Editing { input, .. } = &self.mode {
+            input.update(cx, |input, cx| input.select_range(range, cx));
+        }
     }
 
     fn begin_editing_with_placement(
@@ -625,7 +639,9 @@ impl Render for BlockView {
             } else {
                 let page_link_ext = PageLinkExt;
                 let extensions: [&dyn crate::block_render::InlineExtension; 1] = [&page_link_ext];
-                render_block(&text, &extensions, window, cx)
+                let jump = goto_word::is_collecting(cx)
+                    .then(|| JumpSource::new(cx.entity().downgrade(), &text));
+                render_block(&text, &extensions, jump, window, cx)
             }
         };
 
