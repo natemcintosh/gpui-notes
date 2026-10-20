@@ -218,6 +218,11 @@ impl BlockView {
         let input_focus = input.focus_handle(cx);
         let on_blur = cx.on_blur(&input_focus, window, |this, window, cx| {
             this.end_editing(window, cx);
+            // Switching apps blurs too, but leaves focus on the input just
+            // dropped, so park it on the block as Escape does.
+            if !window.is_window_active() {
+                window.focus(&this.focus_handle, cx);
+            }
         });
         let on_event = cx.subscribe_in(&input, window, |this, input, event, window, cx| {
             match event {
@@ -1375,6 +1380,34 @@ mod tests {
             assert!(
                 bv.read(cx).is_editing(),
                 "enter re-enters editing from focused-Viewing",
+            );
+        });
+    }
+
+    /// Switching to another app blurs the input and ends the edit, which
+    /// drops the focused input. Focus must land on the block, as Escape
+    /// does, or nothing is focused on return and no key binding fires.
+    #[gpui::test]
+    fn switching_apps_mid_edit_returns_to_focused_viewing(cx: &mut TestAppContext) {
+        let (_page, bv, cx) = mount(cx, "- hi\n");
+
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(
+            cx.read(|cx| bv.read(cx).is_editing()),
+            "precondition: editing",
+        );
+
+        cx.deactivate_window();
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            assert!(!bv.read(cx).is_editing(), "leaving the app ends the edit");
+            assert!(
+                bv.read(cx).focus_handle.is_focused(window),
+                "focus must survive the app switch on the block wrapper",
             );
         });
     }
