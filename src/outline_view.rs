@@ -395,6 +395,13 @@ impl OutlineView {
             .find_map(|(id, bv)| bv.read(cx).holds_focus(window, cx).then_some(*id))
     }
 
+    /// Whether focus is anywhere in this view: a block, its editor, or the
+    /// outline itself (holding a block selection).
+    #[must_use]
+    pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.is_focused(window) || self.active_block_id(window, cx).is_some()
+    }
+
     /// Move focus `delta` steps through the visible (collapse-respecting)
     /// flattened order. Clamps at both ends.
     fn move_focus(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {

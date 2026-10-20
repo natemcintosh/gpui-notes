@@ -57,6 +57,10 @@ pub struct LinkedRefsView {
     /// that can change that source's block list.
     source_subs: HashMap<NoteSource, Subscription>,
     needs_rebuild: bool,
+    /// A focused reference that no longer links here but is kept listed so
+    /// its editor survives a link being retyped (#68). Re-evaluated once
+    /// focus leaves it.
+    pinned: Option<(NoteSource, BlockId)>,
     /// How many references are shown; grows by `REFS_PER_PAGE` per click.
     shown: usize,
     #[cfg(test)]
@@ -82,6 +86,7 @@ impl LinkedRefsView {
             blocks: HashMap::new(),
             source_subs: HashMap::new(),
             needs_rebuild: true,
+            pinned: None,
             shown: REFS_PER_PAGE,
             #[cfg(test)]
             rebuilds: 0,
@@ -105,8 +110,9 @@ impl LinkedRefsView {
     }
 
     /// Recomputes `groups` from the index, reusing every per-source block
-    /// list that has not been invalidated.
-    fn rebuild_groups(&mut self, cx: &mut Context<Self>) {
+    /// list that has not been invalidated. `focused` is the reference holding
+    /// focus, which stays listed even if it has stopped linking here.
+    fn rebuild_groups(&mut self, focused: Option<&(NoteSource, BlockId)>, cx: &mut Context<Self>) {
         #[cfg(test)]
         {
             self.rebuilds += 1;
@@ -120,7 +126,8 @@ impl LinkedRefsView {
         self.groups = Vec::new();
         for source in sources {
             if !self.blocks.contains_key(&source) {
-                let blocks = self.referencing_blocks(&source, cx);
+                let keep = focused.filter(|(s, _)| *s == source).map(|(_, id)| *id);
+                let blocks = self.referencing_blocks(&source, keep, cx);
                 self.blocks.insert(source.clone(), blocks);
             }
             let blocks = self.blocks[&source].clone();
@@ -182,12 +189,34 @@ impl LinkedRefsView {
     /// Opens `source` through the registry and returns the ids of its blocks
     /// that link to this page, starting to observe the source page so an edit
     /// there — including one made in a reference row — refreshes the list.
-    fn referencing_blocks(&mut self, source: &NoteSource, cx: &mut Context<Self>) -> Vec<BlockId> {
+    ///
+    /// `keep` is a block to list even if it no longer links here (it is being
+    /// edited); keeping it records it in `pinned`.
+    fn referencing_blocks(
+        &mut self,
+        source: &NoteSource,
+        keep: Option<BlockId>,
+        cx: &mut Context<Self>,
+    ) -> Vec<BlockId> {
         let target = self.page.read(cx).name().clone();
         match Self::open_source(source, cx) {
             Ok(page) => {
                 self.watch_source(source, &page, cx);
-                page_links::blocks_linking_to(page.read(cx).outline(), &target)
+                let outline = page.read(cx).outline();
+                let mut blocks = page_links::blocks_linking_to(outline, &target);
+                if keep.is_some() {
+                    self.pinned = None;
+                }
+                // Paths compare in preorder, so this keeps display order.
+                if let Some((id, path)) = keep
+                    .filter(|id| !blocks.contains(id))
+                    .and_then(|id| Some((id, outline.path_to(id)?)))
+                {
+                    let at = blocks.partition_point(|b| outline.path_to(*b).as_ref() < Some(&path));
+                    blocks.insert(at, id);
+                    self.pinned = Some((source.clone(), id));
+                }
+                blocks
             }
             Err(err) => {
                 errors::report(format!("open {}: {err}", source_label(source)), cx);
@@ -276,13 +305,25 @@ impl LinkedRefsView {
 }
 
 impl Render for LinkedRefsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !cx.has_global::<LinkIndex>() || !cx.has_global::<PageRegistry>() {
             return div();
         }
 
+        let focused = self
+            .refs
+            .iter()
+            .find(|(_, view)| view.read(cx).holds_focus(window, cx))
+            .map(|(key, _)| key.clone());
+        if let Some(pinned) = self
+            .pinned
+            .take_if(|pinned| focused.as_ref() != Some(pinned))
+        {
+            self.blocks.remove(&pinned.0);
+            self.needs_rebuild = true;
+        }
         if self.needs_rebuild {
-            self.rebuild_groups(cx);
+            self.rebuild_groups(focused.as_ref(), cx);
         }
         let groups = self.visible_groups();
 
@@ -507,6 +548,60 @@ mod tests {
                 page.body().contains('!'),
                 "edit must land in the source page: {:?}",
                 page.body(),
+            );
+        });
+    }
+
+    /// Retyping a link passes through states that don't link here (#68). The
+    /// reference being edited must stay mounted through them, and drop out
+    /// only once focus leaves it.
+    #[gpui::test]
+    fn breaking_the_link_mid_edit_keeps_the_reference_mounted(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ov, cx) = mount(cx, &tmp);
+        let refs = refs_view(&ov, cx);
+        let journal = NoteSource::Journal(date(NEWER));
+
+        let bounds = cx
+            .debug_bounds("linked-ref-block-2026-07-23-0")
+            .expect("reference subtree painted");
+        cx.simulate_click(bounds.origin + point(px(30.), px(8.)), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("end backspace");
+        cx.run_until_parked();
+        cx.simulate_input("X");
+        cx.run_until_parked();
+
+        let page = cx.update(|_, cx| {
+            cx.update_global::<PageRegistry, _>(|reg, cx| {
+                reg.open_or_create_journal(date(NEWER), cx).unwrap()
+            })
+        });
+        assert!(
+            cx.read(|cx| page.read(cx).body().contains("issue [[Target]X")),
+            "the keystroke after breaking the link still lands: {:?}",
+            cx.read(|cx| page.read(cx).body().to_string()),
+        );
+        cx.read(|cx| {
+            let view = refs.read(cx);
+            assert!(
+                view.groups().iter().any(|(source, _)| *source == journal),
+                "the edited reference stays listed while focused",
+            );
+            assert!(view.refs.keys().any(|(source, _)| *source == journal));
+        });
+
+        // Leaving the reference re-evaluates it: it no longer links here.
+        let other = cx
+            .debug_bounds("linked-ref-block-2026-07-21-0")
+            .expect("another reference painted");
+        cx.simulate_click(other.origin + point(px(30.), px(8.)), Modifiers::none());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let view = refs.read(cx);
+            assert!(
+                view.groups().iter().all(|(source, _)| *source != journal),
+                "the broken reference drops out once focus leaves it",
             );
         });
     }
