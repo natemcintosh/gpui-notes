@@ -220,6 +220,21 @@ impl Page {
         self.apply_outline_edit(id, cx, |o| o.paste_blocks(id, pasted))
     }
 
+    /// See `Outline::merge`. Undo refocuses `id`.
+    pub fn merge_block(
+        &mut self,
+        id: BlockId,
+        into: BlockId,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let mut join = None;
+        self.apply_outline_edit(id, cx, |o| {
+            join = o.merge(id, into);
+            join.is_some()
+        });
+        join
+    }
+
     /// Deletes the block (and its subtree) from the outline.
     pub fn delete_block(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
         self.apply_outline_edit(id, cx, |o| o.delete(id).is_some())

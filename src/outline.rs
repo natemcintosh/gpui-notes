@@ -458,6 +458,25 @@ impl Outline {
         Some(self.take(&path))
     }
 
+    /// Appends `id`'s text to `into`'s and removes `id`, handing its children
+    /// to `into` after any it already has. Returns the byte offset where the
+    /// two texts join, or `None` (changing nothing) when `into` is `id` or
+    /// one of its descendants.
+    pub fn merge(&mut self, id: BlockId, into: BlockId) -> Option<usize> {
+        let path = self.path_to(id)?;
+        if self.path_to(into)?.starts_with(&path) {
+            return None;
+        }
+        let block = self.take(&path);
+        let target_path = self.path_to(into)?;
+        let (&last, parent_path) = target_path.split_last()?;
+        let target = &mut children_mut(&mut self.roots, parent_path)[last];
+        let join = target.text.len();
+        target.text.push_str(&block.text);
+        target.children.extend(block.children);
+        Some(join)
+    }
+
     #[must_use]
     pub fn get(&self, id: BlockId) -> Option<&str> {
         fn find(blocks: &[Block], id: BlockId) -> Option<&str> {
@@ -1043,6 +1062,35 @@ mod tests {
         let mut o = Outline::parse("- a\n");
         assert!(!o.set_text(BlockId::fresh(), "x"));
         assert_eq!(o.serialize(), "- a\n");
+    }
+
+    /// `(body, block to merge, block to merge into, result, join offset)`,
+    /// with blocks named by their preorder index.
+    #[rstest]
+    #[case::sibling("- a\n- b\n", 1, 0, "- ab\n", 1)]
+    #[case::children_follow("- a\n  - a1\n- b\n  - b1\n", 2, 0, "- ab\n  - a1\n  - b1\n", 1)]
+    #[case::into_deeper("- a\n  - a1\n- b\n", 2, 1, "- a\n  - a1b\n", 2)]
+    #[case::into_parent("- a\n  - a1\n  - a2\n", 1, 0, "- aa1\n  - a2\n", 1)]
+    fn merge_cases(
+        #[case] body: &str,
+        #[case] id: usize,
+        #[case] into: usize,
+        #[case] expected: &str,
+        #[case] join: usize,
+    ) {
+        let mut o = Outline::parse(body);
+        let all = ids(&o);
+        assert_eq!(o.merge(all[id], all[into]), Some(join));
+        assert_eq!(o.serialize(), expected);
+    }
+
+    #[test]
+    fn merge_into_own_descendant_changes_nothing() {
+        let mut o = Outline::parse("- a\n  - a1\n");
+        let all = ids(&o);
+        assert_eq!(o.merge(all[0], all[1]), None);
+        assert_eq!(o.merge(all[0], all[0]), None);
+        assert_eq!(o.serialize(), "- a\n  - a1\n");
     }
 
     #[test]

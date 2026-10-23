@@ -338,6 +338,9 @@ impl OutlineView {
                 BlockViewEvent::AdjacentEditRequested(request) => {
                     this.move_edit_to_adjacent(id, *request, window, cx);
                 }
+                BlockViewEvent::MergeIntoPrevious => {
+                    this.merge_into_previous(id, window, cx);
+                }
             },
         );
         self.blocks.insert(id, bv.clone());
@@ -378,6 +381,37 @@ impl OutlineView {
         let target_bv = self.get_or_create(target, window, cx);
         target_bv.update(cx, |block, cx| {
             block.begin_editing_at(placement, window, cx);
+        });
+    }
+
+    /// Merges `source` into the previous visible block and edits that block
+    /// with the caret at the join. The first block in scope stays put.
+    fn merge_into_previous(
+        &mut self,
+        source: BlockId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let Some(idx) = flat.iter().position(|&(_, id)| id == source) else {
+            return;
+        };
+        let Some(target) = idx.checked_sub(1).map(|i| flat[i].1) else {
+            return;
+        };
+        // Flush the editor first so the merge takes its final text.
+        if let Some(source_bv) = self.blocks.get(&source) {
+            source_bv.update(cx, BlockView::end_editing_inner);
+        }
+        let Some(join) = self
+            .page
+            .update(cx, |page, cx| page.merge_block(source, target, cx))
+        else {
+            return;
+        };
+        let target_bv = self.get_or_create(target, window, cx);
+        target_bv.update(cx, |block, cx| {
+            block.begin_editing_selecting(join..join, window, cx);
         });
     }
 
@@ -2781,6 +2815,62 @@ mod tests {
 
     /// Mid-edit, Tab/Shift-Tab indent and outdent only with the caret at the
     /// very start, and editing carries on in the moved block.
+    /// Backspace at the start of a block merges it into the previous visible
+    /// block and keeps editing there, caret at the join; undo splits them.
+    #[gpui::test]
+    fn backspace_at_start_merges_into_previous(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n  - a1\n- b\n  - b1\n");
+        let (a1, b) = cx.read(|cx| {
+            let roots = &page.read(cx).outline().roots;
+            (roots[0].children[0].id, roots[1].id)
+        });
+
+        focus_block(cx, &ov, b);
+        cx.simulate_keystrokes("enter home backspace");
+        cx.simulate_input("x");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert_eq!(
+                page.read(cx).outline().serialize(),
+                "- a\n  - a1xb\n    - b1\n"
+            );
+        });
+        let bv = cx.read(|cx| ov.read(cx).block_view(a1).expect("a1 mounted").clone());
+        cx.read(|cx| assert!(bv.read(cx).is_editing(), "editing the merged block"));
+
+        cx.simulate_keystrokes(&format!("{}-z {}-z", crate::cmd_key(), crate::cmd_key()));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                page.read(cx).outline().serialize(),
+                "- a\n  - a1\n- b\n  - b1\n"
+            );
+        });
+    }
+
+    /// Away from the start, Backspace deletes a character; at the start of
+    /// the first block it does nothing.
+    #[gpui::test]
+    fn backspace_merges_only_from_the_start(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- bc\n");
+        let (a, b) = cx.read(|cx| {
+            let roots = &page.read(cx).outline().roots;
+            (roots[0].id, roots[1].id)
+        });
+
+        focus_block(cx, &ov, b);
+        cx.simulate_keystrokes("enter backspace");
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- a\n- b\n"));
+
+        cx.simulate_keystrokes("escape");
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter home backspace");
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- a\n- b\n"));
+    }
+
     #[gpui::test]
     fn tab_at_start_of_edit_indents_and_outdents(cx: &mut TestAppContext) {
         let (page, ov, cx) = mount(cx, "- a\n- b\n");

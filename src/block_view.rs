@@ -25,7 +25,7 @@ use crate::page::Page;
 use crate::page_completion::{self, CompletionState};
 use crate::page_links::{LinkIndex, PageLinkExt};
 use crate::text_input::{
-    Paste, PendingVerticalPlacement, TextInput, TextInputEvent, VerticalDirection,
+    Backspace, Paste, PendingVerticalPlacement, TextInput, TextInputEvent, VerticalDirection,
     VerticalMovementOutcome,
 };
 
@@ -57,6 +57,9 @@ pub(crate) enum BlockViewEvent {
     /// Vertical caret movement passed the first or last visual row. The
     /// outline resolves the adjacent visible block and preserves screen x.
     AdjacentEditRequested(AdjacentEditRequest),
+    /// Backspace with the caret at the very start. The outline merges this
+    /// block into the previous visible one and edits that at the join.
+    MergeIntoPrevious,
 }
 
 impl EventEmitter<BlockViewEvent> for BlockView {}
@@ -697,6 +700,14 @@ impl Render for BlockView {
             // plain-text paste runs.
             .capture_action(cx.listener(|this, _: &Paste, window, cx| {
                 this.paste_blocks(window, cx);
+            }))
+            // Capture, so Backspace at the start is decided before the input
+            // treats it as a no-op.
+            .capture_action(cx.listener(|this, _: &Backspace, _, cx| {
+                if this.caret_at_start(cx) {
+                    cx.stop_propagation();
+                    cx.emit(BlockViewEvent::MergeIntoPrevious);
+                }
             }))
             .on_action(cx.listener(|this, _: &MoveCaretUp, _, cx| {
                 this.move_caret_vertical(VerticalDirection::Up, cx);
