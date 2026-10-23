@@ -116,6 +116,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(&format!("{cmd}-c"), CopyBlocks, Some(SELECTION_CONTEXT)),
         KeyBinding::new(&format!("{cmd}-c"), CopyBlocks, Some(BLOCK_CONTEXT)),
         KeyBinding::new(&format!("{cmd}-x"), CutBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(&format!("{cmd}-x"), CutBlocks, Some(BLOCK_CONTEXT)),
         KeyBinding::new(&format!("{cmd}-v"), PasteBlocks, Some(SELECTION_CONTEXT)),
         KeyBinding::new(&format!("{cmd}-v"), PasteBlocks, Some(BLOCK_CONTEXT)),
         KeyBinding::new("backspace", DeleteBlocks, Some(SELECTION_CONTEXT)),
@@ -930,8 +931,13 @@ impl OutlineView {
             }
         }))
         .on_action(cx.listener(|this, _: &CutBlocks, window, cx| {
-            if !(this.copy_selection(cx) && this.delete_selection(window, cx)) {
-                cx.propagate();
+            if this.copy_selection(cx) {
+                this.delete_selection(window, cx);
+                return;
+            }
+            match this.focused_block_id(window, cx) {
+                Some(id) => this.cut_block(id, window, cx),
+                None => cx.propagate(),
             }
         }))
         .on_action(cx.listener(|this, _: &PasteBlocks, window, cx| {
@@ -3325,6 +3331,29 @@ mod tests {
         cx.simulate_keystrokes(&format!("{cmd}-z"));
         cx.run_until_parked();
         assert_eq!(serialized(cx, &page), body, "one undo removes the paste");
+    }
+
+    #[gpui::test]
+    fn cut_takes_the_focused_block_and_its_children(cx: &mut TestAppContext) {
+        let body = "- a\n  - a1\n- b\n";
+        let (page, ov, cx) = mount(cx, body);
+        let (a, b) = cx.read(|cx| {
+            let outline = page.read(cx).outline();
+            (outline.roots[0].id, outline.roots[1].id)
+        });
+        let cmd = crate::cmd_key();
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes(&format!("{cmd}-x"));
+        cx.run_until_parked();
+
+        assert_eq!(clipboard(cx).as_deref(), Some("- a\n  - a1\n"));
+        assert_eq!(serialized(cx, &page), "- b\n");
+        assert_eq!(focused_id(cx, &ov), Some(b), "the next block takes focus");
+
+        cx.simulate_keystrokes(&format!("{cmd}-z"));
+        cx.run_until_parked();
+        assert_eq!(serialized(cx, &page), body, "undo restores it");
     }
 
     #[gpui::test]
