@@ -778,8 +778,26 @@ fn display_root(root: &std::path::Path, home: Option<&std::path::Path>) -> Strin
     }
 }
 
+/// Sets the Dock icon. macOS reads an app's icon from its `.app` bundle, but
+/// `cargo install` and `cargo binstall` install a bare binary.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let mtm = MainThreadMarker::new().expect("gpui runs the app on the main thread");
+    let data = NSData::with_bytes(include_bytes!("../assets/gpui-notes.png"));
+    if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+        // SAFETY: the image is non-nil, so it's a valid application icon.
+        unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+    }
+}
+
 fn main() {
     application().run(|cx: &mut App| {
+        #[cfg(target_os = "macos")]
+        set_dock_icon();
         text_input::bind_keys(cx);
         block_view::bind_keys(cx);
         outline_view::bind_keys(cx);
