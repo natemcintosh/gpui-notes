@@ -369,6 +369,28 @@ impl Outline {
         true
     }
 
+    /// Indents each of `ids` in order, or none of them if any can't be, so a
+    /// selection keeps its shape.
+    pub fn indent_all(&mut self, ids: &[BlockId]) -> bool {
+        let mut next = self.clone();
+        if ids.is_empty() || !ids.iter().all(|&id| next.indent(id)) {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
+    /// Outdents each of `ids`, or none of them if any can't be. Last first:
+    /// each lands right after its old parent, so in order they'd reverse.
+    pub fn outdent_all(&mut self, ids: &[BlockId]) -> bool {
+        let mut next = self.clone();
+        if ids.is_empty() || !ids.iter().rev().all(|&id| next.outdent(id)) {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
     pub fn move_up(&mut self, id: BlockId) -> bool {
         let Some(path) = self.path_to(id) else {
             return false;
@@ -897,6 +919,38 @@ mod tests {
         let a = by_text(&o, "a");
         assert!(!o.outdent(a));
         assert_eq!(o.serialize(), "- a\n");
+    }
+
+    #[test]
+    fn indent_all_nests_siblings_in_order() {
+        let mut o = Outline::parse("- a\n- b\n- c\n");
+        let ids = [by_text(&o, "b"), by_text(&o, "c")];
+        assert!(o.indent_all(&ids));
+        assert_eq!(o.serialize(), "- a\n  - b\n  - c\n");
+    }
+
+    #[test]
+    fn indent_all_is_noop_if_any_cannot_move() {
+        let mut o = Outline::parse("- a\n- b\n");
+        let ids = [by_text(&o, "a"), by_text(&o, "b")];
+        assert!(!o.indent_all(&ids));
+        assert_eq!(o.serialize(), "- a\n- b\n");
+    }
+
+    #[test]
+    fn outdent_all_keeps_order() {
+        let mut o = Outline::parse("- a\n  - b\n  - c\n- d\n");
+        let ids = [by_text(&o, "b"), by_text(&o, "c")];
+        assert!(o.outdent_all(&ids));
+        assert_eq!(o.serialize(), "- a\n- b\n- c\n- d\n");
+    }
+
+    #[test]
+    fn outdent_all_is_noop_if_any_cannot_move() {
+        let mut o = Outline::parse("- a\n  - b\n- c\n");
+        let ids = [by_text(&o, "b"), by_text(&o, "c")];
+        assert!(!o.outdent_all(&ids));
+        assert_eq!(o.serialize(), "- a\n  - b\n- c\n");
     }
 
     #[test]

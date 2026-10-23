@@ -41,7 +41,9 @@ actions!(
         ExtendSelectionDown,
         CopyBlocks,
         CutBlocks,
-        DeleteBlocks
+        DeleteBlocks,
+        IndentBlocks,
+        OutdentBlocks
     ]
 );
 
@@ -101,6 +103,8 @@ pub fn bind_keys(cx: &mut App) {
         // editing resumes on the block the step touched.
         KeyBinding::new(&format!("{cmd}-z"), Undo, Some("BlockView")),
         KeyBinding::new(&format!("{cmd}-shift-z"), Redo, Some("BlockView")),
+        KeyBinding::new(&format!("{cmd}-z"), Undo, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(&format!("{cmd}-shift-z"), Redo, Some(SELECTION_CONTEXT)),
         // Mid-edit, Tab indents only from the very start of the block (the
         // handler checks the caret); elsewhere it does nothing.
         KeyBinding::new("tab", IndentBlock, Some(EDITING_CONTEXT)),
@@ -112,6 +116,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(&format!("{cmd}-x"), CutBlocks, Some(SELECTION_CONTEXT)),
         KeyBinding::new("backspace", DeleteBlocks, Some(SELECTION_CONTEXT)),
         KeyBinding::new("delete", DeleteBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new("tab", IndentBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new("shift-tab", OutdentBlocks, Some(SELECTION_CONTEXT)),
     ]);
 }
 
@@ -809,6 +815,21 @@ impl OutlineView {
         true
     }
 
+    /// Indents or outdents the selected blocks as one undo step, keeping the
+    /// selection. Returns whether there was a selection.
+    fn reindent_selection(
+        &mut self,
+        cx: &mut Context<Self>,
+        op: fn(&mut Page, &[BlockId], &mut Context<Page>) -> bool,
+    ) -> bool {
+        let roots = self.selection_roots(cx);
+        if roots.is_empty() {
+            return false;
+        }
+        self.page.update(cx, |page, cx| op(page, &roots, cx));
+        true
+    }
+
     /// The outline-wide half of the block selection: its keys, and the
     /// presses no row records (see `with_selection_handlers`), which clear it.
     fn with_block_selection_listeners(
@@ -841,6 +862,16 @@ impl OutlineView {
                 cx.propagate();
             }
         }))
+        .on_action(cx.listener(|this, _: &IndentBlocks, _, cx| {
+            if !this.reindent_selection(cx, Page::indent_blocks) {
+                cx.propagate();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &OutdentBlocks, _, cx| {
+            if !this.reindent_selection(cx, Page::outdent_blocks) {
+                cx.propagate();
+            }
+        }))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _, _, cx| {
@@ -870,7 +901,8 @@ impl OutlineView {
     /// Steps the page's undo history (`Page::undo` or `Page::redo`) and
     /// focuses the block the step touched. A block being edited stops editing
     /// first, so its text is flushed and the step can replace it, then
-    /// editing resumes on the focused block.
+    /// editing resumes on the focused block. A block selection is dropped,
+    /// since focus leaves the outline for a block.
     fn step_history(
         &mut self,
         step: fn(&mut Page, &mut Context<Page>) -> Option<BlockId>,
@@ -884,6 +916,7 @@ impl OutlineView {
         if let Some(id) = editing {
             self.blocks[&id].update(cx, BlockView::end_editing_inner);
         }
+        self.clear_block_selection(cx);
         let stepped = self.page.update(cx, step);
         let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
         let position = |target: Option<BlockId>| {
@@ -3121,6 +3154,43 @@ mod tests {
             focused_id(cx, &ov),
             Some(ids[0]),
             "focus moves to the block above"
+        );
+    }
+
+    #[gpui::test]
+    fn tab_indents_and_outdents_the_selected_blocks(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n  - b1\n- c\n");
+        let ids = root_ids(cx, &page);
+        let cmd = crate::cmd_key();
+
+        focus_block(cx, &ov, ids[1]);
+        cx.simulate_keystrokes("shift-down tab");
+        cx.run_until_parked();
+        assert_eq!(
+            serialized(cx, &page),
+            "- a\n  - b\n    - b1\n  - c\n",
+            "b and c move under a, b1 along with b"
+        );
+        assert_eq!(selected(cx, &ov).len(), 3, "the selection stays");
+
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+        assert_eq!(serialized(cx, &page), "- a\n- b\n  - b1\n- c\n");
+
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+        assert_eq!(
+            serialized(cx, &page),
+            "- a\n- b\n  - b1\n- c\n",
+            "roots can't outdent"
+        );
+
+        cx.simulate_keystrokes(&format!("tab {cmd}-z"));
+        cx.run_until_parked();
+        assert_eq!(
+            serialized(cx, &page),
+            "- a\n- b\n  - b1\n- c\n",
+            "one undo reverses the whole indent"
         );
     }
 

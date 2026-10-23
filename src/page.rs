@@ -181,6 +181,22 @@ impl Page {
         self.apply_outline_edit(id, cx, |o| o.outdent(id))
     }
 
+    /// Indents each of `ids` as one undo step; see `Outline::indent_all`.
+    pub fn indent_blocks(&mut self, ids: &[BlockId], cx: &mut Context<Self>) -> bool {
+        let Some(&first) = ids.first() else {
+            return false;
+        };
+        self.apply_outline_edit(first, cx, |o| o.indent_all(ids))
+    }
+
+    /// Outdents each of `ids` as one undo step; see `Outline::outdent_all`.
+    pub fn outdent_blocks(&mut self, ids: &[BlockId], cx: &mut Context<Self>) -> bool {
+        let Some(&first) = ids.first() else {
+            return false;
+        };
+        self.apply_outline_edit(first, cx, |o| o.outdent_all(ids))
+    }
+
     pub fn move_block_up(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
         self.apply_outline_edit(id, cx, |o| o.move_up(id))
     }
