@@ -332,8 +332,9 @@ impl OutlineView {
                     let target_bv = this.get_or_create(target, window, cx);
                     // Focus no longer implies editing (#42), so the new sibling
                     // must be put into editing explicitly — the user pressed
-                    // Enter to keep typing. `begin_editing` focuses the input.
-                    target_bv.update(cx, |bv, cx| bv.begin_editing(window, cx));
+                    // Enter to keep typing, in front of any text the split
+                    // carried over. `begin_editing` focuses the input.
+                    target_bv.update(cx, |bv, cx| bv.begin_editing_selecting(0..0, window, cx));
                 }
                 BlockViewEvent::AdjacentEditRequested(request) => {
                     this.move_edit_to_adjacent(id, *request, window, cx);
@@ -2815,6 +2816,35 @@ mod tests {
 
     /// Mid-edit, Tab/Shift-Tab indent and outdent only with the caret at the
     /// very start, and editing carries on in the moved block.
+    /// Enter mid-text moves everything after the caret into a new sibling
+    /// below the block's children, editing it from the start; one undo
+    /// rejoins them.
+    #[gpui::test]
+    fn enter_mid_text_splits_the_block(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- abcd\n  - child\n- e\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        let serialized =
+            |cx: &mut VisualTestContext| cx.read(|cx| page.read(cx).outline().serialize());
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter home right right enter");
+        cx.simulate_input("x");
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- ab\n  - child\n- xcd\n- e\n");
+
+        let undo = format!("{}-z", crate::cmd_key());
+        cx.simulate_keystrokes(&format!("{undo} {undo}"));
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- abcd\n  - child\n- e\n");
+
+        // A selection is dropped, as typing over it would.
+        cx.simulate_keystrokes("escape");
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter home right shift-right enter");
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- a\n  - child\n- cd\n- e\n");
+    }
+
     /// Backspace at the start of a block merges it into the previous visible
     /// block and keeps editing there, caret at the join; undo splits them.
     #[gpui::test]

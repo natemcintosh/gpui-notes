@@ -259,7 +259,7 @@ impl BlockView {
                     } else if outline::has_open_fence(&content[..selection.start]) {
                         input.update(cx, |input, cx| input.insert_newline(window, cx));
                     } else {
-                        this.insert_sibling(cx, |p, id, cx| p.insert_block_after(id, "", cx));
+                        this.split_at(selection, cx);
                     }
                 }
                 // shift-enter always breaks the line.
@@ -478,11 +478,32 @@ impl BlockView {
         }
     }
 
+    /// Ends the edit and splits the block at `at`: the text before stays, the
+    /// text after moves into a new sibling below (after any children), and
+    /// the parent view is asked to edit that sibling. Selected text is
+    /// dropped, as typing over it would.
+    fn split_at(&mut self, at: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        let Some(input) = self.take_input_on_exit() else {
+            return;
+        };
+        let content = input.read(cx).content();
+        let head = content[..at.start].trim_end().to_string();
+        let tail = content[at.end..].trim().to_string();
+        let block_id = self.block_id;
+        let new_id = self.page.update(cx, |p, cx| {
+            let new_id = p.split_block(block_id, head, tail, cx);
+            p.split_bullet_lines(block_id, cx);
+            new_id
+        });
+        cx.notify();
+        if let Some(new_id) = new_id {
+            cx.emit(BlockViewEvent::FocusRequested(new_id));
+        }
+    }
+
     /// Flush the in-progress edit, insert an empty sibling next to this block
-    /// with `insert` (`Page::insert_block_after` or `insert_block_before`),
-    /// and ask the parent view to focus the new block. The new block's text
-    /// starts empty regardless of where the caret was — splitting at the
-    /// caret is a follow-up (see issue #31).
+    /// with `insert` (e.g. `Page::insert_block_before`), and ask the parent
+    /// view to focus the new block.
     fn insert_sibling(
         &mut self,
         cx: &mut Context<Self>,

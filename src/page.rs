@@ -140,6 +140,23 @@ impl Page {
         new_id
     }
 
+    /// Sets `id`'s text to `head` and inserts `tail` as a new sibling right
+    /// after it, as one undo step. Returns the new block's id.
+    pub fn split_block(
+        &mut self,
+        id: BlockId,
+        head: String,
+        tail: String,
+        cx: &mut Context<Self>,
+    ) -> Option<BlockId> {
+        let mut new_id = None;
+        self.apply_outline_edit(id, cx, |o| {
+            new_id = o.insert_after(id, tail);
+            new_id.is_some() && o.set_text(id, head)
+        });
+        new_id
+    }
+
     /// Applies a structural outline edit. If `op` reports a change, the
     /// outline as it was is pushed for undo (focusing `focus` when it comes
     /// back), the body is reserialized, the page marked dirty, and observers
