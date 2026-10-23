@@ -45,11 +45,15 @@ pub fn content_gutter(window: &Window) -> Pixels {
 /// fails to resolve, gpui's fallback stack drops the requested weight/style,
 /// so bold/italic silently render as regular text. Picking a family that is
 /// actually installed lets the platform text system match its bold/italic
-/// faces.
+/// faces. Windows takes Segoe UI outright: the Linux candidates are often
+/// installed there too, sometimes without bold or italic faces, and
+/// DirectWrite then quietly matches the regular one.
 #[must_use]
 pub fn ui_font_family(cx: &App) -> SharedString {
     if cfg!(target_os = "macos") {
         ".SystemUIFont".into()
+    } else if cfg!(target_os = "windows") {
+        "Segoe UI".into()
     } else {
         pick_ui_font(&cx.text_system().all_font_names())
     }
@@ -58,14 +62,12 @@ pub fn ui_font_family(cx: &App) -> SharedString {
 /// Returns the first candidate family present in `installed`, falling back to
 /// `.SystemUIFont` when none is (no worse than gpui's default behavior).
 fn pick_ui_font(installed: &[String]) -> SharedString {
-    const CANDIDATES: [&str; 6] = [
+    const CANDIDATES: [&str; 5] = [
         "Adwaita Sans",
         "Cantarell",
         "Noto Sans",
         "Ubuntu",
         "DejaVu Sans",
-        // Windows.
-        "Segoe UI",
     ];
     first_installed(&CANDIDATES, installed).unwrap_or(".SystemUIFont".into())
 }
@@ -75,13 +77,16 @@ fn pick_ui_font(installed: &[String]) -> SharedString {
 /// gpui hands the family name straight to the platform text system, which
 /// does not resolve CSS generics like `"monospace"` — the lookup fails and
 /// code silently renders in the proportional fallback font. Resolved once and
-/// cached, since inline code asks for it on every render.
+/// cached, since inline code asks for it on every render. Windows takes
+/// Consolas outright, for the same reason as `ui_font_family`.
 #[must_use]
 pub fn mono_font_family(cx: &App) -> SharedString {
     static MONO: OnceLock<SharedString> = OnceLock::new();
     MONO.get_or_init(|| {
         if cfg!(target_os = "macos") {
             "Menlo".into()
+        } else if cfg!(target_os = "windows") {
+            "Consolas".into()
         } else {
             pick_mono_font(&cx.text_system().all_font_names())
         }
@@ -90,16 +95,13 @@ pub fn mono_font_family(cx: &App) -> SharedString {
 }
 
 fn pick_mono_font(installed: &[String]) -> SharedString {
-    const CANDIDATES: [&str; 8] = [
+    const CANDIDATES: [&str; 6] = [
         "Adwaita Mono",
         "Noto Sans Mono",
         "DejaVu Sans Mono",
         "Ubuntu Mono",
         "Liberation Mono",
         "Source Code Pro",
-        // Windows.
-        "Cascadia Mono",
-        "Consolas",
     ];
     first_installed(&CANDIDATES, installed).unwrap_or("monospace".into())
 }
