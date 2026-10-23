@@ -41,6 +41,7 @@ actions!(
         ExtendSelectionDown,
         CopyBlocks,
         CutBlocks,
+        PasteBlocks,
         DeleteBlocks,
         IndentBlocks,
         OutdentBlocks
@@ -113,7 +114,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", ExtendSelectionUp, Some(EXTEND_CONTEXT)),
         KeyBinding::new("shift-down", ExtendSelectionDown, Some(EXTEND_CONTEXT)),
         KeyBinding::new(&format!("{cmd}-c"), CopyBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(&format!("{cmd}-c"), CopyBlocks, Some(BLOCK_CONTEXT)),
         KeyBinding::new(&format!("{cmd}-x"), CutBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(&format!("{cmd}-v"), PasteBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(&format!("{cmd}-v"), PasteBlocks, Some(BLOCK_CONTEXT)),
         KeyBinding::new("backspace", DeleteBlocks, Some(SELECTION_CONTEXT)),
         KeyBinding::new("delete", DeleteBlocks, Some(SELECTION_CONTEXT)),
         KeyBinding::new("tab", IndentBlocks, Some(SELECTION_CONTEXT)),
@@ -823,6 +827,40 @@ impl OutlineView {
         true
     }
 
+    /// Pastes clipboard outline markdown as blocks after the selection, or
+    /// after the focused-but-viewing block, and focuses the last pasted
+    /// block. Returns whether anything was pasted.
+    fn paste_after_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self
+            .selection_roots(cx)
+            .last()
+            .copied()
+            .or_else(|| self.focused_block_id(window, cx))
+        else {
+            return false;
+        };
+        let Some(pasted) = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .and_then(|text| Outline::parse_blocks(&text))
+        else {
+            return false;
+        };
+        let last = pasted.last().map(|b| b.id);
+        self.selection = BlockSelection::None;
+        self.page
+            .update(cx, |page, cx| page.paste_blocks(target, pasted, cx));
+        // A lone block pasted onto an empty one is absorbed into it.
+        let focus = last
+            .filter(|&id| self.page.read(cx).outline().get(id).is_some())
+            .unwrap_or(target);
+        let handle = self.get_or_create(focus, window, cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        self.reveal_row = Some(focus);
+        cx.notify();
+        true
+    }
+
     /// Deletes the selected blocks with their subtrees as one undo step, and
     /// focuses the row before them (or, for a selection at the top, the one
     /// after). Like `remove_block`, does nothing when no block would be left.
@@ -882,13 +920,22 @@ impl OutlineView {
         .on_action(cx.listener(|this, _: &ExtendSelectionDown, window, cx| {
             this.extend_selection(VerticalDirection::Down, window, cx);
         }))
-        .on_action(cx.listener(|this, _: &CopyBlocks, _, cx| {
-            if !this.copy_selection(cx) {
-                cx.propagate();
+        .on_action(cx.listener(|this, _: &CopyBlocks, window, cx| {
+            if this.copy_selection(cx) {
+                return;
+            }
+            match this.focused_block_id(window, cx) {
+                Some(id) => this.copy_block(id, cx),
+                None => cx.propagate(),
             }
         }))
         .on_action(cx.listener(|this, _: &CutBlocks, window, cx| {
             if !(this.copy_selection(cx) && this.delete_selection(window, cx)) {
+                cx.propagate();
+            }
+        }))
+        .on_action(cx.listener(|this, _: &PasteBlocks, window, cx| {
+            if !this.paste_after_selection(window, cx) {
                 cx.propagate();
             }
         }))
@@ -3254,6 +3301,59 @@ mod tests {
             "- a\n- b\n- c\n",
             "one undo restores both"
         );
+    }
+
+    #[gpui::test]
+    fn copied_selection_pastes_after_the_selection(cx: &mut TestAppContext) {
+        let body = "- a\n  - a1\n- b\n- c\n";
+        let (page, ov, cx) = mount(cx, body);
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        let cmd = crate::cmd_key();
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes(&format!("shift-down {cmd}-c {cmd}-v"));
+        cx.run_until_parked();
+
+        assert_eq!(
+            serialized(cx, &page),
+            "- a\n  - a1\n- b\n- a\n  - a1\n- b\n- c\n"
+        );
+        let new_b = cx.read(|cx| page.read(cx).outline().roots[3].id);
+        assert_eq!(focused_id(cx, &ov), Some(new_b), "the last pasted block");
+        assert!(selected(cx, &ov).is_empty(), "the selection is gone");
+
+        cx.simulate_keystrokes(&format!("{cmd}-z"));
+        cx.run_until_parked();
+        assert_eq!(serialized(cx, &page), body, "one undo removes the paste");
+    }
+
+    #[gpui::test]
+    fn copy_takes_the_focused_block_and_its_children(cx: &mut TestAppContext) {
+        let body = "- a\n  - a1\n- b\n";
+        let (page, ov, cx) = mount(cx, body);
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes(&format!("{}-c", crate::cmd_key()));
+        cx.run_until_parked();
+
+        assert_eq!(clipboard(cx).as_deref(), Some("- a\n  - a1\n"));
+        assert_eq!(serialized(cx, &page), body, "copy leaves the page");
+    }
+
+    #[gpui::test]
+    fn a_single_block_pastes_after_the_focused_block(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n- b\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("- x\n".into())));
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes(&format!("{}-v", crate::cmd_key()));
+        cx.run_until_parked();
+
+        assert_eq!(serialized(cx, &page), "- a\n- x\n- b\n");
+        let x = cx.read(|cx| page.read(cx).outline().roots[1].id);
+        assert_eq!(focused_id(cx, &ov), Some(x));
     }
 
     #[gpui::test]

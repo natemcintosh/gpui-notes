@@ -537,10 +537,16 @@ impl Outline {
     /// should paste as plain text.
     #[must_use]
     pub fn parse_pasted(text: &str) -> Option<Vec<Block>> {
+        Self::parse_blocks(text)
+            .filter(|roots| roots.len() > 1 || roots.iter().any(|b| !b.children.is_empty()))
+    }
+
+    /// The blocks in `text`, for pasting outside the editor: outline markdown
+    /// as its tree, plain text as one block. `None` only for empty text.
+    #[must_use]
+    pub fn parse_blocks(text: &str) -> Option<Vec<Block>> {
         let pasted = Outline::parse(text);
-        let structured = pasted.preamble.is_empty()
-            && (pasted.roots.len() > 1 || pasted.roots.iter().any(|b| !b.children.is_empty()));
-        structured.then_some(pasted.roots)
+        (pasted.preamble.is_empty() && !pasted.roots.is_empty()).then_some(pasted.roots)
     }
 
     /// Inserts `pasted` as siblings right after `id`. An empty `id` is
@@ -656,6 +662,16 @@ mod tests {
         assert!(Outline::parse_pasted("just words").is_none());
         assert!(Outline::parse_pasted("- one bullet").is_none());
         assert!(Outline::parse_pasted("line one\nline two").is_none());
+    }
+
+    #[test]
+    fn a_single_bullet_parses_as_blocks() {
+        assert_eq!(Outline::parse_blocks("- one bullet\n").unwrap().len(), 1);
+        assert_eq!(
+            Outline::parse_blocks("just words").unwrap()[0].text,
+            "just words"
+        );
+        assert!(Outline::parse_blocks("").is_none());
     }
 
     #[test]
