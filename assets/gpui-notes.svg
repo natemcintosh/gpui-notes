@@ -1,0 +1,19 @@
+<svg width="200" height="200" xmlns="http://www.w3.org/2000/svg">
+<!--Navy Blue Background-->
+  <rect width="100%" height="100%" fill="darkblue"/>
+<!--Faint Lighter Blue Lines at the same angle-->
+<!--Line 1: Shorter, slightly above the main line-->
+  <line x1="40" y1="90" x2="160" y2="90" stroke="lightblue" stroke-width="1" stroke-opacity="0.5" transform="rotate(-35 100 100)"/>
+<!--Line 2: Shorter, slightly below the main line-->
+  <line x1="40" y1="110" x2="160" y2="110" stroke="lightblue" stroke-width="1" stroke-opacity="0.5" transform="rotate(-35 100 100)"/>
+<!--Line 3: Even shorter, further above-->
+  <line x1="60" y1="80" x2="140" y2="80" stroke="lightblue" stroke-width="1" stroke-opacity="0.3" transform="rotate(-35 100 100)"/>
+<!--Line 4: Even shorter, further below-->
+  <line x1="60" y1="120" x2="140" y2="120" stroke="lightblue" stroke-width="1" stroke-opacity="0.3" transform="rotate(-35 100 100)"/>
+<!--Gold Line-->
+  <line x1="25" y1="100" x2="175" y2="100" stroke="gold" stroke-width="2" transform="rotate(-35 100 100)"/>
+<!--First Pearl-colored Circle (on top of the line)-->
+  <circle cx="83.33" cy="100" r="10" fill="oldlace" stroke="gold" stroke-width="2" transform="rotate(-35 100 100)"/>
+<!--Second Pearl-colored Circle (underneath the line)-->
+  <circle cx="116.67" cy="100" r="7" fill="oldlace" stroke="gold" stroke-width="2" transform="rotate(-35 100 100)"/>
+</svg>

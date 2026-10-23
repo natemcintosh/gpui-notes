@@ -868,6 +868,8 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // Matches the desktop entry name, so GNOME shows its icon.
+                app_id: Some("gpui-notes".into()),
                 ..Default::default()
             },
             |window, cx| {
