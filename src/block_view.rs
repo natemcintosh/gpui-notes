@@ -239,8 +239,8 @@ impl BlockView {
                     this.end_editing_inner(cx);
                     window.focus(&this.focus_handle, cx);
                 }
-                // Enter finishes the block, except inside a code fence still
-                // waiting for its closing ``` — there it breaks the line (#62).
+                // Enter finishes the block, except with the caret inside a
+                // code fence (closed or not) — there it breaks the line (#62).
                 TextInputEvent::Submitted => {
                     if this.accept_completion(cx) {
                         return;
@@ -253,7 +253,7 @@ impl BlockView {
                     // pushing this one down.
                     if selection == (0..0) && !content.is_empty() {
                         this.insert_sibling(cx, |p, id, cx| p.insert_block_before(id, "", cx));
-                    } else if outline::has_open_fence(&content) {
+                    } else if outline::has_open_fence(&content[..selection.start]) {
                         input.update(cx, |input, cx| input.insert_newline(window, cx));
                     } else {
                         this.insert_sibling(cx, |p, id, cx| p.insert_block_after(id, "", cx));
@@ -1187,6 +1187,31 @@ mod tests {
             assert_eq!(outline.roots.len(), 1, "no sibling was inserted");
             assert_eq!(outline.get(bv.read(cx).block_id), Some("```calc\n1 + 1"));
         });
+    }
+
+    /// Enter inside a closed fence still adds a line; after the closing
+    /// fence it ends the block as usual.
+    #[gpui::test]
+    fn enter_inside_a_closed_fence_adds_a_line(cx: &mut TestAppContext) {
+        let (page, bv, cx) = mount(cx, "- ```calc\n  1 + 1\n  ```\n");
+        focus_block(cx, &bv);
+        cx.simulate_keystrokes("enter left left left left enter");
+        cx.simulate_input("2 + 2");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(bv.read(cx).is_editing(), "still editing the same block");
+            let outline = page.read(cx).outline();
+            assert_eq!(outline.roots.len(), 1, "no sibling was inserted");
+            assert_eq!(
+                outline.get(bv.read(cx).block_id),
+                Some("```calc\n1 + 1\n2 + 2\n```")
+            );
+        });
+
+        cx.simulate_keystrokes("down end enter");
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(page.read(cx).outline().roots.len(), 2));
     }
 
     #[gpui::test]
