@@ -1,6 +1,6 @@
 [package]
 name = "gpui-notes"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 description = "A Logseq-inspired outliner for plain-markdown notes, built on GPUI"
 repository = "https://github.com/natemcintosh/gpui-notes"
