@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history and tags, for the commit list below
 
       - name: Check the tag matches Cargo.toml's version
         run: |
@@ -25,8 +27,15 @@ jobs:
             exit 1
           fi
 
+      # GitHub's generated notes only list merged PRs, and work lands directly
+      # on main, so prepend the commit subjects since the previous tag.
+      # --first-parent leaves a merged branch's commits to the PR entry.
       - name: Create the release with generated notes
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: |
+          prev=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          range=${prev:+$prev..}$GITHUB_REF_NAME
+          notes=$(git log --first-parent --no-merges --invert-grep --grep='^chore(release):' --pretty='- %s (%h)' "$range")
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --notes "## Changes"$'\n\n'"$notes" --verify-tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
