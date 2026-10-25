@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/gpui-notes.svg" alt="gpui-notes logo" width="128">
+</p>
+
 # gpui-notes
 
 A Rust + [GPUI](https://www.gpui.rs/) note-taking app inspired by [Logseq](https://github.com/logseq/logseq). It is not aiming at full Logseq parity — the goal is a focused subset of the features that get used day-to-day. GPUI is the GUI framework that powers the [Zed](https://github.com/zed-industries/zed) editor.
