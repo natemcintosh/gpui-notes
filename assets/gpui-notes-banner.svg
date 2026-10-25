@@ -1,0 +1,26 @@
+<svg width="800" height="200" xmlns="http://www.w3.org/2000/svg">
+<!--Wide README banner: the app logo centered, with extra faint streaks out to the sides-->
+<!--Navy Blue Background-->
+  <rect width="100%" height="100%" fill="darkblue"/>
+<!--Faint side streaks at the logo's angle, fading toward the edges-->
+  <g stroke="lightblue" stroke-width="1">
+    <line x1="160" y1="100" x2="280" y2="100" stroke-opacity="0.35" transform="rotate(-35 220 100)"/>
+    <line x1="190" y1="125" x2="270" y2="125" stroke-opacity="0.2" transform="rotate(-35 230 125)"/>
+    <line x1="60" y1="90" x2="160" y2="90" stroke-opacity="0.2" transform="rotate(-35 110 90)"/>
+    <line x1="20" y1="130" x2="80" y2="130" stroke-opacity="0.12" transform="rotate(-35 50 130)"/>
+    <line x1="520" y1="100" x2="640" y2="100" stroke-opacity="0.35" transform="rotate(-35 580 100)"/>
+    <line x1="530" y1="75" x2="610" y2="75" stroke-opacity="0.2" transform="rotate(-35 570 75)"/>
+    <line x1="640" y1="110" x2="740" y2="110" stroke-opacity="0.2" transform="rotate(-35 690 110)"/>
+    <line x1="720" y1="70" x2="780" y2="70" stroke-opacity="0.12" transform="rotate(-35 750 70)"/>
+  </g>
+<!--The logo itself, unchanged, shifted to the center-->
+  <g transform="translate(300 0)">
+    <line x1="40" y1="90" x2="160" y2="90" stroke="lightblue" stroke-width="1" stroke-opacity="0.5" transform="rotate(-35 100 100)"/>
+    <line x1="40" y1="110" x2="160" y2="110" stroke="lightblue" stroke-width="1" stroke-opacity="0.5" transform="rotate(-35 100 100)"/>
+    <line x1="60" y1="80" x2="140" y2="80" stroke="lightblue" stroke-width="1" stroke-opacity="0.3" transform="rotate(-35 100 100)"/>
+    <line x1="60" y1="120" x2="140" y2="120" stroke="lightblue" stroke-width="1" stroke-opacity="0.3" transform="rotate(-35 100 100)"/>
+    <line x1="25" y1="100" x2="175" y2="100" stroke="gold" stroke-width="2" transform="rotate(-35 100 100)"/>
+    <circle cx="83.33" cy="100" r="10" fill="oldlace" stroke="gold" stroke-width="2" transform="rotate(-35 100 100)"/>
+    <circle cx="116.67" cy="100" r="7" fill="oldlace" stroke="gold" stroke-width="2" transform="rotate(-35 100 100)"/>
+  </g>
+</svg>

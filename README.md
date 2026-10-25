@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/gpui-notes.svg" alt="gpui-notes logo" width="128">
+  <img src="assets/gpui-notes-banner.svg" alt="gpui-notes logo" width="600">
 </p>
 
 # gpui-notes
