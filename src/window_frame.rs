@@ -16,7 +16,10 @@ use gpui::{
 
 use crate::theme;
 
-/// Thickness of the resize hit zone along each edge.
+/// Thickness of the resize hit zone along each edge. Zones are measured
+/// against `viewport_size`, never `window_bounds()`: for a maximized window
+/// that is the *restore* size, which put the right and bottom zones across
+/// the middle of the content, swallowing clicks on whatever lay under them.
 const EDGE: Pixels = px(6.0);
 const TITLEBAR_HEIGHT: Pixels = px(28.0);
 
@@ -55,16 +58,13 @@ impl<V: Render + 'static> Render for WindowFrame<V> {
                     canvas(
                         |_bounds, window, _cx| {
                             window.insert_hitbox(
-                                Bounds::new(
-                                    point(px(0.0), px(0.0)),
-                                    window.window_bounds().get_bounds().size,
-                                ),
+                                Bounds::new(point(px(0.0), px(0.0)), window.viewport_size()),
                                 HitboxBehavior::Normal,
                             )
                         },
                         |_bounds, hitbox, window, _cx| {
                             let pos = window.mouse_position();
-                            let size = window.window_bounds().get_bounds().size;
+                            let size = window.viewport_size();
                             if let Some(edge) = resize_edge(pos, EDGE, size) {
                                 window.set_cursor_style(cursor_for(edge), &hitbox);
                             }
@@ -79,13 +79,13 @@ impl<V: Render + 'static> Render for WindowFrame<V> {
                 // constant redraws and make queued focus transitions appear
                 // tied to mouse movement.
                 .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, _| {
-                    let size = window.window_bounds().get_bounds().size;
+                    let size = window.viewport_size();
                     if edge_changed(&mut this.last_edge, e.position, size) {
                         window.refresh();
                     }
                 }))
                 .on_mouse_down(MouseButton::Left, |e, window, _| {
-                    let size = window.window_bounds().get_bounds().size;
+                    let size = window.viewport_size();
                     if let Some(edge) = resize_edge(e.position, EDGE, size) {
                         window.start_window_resize(edge);
                     }
@@ -110,7 +110,7 @@ fn titlebar(title: SharedString) -> impl IntoElement {
             // The top resize band overlaps the title bar. When the click
             // falls in it, bail out so the outer handler starts a resize
             // rather than a move.
-            let size = window.window_bounds().get_bounds().size;
+            let size = window.viewport_size();
             if resize_edge(e.position, EDGE, size).is_some() {
                 return;
             }
