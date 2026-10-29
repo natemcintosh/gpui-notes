@@ -18,9 +18,11 @@ use gpui::{
 use crate::autoscroll::{self, RevealBounds};
 use crate::block_render::theme;
 use crate::block_view::{BlockView, BlockViewEvent};
+use crate::history::{NavTarget, OpenTarget};
 use crate::linked_refs::LinkedRefsView;
 use crate::outline::{Block, BlockId, Outline};
 use crate::page::Page;
+use crate::registry::PageRegistry;
 use crate::text_input::{PendingVerticalPlacement, VerticalDirection};
 
 actions!(
@@ -133,9 +135,11 @@ pub fn bind_keys(cx: &mut App) {
 /// carry no references section of their own. `Embedded` views back the days
 /// in journals mode: the whole page, but likewise inside someone else's
 /// scroll container; like `Page`, they end with the page's references.
+/// A `Page` view `zoom`ed in on a block shows only that block's subtree,
+/// under a breadcrumb back out, and none of the page's references.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OutlineScope {
-    Page,
+    Page { zoom: Option<BlockId> },
     Embedded,
     Subtree(BlockId),
 }
@@ -195,7 +199,7 @@ pub struct OutlineView {
 
 impl OutlineView {
     pub fn new(page: Entity<Page>, cx: &mut Context<Self>) -> Self {
-        Self::scoped(page, OutlineScope::Page, cx)
+        Self::scoped(page, OutlineScope::Page { zoom: None }, cx)
     }
 
     /// A view over `root` and its descendants only. Edits, indents and moves
@@ -235,11 +239,125 @@ impl OutlineView {
     /// source page.
     fn scoped_roots<'a>(&self, outline: &'a Outline) -> &'a [Block] {
         match self.scope {
-            OutlineScope::Page | OutlineScope::Embedded => &outline.roots,
-            OutlineScope::Subtree(id) => outline
-                .path_to(id)
-                .map_or(&[][..], |path| block_slice_at(&outline.roots, &path)),
+            OutlineScope::Page { zoom: None } | OutlineScope::Embedded => &outline.roots,
+            // A zoomed-in block that has since gone shows the whole page.
+            OutlineScope::Page { zoom: Some(id) } => {
+                subtree_slice(outline, id).unwrap_or(&outline.roots)
+            }
+            OutlineScope::Subtree(id) => subtree_slice(outline, id).unwrap_or(&[]),
         }
+    }
+
+    /// The block a page view is zoomed in on, if any.
+    #[must_use]
+    pub fn zoom(&self) -> Option<BlockId> {
+        match self.scope {
+            OutlineScope::Page { zoom } => zoom,
+            OutlineScope::Embedded | OutlineScope::Subtree(_) => None,
+        }
+    }
+
+    /// Zooms a page view in on `block` and its descendants, or back out to
+    /// the whole page. Called by `history`, so the move is a back/forward
+    /// entry; a bullet click reaches it by dispatching `OpenTarget`.
+    pub fn set_zoom(&mut self, block: Option<BlockId>, cx: &mut Context<Self>) {
+        let OutlineScope::Page { zoom } = &mut self.scope else {
+            return;
+        };
+        if *zoom == block {
+            return;
+        }
+        // Zooming out scrolls back to the block that was zoomed in on;
+        // zooming in starts at the top.
+        self.reveal_row = zoom.take();
+        if block.is_some() {
+            self.scroll.set_offset(Point::default());
+        }
+        *zoom = block;
+        self.selection = BlockSelection::None;
+        cx.notify();
+    }
+
+    /// Opens this view's page zoomed in on `block`, or the whole page.
+    fn open_zoomed(&self, block: Option<BlockId>, window: &mut Window, cx: &mut App) {
+        let source = cx.global::<PageRegistry>().source_for_page(&self.page, cx);
+        let target = match block {
+            Some(block) => NavTarget::Block { source, block },
+            None => NavTarget::Page(source),
+        };
+        window.dispatch_action(Box::new(OpenTarget { target }), cx);
+    }
+
+    /// `id`'s bullet: a click zooms in on it, a right-click opens its menu.
+    fn row_bullet(
+        id: BlockId,
+        row_id: gpui::EntityId,
+        on_path: bool,
+        fold: Fold,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let on_zoom =
+            cx.listener(move |this, _, window, cx| this.open_zoomed(Some(id), window, cx));
+        let on_menu = cx.listener(move |this, event, window, cx| {
+            this.open_bullet_menu(id, event, window, cx);
+        });
+        bullet(row_id, on_path, fold, on_zoom, on_menu)
+    }
+
+    /// The page's references, under a whole page (not a zoomed-in block or
+    /// a linked reference).
+    fn render_linked_refs(&mut self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        if !matches!(
+            self.scope,
+            OutlineScope::Page { zoom: None } | OutlineScope::Embedded
+        ) {
+            return None;
+        }
+        let page = self.page.clone();
+        let refs = self
+            .linked_refs
+            .get_or_insert_with(|| cx.new(|cx| LinkedRefsView::new(page, cx)));
+        Some(div().w_full().child(refs.clone()))
+    }
+
+    /// `page › ancestor › …` above a zoomed-in block, each crumb opening
+    /// that level. `None` when not zoomed.
+    fn render_breadcrumb(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let page = self.page.read(cx);
+        let outline = page.outline();
+        let path = outline.path_to(self.zoom()?)?;
+        let mut crumbs = vec![(page.name().clone(), None)];
+        let mut blocks = &outline.roots[..];
+        for &i in &path[..path.len() - 1] {
+            let block = &blocks[i];
+            crumbs.push((crumb_label(&block.text).into(), Some(block.id)));
+            blocks = &block.children;
+        }
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_1()
+            .pb_2()
+            .text_sm()
+            .text_color(theme::fg_muted());
+        for (ix, (label, block)) in crumbs.into_iter().enumerate() {
+            if ix > 0 {
+                row = row.child("›");
+            }
+            row = row.child(
+                div()
+                    .id(("breadcrumb", ix))
+                    .debug_selector(move || format!("breadcrumb-{ix}"))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme::fg()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_zoomed(block, window, cx);
+                    }))
+                    .child(label),
+            );
+        }
+        Some(row)
     }
 
     /// Focus the first root block in the outline, creating its `BlockView` if
@@ -1055,6 +1173,26 @@ impl OutlineView {
 
 /// The one-element slice holding the block at `path`, so a subtree can be
 /// handed to the same `&[Block]` traversals the whole outline uses.
+fn subtree_slice(outline: &Outline, id: BlockId) -> Option<&[Block]> {
+    outline
+        .path_to(id)
+        .map(|path| block_slice_at(&outline.roots, &path))
+}
+
+/// A breadcrumb's text: the block's first line, cut short.
+fn crumb_label(text: &str) -> String {
+    const MAX_CHARS: usize = 40;
+    let line = text.lines().next().unwrap_or_default().trim();
+    if line.chars().count() > MAX_CHARS {
+        let cut: String = line.chars().take(MAX_CHARS).collect();
+        format!("{}…", cut.trim_end())
+    } else if line.is_empty() {
+        "…".to_string()
+    } else {
+        line.to_string()
+    }
+}
+
 fn block_slice_at<'a>(roots: &'a [Block], path: &[usize]) -> &'a [Block] {
     let Some((&last, parents)) = path.split_last() else {
         return &[];
@@ -1168,7 +1306,7 @@ fn thread_row(
     fold: Fold,
     selected: bool,
     on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-    on_bullet_menu: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    bullet: gpui::Stateful<gpui::Div>,
     bv: Entity<BlockView>,
 ) -> gpui::Div {
     #[allow(clippy::cast_precision_loss)]
@@ -1227,7 +1365,6 @@ fn thread_row(
             .on_click(on_toggle)
             .child(if fold == Fold::Folded { "▸" } else { "▾" })
     });
-    let bullet = bullet(row_id, thread.on_path, fold, on_bullet_menu);
     div()
         .group(ROW_GROUP)
         .relative()
@@ -1266,12 +1403,13 @@ fn reveal_marker() -> impl IntoElement {
         .size_full()
 }
 
-/// The bullet dot, ringed when its block is folded. A right-click opens
-/// the bullet menu.
+/// The bullet dot, ringed when its block is folded. A click zooms in on
+/// the block; a right-click opens the bullet menu.
 fn bullet(
     row_id: gpui::EntityId,
     on_path: bool,
     fold: Fold,
+    on_zoom: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     on_bullet_menu: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let bullet_color = if on_path {
@@ -1287,6 +1425,8 @@ fn bullet(
     div()
         .id(("bullet", row_id))
         .debug_selector(move || format!("bullet-{row_id}"))
+        .cursor_pointer()
+        .on_click(on_zoom)
         .on_mouse_down(MouseButton::Right, on_bullet_menu)
         .w(BULLET_COLUMN_WIDTH)
         .flex_none()
@@ -1374,7 +1514,7 @@ impl Render for OutlineView {
             // The column is centred by padding the scroll container, so the
             // rows themselves never carry auto margins (see
             // `theme::content_width`).
-            OutlineScope::Page => root
+            OutlineScope::Page { .. } => root
                 .flex_1()
                 .min_h_0()
                 .px(theme::content_gutter(window))
@@ -1387,6 +1527,7 @@ impl Render for OutlineView {
                 })),
             OutlineScope::Embedded | OutlineScope::Subtree(_) => root,
         };
+        root = root.children(self.render_breadcrumb(cx));
 
         let active = self.active_block_id(window, cx);
         #[cfg(test)]
@@ -1400,9 +1541,7 @@ impl Render for OutlineView {
             let bv = self.get_or_create(id, window, cx);
             let on_toggle =
                 cx.listener(move |this, _, window, cx| this.toggle_fold(id, window, cx));
-            let on_bullet_menu = cx.listener(move |this, event, window, cx| {
-                this.open_bullet_menu(id, event, window, cx);
-            });
+            let bullet = Self::row_bullet(id, bv.entity_id(), thread.on_path, folds[&id], cx);
             let is_selected = selected.as_ref().is_some_and(|rows| rows.contains(&row));
             let row = thread_row(
                 depth,
@@ -1410,21 +1549,15 @@ impl Render for OutlineView {
                 folds[&id],
                 is_selected,
                 on_toggle,
-                on_bullet_menu,
+                bullet,
                 bv,
             )
             .when(reveal_row == Some(id), |row| row.child(reveal_marker()));
             root = root.child(Self::with_selection_handlers(id, row, cx));
         }
 
-        if matches!(self.scope, OutlineScope::Page | OutlineScope::Embedded) {
-            let page = self.page.clone();
-            let refs = self
-                .linked_refs
-                .get_or_insert_with(|| cx.new(|cx| LinkedRefsView::new(page, cx)));
-            root = root.child(div().w_full().child(refs.clone()));
-        }
-        root.children(self.render_bullet_menu(cx))
+        root.children(self.render_linked_refs(cx))
+            .children(self.render_bullet_menu(cx))
     }
 }
 

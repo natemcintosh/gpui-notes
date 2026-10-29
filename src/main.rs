@@ -12,7 +12,7 @@ use gpui_notes::block_view;
 use gpui_notes::cmd_key;
 use gpui_notes::errors::{self, LastError};
 use gpui_notes::goto_word::{self, GotoWord, Labels, Step};
-use gpui_notes::history::{self, NavHistory, NavTarget};
+use gpui_notes::history::{self, NavHistory, NavTarget, OpenTarget};
 use gpui_notes::journal;
 use gpui_notes::journals_view::JournalsView;
 use gpui_notes::outline_view;
@@ -245,6 +245,16 @@ impl RootView {
     fn open_page(&mut self, action: &OpenPage, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(err) = history::navigate_to(&page_links::link_target(&action.name).into(), cx) {
             errors::report(format!("open {:?} failed: {err}", action.name), cx);
+            return;
+        }
+        self.overlay = OverlayMode::None;
+        self.park_focus(window, cx);
+        cx.notify();
+    }
+
+    fn open_target(&mut self, action: &OpenTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = history::navigate_to(&action.target, cx) {
+            errors::report(format!("open failed: {err}"), cx);
             return;
         }
         self.overlay = OverlayMode::None;
@@ -672,6 +682,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::next_page))
             .on_action(cx.listener(Self::jump_to_today))
             .on_action(cx.listener(Self::open_page))
+            .on_action(cx.listener(Self::open_target))
             .on_action(cx.listener(Self::close_overlay))
             .on_action(cx.listener(Self::open_page_picker))
             .on_action(cx.listener(Self::open_search))
@@ -906,6 +917,7 @@ mod tests {
     use super::*;
     use gpui::{point, Modifiers, TestAppContext, VisualTestContext};
     use gpui_notes::block_view::BlockMode;
+    use gpui_notes::outline::BlockId;
     use gpui_notes::registry::set_current_page;
     use tempfile::TempDir;
 
@@ -2438,5 +2450,180 @@ mod tests {
             .read(|cx| root.read(cx).overlay().jump_labels().map(Labels::len))
             .unwrap();
         assert!(count > 0 && count < 60, "labelled {count} of 60 blocks");
+    }
+
+    /// Notes for the zoom tests: `Tree` to zoom in on, `Ref` linking to it,
+    /// and a today's journal with a child.
+    fn write_zoom_notes(tmp: &TempDir) {
+        std::fs::create_dir_all(tmp.path().join("pages")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("journals")).unwrap();
+        std::fs::write(
+            tmp.path().join("pages/Tree.md"),
+            "- a\n  - a1\n    - a11\n- b\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("pages/Ref.md"), "- see [[Tree]]\n").unwrap();
+        let today = gpui_notes::journal::today().format("%Y_%m_%d");
+        std::fs::write(
+            tmp.path().join(format!("journals/{today}.md")),
+            "- j\n  - j1\n",
+        )
+        .unwrap();
+    }
+
+    fn open_tree(cx: &mut VisualTestContext, root: &Entity<RootView>) -> Entity<Page> {
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.open_page(
+                    &OpenPage {
+                        name: "Tree".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.read(|cx| cx.global::<CurrentPage>().get().cloned().unwrap())
+    }
+
+    /// Ids of `page`'s blocks in preorder.
+    fn block_ids(cx: &mut VisualTestContext, page: &Entity<Page>) -> Vec<BlockId> {
+        fn walk(blocks: &[gpui_notes::outline::Block], out: &mut Vec<BlockId>) {
+            for block in blocks {
+                out.push(block.id);
+                walk(&block.children, out);
+            }
+        }
+        cx.read(|cx| {
+            let mut ids = Vec::new();
+            walk(&page.read(cx).outline().roots, &mut ids);
+            ids
+        })
+    }
+
+    fn painted(cx: &mut VisualTestContext, id: BlockId) -> bool {
+        cx.debug_bounds(format!("block-view-{id:?}").leak())
+            .is_some()
+    }
+
+    /// Clicks the bullet drawn just left of `id`'s block, on its first line.
+    fn click_bullet(cx: &mut VisualTestContext, id: BlockId) {
+        let bounds = cx
+            .debug_bounds(format!("block-view-{id:?}").leak())
+            .expect("block painted");
+        cx.simulate_click(
+            point(bounds.origin.x - px(10.0), bounds.origin.y + px(15.0)),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+    }
+
+    fn current_zoom(cx: &mut VisualTestContext) -> (NoteSource, Option<BlockId>) {
+        cx.read(|cx| {
+            let page = cx.global::<CurrentPage>().get().cloned().unwrap();
+            let source = cx.global::<PageRegistry>().source_for_page(&page, cx);
+            (source, page.read(cx).view().read(cx).zoom())
+        })
+    }
+
+    #[gpui::test]
+    fn clicking_a_bullet_zooms_in_and_back_zooms_out(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        write_zoom_notes(&tmp);
+        let (root, cx) = mount_root(cx, &tmp);
+        let tree = open_tree(cx, &root);
+        let [a, a1, a11, b] = block_ids(cx, &tree)[..] else {
+            panic!("four blocks");
+        };
+        let see_tree = cx.read(|cx| {
+            let reg = cx.global::<PageRegistry>();
+            let refs = reg.get_open(&NoteSource::Page("Ref".into())).unwrap();
+            refs.read(cx).outline().first_block_id().unwrap()
+        });
+        assert!(painted(cx, see_tree), "linked reference shown unzoomed");
+
+        click_bullet(cx, a);
+        let tree_source = NoteSource::Page("Tree".into());
+        assert_eq!(current_zoom(cx), (tree_source.clone(), Some(a)));
+        assert!([a, a1, a11].into_iter().all(|id| painted(cx, id)));
+        assert!(!painted(cx, b), "sibling outside the zoom is hidden");
+        assert!(!painted(cx, see_tree), "page references are hidden");
+        let focused =
+            cx.update(|window, cx| tree.read(cx).view().read(cx).focused_block_id(window, cx));
+        assert_eq!(focused, Some(a), "focus lands on the zoomed-in block");
+
+        cx.simulate_keystrokes("alt-left");
+        cx.run_until_parked();
+        assert_root_in_focus_path(cx, &root);
+        assert_eq!(current_zoom(cx), (tree_source.clone(), None));
+        assert!(painted(cx, b));
+
+        cx.simulate_keystrokes("alt-right");
+        cx.run_until_parked();
+        assert_eq!(current_zoom(cx), (tree_source, Some(a)));
+    }
+
+    #[gpui::test]
+    fn breadcrumbs_zoom_back_out_level_by_level(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        write_zoom_notes(&tmp);
+        let (root, cx) = mount_root(cx, &tmp);
+        let tree = open_tree(cx, &root);
+        let [a, a1, ..] = block_ids(cx, &tree)[..] else {
+            panic!("four blocks");
+        };
+        click_bullet(cx, a);
+        click_bullet(cx, a1);
+        assert_eq!(current_zoom(cx).1, Some(a1));
+
+        // Tree › a
+        let crumb = cx.debug_bounds("breadcrumb-1").expect("ancestor crumb");
+        cx.simulate_click(crumb.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(current_zoom(cx).1, Some(a));
+
+        let crumb = cx.debug_bounds("breadcrumb-0").expect("page crumb");
+        cx.simulate_click(crumb.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(current_zoom(cx).1, None);
+        assert!(cx.debug_bounds("breadcrumb-0").is_none());
+    }
+
+    #[gpui::test]
+    fn a_journal_bullet_opens_that_journal_zoomed_in(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        write_zoom_notes(&tmp);
+        let (_root, cx) = mount_root(cx, &tmp);
+        cx.simulate_keystrokes("ctrl-.");
+        cx.run_until_parked();
+        let today = gpui_notes::journal::today();
+        let journal = cx.read(|cx| {
+            let reg = cx.global::<PageRegistry>();
+            reg.get_open(&NoteSource::Journal(today)).unwrap().clone()
+        });
+        let j = block_ids(cx, &journal)[0];
+
+        click_bullet(cx, j);
+        assert_eq!(current_zoom(cx), (NoteSource::Journal(today), Some(j)));
+    }
+
+    #[gpui::test]
+    fn a_linked_reference_bullet_opens_its_source_zoomed_in(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        write_zoom_notes(&tmp);
+        let (root, cx) = mount_root(cx, &tmp);
+        open_tree(cx, &root);
+        let see_tree = cx.read(|cx| {
+            let reg = cx.global::<PageRegistry>();
+            let refs = reg.get_open(&NoteSource::Page("Ref".into())).unwrap();
+            refs.read(cx).outline().first_block_id().unwrap()
+        });
+
+        click_bullet(cx, see_tree);
+        assert_eq!(
+            current_zoom(cx),
+            (NoteSource::Page("Ref".into()), Some(see_tree))
+        );
     }
 }

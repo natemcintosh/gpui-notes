@@ -3,6 +3,7 @@ use std::io;
 use gpui::{App, BorrowAppContext, Global, NavigationDirection};
 
 use crate::journal;
+use crate::outline::BlockId;
 use crate::registry::{set_current_page, CurrentPage, PageRegistry};
 use crate::source::NoteSource;
 
@@ -17,6 +18,20 @@ pub enum NavTarget {
     /// Journals mode: today's journal with older ones beneath it.
     Journals,
     Page(NoteSource),
+    /// One block of a page and its descendants, opened by clicking its
+    /// bullet. Pages stay open for the session, so the id stays valid.
+    Block {
+        source: NoteSource,
+        block: BlockId,
+    },
+}
+
+/// Navigates to `target`, for views that can't call `navigate_to` themselves
+/// (they have no say over the focus `RootView` parks afterwards).
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = gpui_notes, no_json)]
+pub struct OpenTarget {
+    pub target: NavTarget,
 }
 
 impl From<NoteSource> for NavTarget {
@@ -119,10 +134,17 @@ pub fn go(direction: NavigationDirection, cx: &mut App) -> io::Result<bool> {
 
 /// The one place that maps a navigation target onto the open primitives.
 fn open(target: &NavTarget, cx: &mut App) -> io::Result<()> {
-    match target {
-        NavTarget::Journals => journal::open_journals(cx),
-        NavTarget::Page(source) => set_current_page(source, cx),
+    let (source, zoom) = match target {
+        NavTarget::Journals => return journal::open_journals(cx),
+        NavTarget::Page(source) => (source, None),
+        NavTarget::Block { source, block } => (source, Some(*block)),
+    };
+    set_current_page(source, cx)?;
+    if let Some(page) = cx.global::<CurrentPage>().get().cloned() {
+        let view = page.read(cx).view().clone();
+        view.update(cx, |view, cx| view.set_zoom(zoom, cx));
     }
+    Ok(())
 }
 
 fn current_target(cx: &mut App) -> Option<NavTarget> {
@@ -132,7 +154,10 @@ fn current_target(cx: &mut App) -> Option<NavTarget> {
     let page = cx.global::<CurrentPage>().get().cloned()?;
     let source =
         cx.update_global::<PageRegistry, NoteSource>(|reg, cx| reg.source_for_page(&page, cx));
-    Some(source.into())
+    Some(match page.read(cx).view().read(cx).zoom() {
+        Some(block) => NavTarget::Block { source, block },
+        None => source.into(),
+    })
 }
 
 #[cfg(test)]
