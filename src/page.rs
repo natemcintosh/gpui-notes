@@ -140,18 +140,40 @@ impl Page {
         new_id
     }
 
-    /// Sets `id`'s text to `head` and inserts `tail` as a new sibling right
-    /// after it, as one undo step. Returns the new block's id.
+    /// Insert a block as `id`'s first child. Returns the new block's id, or
+    /// `None` if `id` is not in the outline.
+    pub fn insert_first_child(
+        &mut self,
+        id: BlockId,
+        text: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<BlockId> {
+        let mut new_id = None;
+        self.apply_outline_edit(id, cx, |o| {
+            new_id = o.insert_first_child(id, text);
+            new_id.is_some()
+        });
+        new_id
+    }
+
+    /// Sets `id`'s text to `head` and inserts `tail` as a new block, as one
+    /// undo step: `id`'s first child when `into_child`, otherwise its next
+    /// sibling. Returns the new block's id.
     pub fn split_block(
         &mut self,
         id: BlockId,
         head: String,
         tail: String,
+        into_child: bool,
         cx: &mut Context<Self>,
     ) -> Option<BlockId> {
         let mut new_id = None;
         self.apply_outline_edit(id, cx, |o| {
-            new_id = o.insert_after(id, tail);
+            new_id = if into_child {
+                o.insert_first_child(id, tail)
+            } else {
+                o.insert_after(id, tail)
+            };
             new_id.is_some() && o.set_text(id, head)
         });
         new_id

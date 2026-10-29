@@ -453,6 +453,18 @@ impl Outline {
         Some(new_id)
     }
 
+    /// Inserts a block as `id`'s first child, unfolding `id` so it shows.
+    pub fn insert_first_child(&mut self, id: BlockId, text: impl Into<String>) -> Option<BlockId> {
+        let path = self.path_to(id)?;
+        let (&last, parent_path) = path.split_last()?;
+        let parent = &mut children_mut(&mut self.roots, parent_path)[last];
+        let block = Block::new(text);
+        let new_id = block.id;
+        parent.children.insert(0, block);
+        parent.collapsed = false;
+        Some(new_id)
+    }
+
     pub fn delete(&mut self, id: BlockId) -> Option<Block> {
         let path = self.path_to(id)?;
         Some(self.take(&path))
@@ -1039,6 +1051,17 @@ mod tests {
         let new_id = o.insert_before(c, "b").unwrap();
         assert_eq!(o.serialize(), "- a\n- b\n- c\n  - d\n");
         assert_eq!(o.path_to(new_id), Some(vec![1]));
+    }
+
+    #[test]
+    fn insert_first_child_nests_and_unfolds() {
+        let mut o = Outline::parse("- a\n  - c\n- d\n");
+        let a = by_text(&o, "a");
+        o.toggle_collapse(a);
+        let new_id = o.insert_first_child(a, "b").unwrap();
+        assert_eq!(o.path_to(new_id), Some(vec![0, 0]));
+        assert!(!o.roots[0].collapsed, "a unfolded to show b");
+        assert_eq!(o.serialize(), "- a\n  - b\n  - c\n- d\n");
     }
 
     #[test]

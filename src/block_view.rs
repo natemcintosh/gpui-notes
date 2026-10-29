@@ -95,6 +95,10 @@ pub struct BlockView {
     page: Entity<Page>,
     focus_handle: FocusHandle,
     mode: BlockMode,
+    /// The one block a zoomed-in or linked-reference view is rooted at, set
+    /// by the outline each render. Enter nests new blocks under it, since a
+    /// sibling would land outside the view.
+    scope_root: bool,
     _on_focus: Subscription,
     /// Re-render on wrapper blur so the focus ring clears (#42).
     _on_self_blur: Subscription,
@@ -127,11 +131,16 @@ impl BlockView {
             page,
             focus_handle,
             mode: BlockMode::Viewing,
+            scope_root: false,
             _on_focus: on_focus,
             _on_self_blur: on_self_blur,
             _page_sub: page_sub,
             _link_index_sub: link_index_sub,
         }
+    }
+
+    pub fn set_scope_root(&mut self, scope_root: bool) {
+        self.scope_root = scope_root;
     }
 
     #[must_use]
@@ -253,9 +262,14 @@ impl BlockView {
                         (input.content().clone(), input.selected_range())
                     };
                     // Enter in front of the text opens a new block above,
-                    // pushing this one down.
+                    // pushing this one down; there is no above for a
+                    // view's root, so it opens one below instead.
                     if selection == (0..0) && !content.is_empty() {
-                        this.insert_sibling(cx, |p, id, cx| p.insert_block_before(id, "", cx));
+                        if this.scope_root {
+                            this.insert_sibling(cx, |p, id, cx| p.insert_first_child(id, "", cx));
+                        } else {
+                            this.insert_sibling(cx, |p, id, cx| p.insert_block_before(id, "", cx));
+                        }
                     } else if outline::has_open_fence(&content[..selection.start]) {
                         input.update(cx, |input, cx| input.insert_newline(window, cx));
                     } else {
@@ -479,7 +493,8 @@ impl BlockView {
     }
 
     /// Ends the edit and splits the block at `at`: the text before stays, the
-    /// text after moves into a new sibling below (after any children), and
+    /// text after moves into a new sibling below (after any children), or a
+    /// first child for a view's root, and
     /// the parent view is asked to edit that sibling. Selected text is
     /// dropped, as typing over it would.
     fn split_at(&mut self, at: std::ops::Range<usize>, cx: &mut Context<Self>) {
@@ -490,8 +505,9 @@ impl BlockView {
         let head = content[..at.start].trim_end().to_string();
         let tail = content[at.end..].trim().to_string();
         let block_id = self.block_id;
+        let into_child = self.scope_root;
         let new_id = self.page.update(cx, |p, cx| {
-            let new_id = p.split_block(block_id, head, tail, cx);
+            let new_id = p.split_block(block_id, head, tail, into_child, cx);
             p.split_bullet_lines(block_id, cx);
             new_id
         });

@@ -248,6 +248,39 @@ impl OutlineView {
         }
     }
 
+    /// The one block a zoomed-in or linked-reference view is rooted at.
+    fn scope_root<'a>(&self, outline: &'a Outline) -> Option<&'a Block> {
+        match self.scope {
+            OutlineScope::Page { zoom: Some(id) } | OutlineScope::Subtree(id) => {
+                self.scoped_roots(outline).first().filter(|b| b.id == id)
+            }
+            OutlineScope::Page { zoom: None } | OutlineScope::Embedded => None,
+        }
+    }
+
+    /// `(depth, id)` for each row this view draws, in order. A zoomed-in
+    /// block shows its children even when folded: zooming in on it is
+    /// asking to see inside.
+    fn visible_rows(&self, outline: &Outline) -> Vec<(usize, BlockId)> {
+        match self.scope_root(outline) {
+            Some(root) if self.zoom() == Some(root.id) => {
+                let children = flatten_visible(&root.children);
+                std::iter::once((0, root.id))
+                    .chain(children.into_iter().map(|(depth, id)| (depth + 1, id)))
+                    .collect()
+            }
+            _ => flatten_visible(self.scoped_roots(outline)),
+        }
+    }
+
+    /// The blocks that can't be outdented: the root's children, which would
+    /// become its siblings, outside this view.
+    fn pinned_blocks(&self, cx: &App) -> Vec<BlockId> {
+        self.scope_root(self.page.read(cx).outline())
+            .map(|root| root.children.iter().map(|c| c.id).collect())
+            .unwrap_or_default()
+    }
+
     /// The block a page view is zoomed in on, if any.
     #[must_use]
     pub fn zoom(&self) -> Option<BlockId> {
@@ -388,7 +421,6 @@ impl OutlineView {
         cx: &mut Context<Self>,
     ) -> bool {
         let outline = self.page.read(cx).outline();
-        let roots = self.scoped_roots(outline);
         let Some(path) = outline.path_to(id) else {
             return false;
         };
@@ -402,7 +434,7 @@ impl OutlineView {
             }
             blocks = &block.children;
         }
-        let flat = flatten_visible(roots);
+        let flat = self.visible_rows(outline);
         let Some(target) = target.filter(|&target| flat.iter().any(|&(_, b)| b == target)) else {
             return false;
         };
@@ -479,7 +511,7 @@ impl OutlineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let flat = self.visible_rows(self.page.read(cx).outline());
         let Some(source_index) = flat.iter().position(|&(_, id)| id == source) else {
             return;
         };
@@ -516,7 +548,7 @@ impl OutlineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let flat = self.visible_rows(self.page.read(cx).outline());
         let Some(idx) = flat.iter().position(|&(_, id)| id == source) else {
             return;
         };
@@ -572,7 +604,7 @@ impl OutlineView {
         let Some(current) = self.focused_block_id(window, cx) else {
             return;
         };
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let flat = self.visible_rows(self.page.read(cx).outline());
         let Some(idx) = flat.iter().position(|&(_, id)| id == current) else {
             return;
         };
@@ -596,7 +628,7 @@ impl OutlineView {
         let Some(active) = self.active_block_id(window, cx) else {
             return;
         };
-        let visible = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let visible = self.visible_rows(self.page.read(cx).outline());
         if !visible.iter().any(|&(_, v)| v == active) {
             let handle = self.get_or_create(id, window, cx).focus_handle(cx);
             window.focus(&handle, cx);
@@ -642,6 +674,24 @@ impl OutlineView {
         });
     }
 
+    /// Outdents the indent target, unless that would carry it out of this
+    /// view (see `pinned_blocks`).
+    fn outdent_target(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let pinned = self.pinned_blocks(cx);
+        self.update_indent_target(window, cx, |page, id, cx| {
+            !pinned.contains(&id) && page.outdent_block(id, cx)
+        });
+    }
+
+    /// Folds or unfolds the focused block. A zoomed-in block always shows
+    /// its children (see `visible_rows`), so it has nothing to fold.
+    fn toggle_focused_fold(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let zoom = self.zoom();
+        self.update_focused_block(window, cx, |page, id, cx| {
+            zoom != Some(id) && page.toggle_collapse(id, cx)
+        });
+    }
+
     /// Deletes the focused block with its subtree; see `remove_block`.
     fn delete_block(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(current) = self.focused_block_id(window, cx) {
@@ -653,7 +703,7 @@ impl OutlineView {
     /// visible block (or, for the first, the next one after the subtree).
     /// Does nothing when no block would be left to focus.
     fn remove_block(&mut self, current: BlockId, window: &mut Window, cx: &mut Context<Self>) {
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let flat = self.visible_rows(self.page.read(cx).outline());
         let Some(idx) = flat.iter().position(|&(_, id)| id == current) else {
             return;
         };
@@ -868,7 +918,7 @@ impl OutlineView {
     /// The selected blocks whose parent is not selected, in outline order —
     /// what copy, cut and delete act on, each with its whole subtree.
     fn selection_roots(&self, cx: &App) -> Vec<BlockId> {
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let flat = self.visible_rows(self.page.read(cx).outline());
         let Some(rows) = self.selected_rows(&flat) else {
             return Vec::new();
         };
@@ -906,7 +956,7 @@ impl OutlineView {
             };
             window.focus(&self.focus_handle, cx);
         }
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let flat = self.visible_rows(self.page.read(cx).outline());
         let (Some((a, h)), Some(rows), BlockSelection::Blocks { anchor, .. }) = (
             self.selection_ends(&flat),
             self.selected_rows(&flat),
@@ -985,7 +1035,7 @@ impl OutlineView {
     /// after). Like `remove_block`, does nothing when no block would be left.
     /// Returns whether there was a selection.
     fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let flat = self.visible_rows(self.page.read(cx).outline());
         let Some(rows) = self.selected_rows(&flat) else {
             return false;
         };
@@ -1074,6 +1124,14 @@ impl OutlineView {
             }
         }))
         .on_action(cx.listener(|this, _: &OutdentBlocks, _, cx| {
+            let pinned = this.pinned_blocks(cx);
+            if this
+                .selection_roots(cx)
+                .iter()
+                .any(|id| pinned.contains(id))
+            {
+                return;
+            }
             if !this.reindent_selection(cx, Page::outdent_blocks) {
                 cx.propagate();
             }
@@ -1124,7 +1182,7 @@ impl OutlineView {
         }
         self.clear_block_selection(cx);
         let stepped = self.page.update(cx, step);
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let flat = self.visible_rows(self.page.read(cx).outline());
         let position = |target: Option<BlockId>| {
             target.and_then(|target| flat.iter().position(|&(_, id)| id == target))
         };
@@ -1145,7 +1203,7 @@ impl OutlineView {
     /// The blocks the block selection covers, in outline order.
     #[cfg(test)]
     fn selected_ids_for_test(&self, cx: &App) -> Vec<BlockId> {
-        let flat = flatten_visible(self.scoped_roots(self.page.read(cx).outline()));
+        let flat = self.visible_rows(self.page.read(cx).outline());
         self.selected_rows(&flat)
             .map(|rows| flat[rows].iter().map(|&(_, id)| id).collect())
             .unwrap_or_default()
@@ -1454,11 +1512,16 @@ fn collect_folds(blocks: &[Block], out: &mut HashMap<BlockId, Fold>) {
 
 impl Render for OutlineView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (flat, folds) = {
-            let roots = self.scoped_roots(self.page.read(cx).outline());
+        let (flat, folds, scope_root) = {
+            let outline = self.page.read(cx).outline();
             let mut folds = HashMap::new();
-            collect_folds(roots, &mut folds);
-            (flatten_visible(roots), folds)
+            collect_folds(self.scoped_roots(outline), &mut folds);
+            if let Some(zoom) = self.zoom() {
+                // No fold arrow or ring: see `visible_rows`.
+                folds.insert(zoom, Fold::Leaf);
+            }
+            let scope_root = self.scope_root(outline).map(|b| b.id);
+            (self.visible_rows(outline), folds, scope_root)
         };
         self.blocks.retain(|id, _| folds.contains_key(id));
         self.block_subs.retain(|id, _| folds.contains_key(id));
@@ -1481,7 +1544,7 @@ impl Render for OutlineView {
                 this.update_indent_target(window, cx, Page::indent_block);
             }))
             .on_action(cx.listener(|this, _: &OutdentBlock, window, cx| {
-                this.update_indent_target(window, cx, Page::outdent_block);
+                this.outdent_target(window, cx);
             }))
             .on_action(cx.listener(|this, _: &MoveBlockUp, window, cx| {
                 this.update_focused_block(window, cx, Page::move_block_up);
@@ -1490,7 +1553,7 @@ impl Render for OutlineView {
                 this.update_focused_block(window, cx, Page::move_block_down);
             }))
             .on_action(cx.listener(|this, _: &ToggleCollapse, window, cx| {
-                this.update_focused_block(window, cx, Page::toggle_collapse);
+                this.toggle_focused_fold(window, cx);
             }))
             .on_action(cx.listener(|this, _: &DeleteBlock, window, cx| {
                 this.delete_block(window, cx);
@@ -1539,6 +1602,7 @@ impl Render for OutlineView {
         let reveal_row = self.reveal_row.take();
         for (row, ((depth, id), thread)) in flat.into_iter().zip(threads).enumerate() {
             let bv = self.get_or_create(id, window, cx);
+            bv.update(cx, |bv, _| bv.set_scope_root(scope_root == Some(id)));
             let on_toggle =
                 cx.listener(move |this, _, window, cx| this.toggle_fold(id, window, cx));
             let bullet = Self::row_bullet(id, bv.entity_id(), thread.on_path, folds[&id], cx);
@@ -3029,6 +3093,108 @@ mod tests {
         cx.simulate_keystrokes("enter home right shift-right enter");
         cx.run_until_parked();
         assert_eq!(serialized(cx), "- a\n  - child\n- cd\n- e\n");
+    }
+
+    /// Mounts `body` zoomed in on its first root.
+    fn mount_zoomed<'a>(
+        cx: &'a mut TestAppContext,
+        body: &str,
+    ) -> (Entity<Page>, Entity<OutlineView>, &'a mut VisualTestContext) {
+        let (page, ov, cx) = mount(cx, body);
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        ov.update(cx, |ov, cx| ov.set_zoom(Some(a), cx));
+        cx.run_until_parked();
+        (page, ov, cx)
+    }
+
+    /// Enter on a zoomed-in block opens its first child, not a sibling
+    /// outside the zoom.
+    #[gpui::test]
+    fn enter_on_a_zoomed_in_block_nests_the_new_block(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount_zoomed(cx, "- abcd\n  - child\n- e\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        let serialized =
+            |cx: &mut VisualTestContext| cx.read(|cx| page.read(cx).outline().serialize());
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter home right right enter");
+        cx.simulate_input("x");
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- ab\n  - xcd\n  - child\n- e\n");
+
+        // In front of the text, too: there is no room above the root.
+        cx.simulate_keystrokes("escape");
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter home enter");
+        cx.simulate_input("y");
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- ab\n  - y\n  - xcd\n  - child\n- e\n");
+    }
+
+    /// The same goes for a linked reference's block.
+    #[gpui::test]
+    fn enter_on_a_subtree_root_nests_the_new_block(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount_subtree(cx, "- a\n- b\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter enter");
+        cx.simulate_input("x");
+        cx.run_until_parked();
+        let outline = cx.read(|cx| page.read(cx).outline().clone());
+        assert_eq!(outline.roots.len(), 2, "no new sibling");
+        assert_eq!(outline.roots[0].children[0].text, "x");
+    }
+
+    /// Shift-tab on the zoomed-in block's child would make it the block's
+    /// sibling, outside the zoom, so it does nothing; deeper blocks outdent.
+    #[gpui::test]
+    fn shift_tab_cant_carry_a_block_out_of_a_zoom(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount_zoomed(cx, "- a\n  - a1\n    - a2\n- b\n");
+        let serialized =
+            |cx: &mut VisualTestContext| cx.read(|cx| page.read(cx).outline().serialize());
+        let (a1, a2) = cx.read(|cx| {
+            let a1 = &page.read(cx).outline().roots[0].children[0];
+            (a1.id, a1.children[0].id)
+        });
+
+        focus_block(cx, &ov, a1);
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- a\n  - a1\n    - a2\n- b\n");
+
+        focus_block(cx, &ov, a2);
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- a\n  - a1\n  - a2\n- b\n");
+
+        // Nor as part of a block selection.
+        focus_block(cx, &ov, a1);
+        cx.simulate_keystrokes("shift-down shift-tab");
+        cx.run_until_parked();
+        assert_eq!(serialized(cx), "- a\n  - a1\n  - a2\n- b\n");
+    }
+
+    /// Zooming in on a folded block shows its children; the fold itself is
+    /// left alone, so the page isn't edited by looking at it.
+    #[gpui::test]
+    fn zooming_in_on_a_folded_block_shows_its_children(cx: &mut TestAppContext) {
+        let (page, ov, cx) = mount(cx, "- a\n  - a1\n- b\n");
+        let (a, a1) = cx.read(|cx| {
+            let a = &page.read(cx).outline().roots[0];
+            (a.id, a.children[0].id)
+        });
+        page.update(cx, |page, cx| page.toggle_collapse(a, cx));
+        cx.run_until_parked();
+        let painted = |cx: &mut VisualTestContext, id: BlockId| {
+            cx.debug_bounds(format!("block-view-{id:?}").leak())
+                .is_some()
+        };
+        assert!(!painted(cx, a1), "folded away on the page");
+
+        ov.update(cx, |ov, cx| ov.set_zoom(Some(a), cx));
+        cx.run_until_parked();
+        assert!(painted(cx, a1), "shown when zoomed in");
+        assert!(cx.read(|cx| page.read(cx).outline().roots[0].collapsed));
     }
 
     /// Backspace at the start of a block merges it into the previous visible
