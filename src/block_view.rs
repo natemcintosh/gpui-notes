@@ -15,9 +15,10 @@
 use gpui::{
     actions, anchored, deferred, div, prelude::*, px, AnyElement, App, AppContext, Context, Corner,
     ElementId, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton,
-    ParentElement, Render, SharedString, Styled, Subscription, Window,
+    EntityInputHandler, ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
 
+use crate::assets::{self, ImagePaste};
 use crate::block_render::{render_block, theme};
 use crate::goto_word::{self, JumpSource};
 use crate::outline::{self, BlockId, Outline};
@@ -543,8 +544,22 @@ impl BlockView {
 
     /// Pastes clipboard outline markdown (a copied bullet with its children)
     /// as real blocks: the edit ends, the blocks land in the outline, and this
-    /// block keeps focus. Anything else falls through to the `TextInput`.
+    /// block keeps focus. Pasted images are saved to `assets/` and their links
+    /// typed at the caret. Anything else falls through to the `TextInput`.
     fn paste_blocks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match assets::paste_from_clipboard(cx) {
+            ImagePaste::NotImages => {}
+            ImagePaste::Failed => return cx.stop_propagation(),
+            ImagePaste::Saved(links) => {
+                cx.stop_propagation();
+                if let BlockMode::Editing { input, .. } = &self.mode {
+                    input.update(cx, |input, cx| {
+                        input.replace_text_in_range(None, &links, window, cx);
+                    });
+                }
+                return;
+            }
+        }
         let Some(pasted) = cx
             .read_from_clipboard()
             .and_then(|item| item.text())
@@ -1403,6 +1418,29 @@ mod tests {
                 "TextInput must hold focus after the click",
             );
         });
+    }
+
+    /// The image is drawn from `assets/`, and like the rest of the block a
+    /// click on it opens the editor on the raw link.
+    #[gpui::test]
+    fn clicking_a_rendered_image_enters_editing(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("assets")).unwrap();
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/docs/fixtures/assets/kitchen-sink.png"),
+            root.path().join("assets/shot.png"),
+        )
+        .unwrap();
+        let store = crate::store::NotesStore::new(root.path()).unwrap();
+        cx.update(|cx| cx.set_global(crate::registry::PageRegistry::new(store)));
+        let (_page, bv, cx) = mount(cx, "- ![shot.png](../assets/shot.png)\n");
+
+        let image = cx.debug_bounds("md-image").expect("image rendered");
+        assert!(image.size.height > px(0.), "{image:?}");
+        cx.simulate_click(image.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert_eq!(block_text(cx, &bv), "![shot.png](../assets/shot.png)");
     }
 
     #[gpui::test]

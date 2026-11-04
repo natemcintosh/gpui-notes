@@ -49,6 +49,9 @@ fn inline_features(nodes: &[InlineNode], out: &mut BTreeSet<String>) {
             InlineNode::Extension(ext) => {
                 out.insert(ext.kind.to_string());
             }
+            InlineNode::Image { .. } => {
+                out.insert("image".into());
+            }
             InlineNode::SoftBreak => {
                 out.insert("soft break".into());
             }
@@ -112,6 +115,7 @@ fn fixture_covers_every_rendered_feature() {
         "http link",
         "other link",
         "page-link",
+        "image",
         "soft break",
         "hard break",
         "h1",

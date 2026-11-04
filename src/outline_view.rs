@@ -15,6 +15,7 @@ use gpui::{
     Point, Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
+use crate::assets::{self, ImagePaste};
 use crate::autoscroll::{self, RevealBounds};
 use crate::block_render::theme;
 use crate::block_view::{BlockView, BlockViewEvent};
@@ -998,7 +999,8 @@ impl OutlineView {
 
     /// Pastes clipboard outline markdown as blocks after the selection, or
     /// after the focused-but-viewing block, and focuses the last pasted
-    /// block. Returns whether anything was pasted.
+    /// block. Pasted images are saved to `assets/` and linked from a new
+    /// block. Returns whether the paste was handled.
     fn paste_after_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(target) = self
             .selection_roots(cx)
@@ -1008,11 +1010,16 @@ impl OutlineView {
         else {
             return false;
         };
-        let Some(pasted) = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .and_then(|text| Outline::parse_blocks(&text))
-        else {
+        // Images go in as one new bullet holding their links.
+        let pasted = match assets::paste_from_clipboard(cx) {
+            ImagePaste::Saved(links) => Some(vec![Block::new(links)]),
+            ImagePaste::Failed => return true,
+            ImagePaste::NotImages => cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .and_then(|text| Outline::parse_blocks(&text)),
+        };
+        let Some(pasted) = pasted else {
             return false;
         };
         let last = pasted.last().map(|b| b.id);
@@ -2696,6 +2703,99 @@ mod tests {
         cx.run_until_parked();
 
         cx.read(|cx| assert_eq!(page.read(cx).outline().serialize(), "- abc\n"));
+    }
+
+    /// Gives the test a graph to save pasted images into; returns the one
+    /// link a paste should produce once `assets/` holds a single file.
+    fn with_graph(cx: &mut TestAppContext) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::NotesStore::new(root.path()).unwrap();
+        cx.update(|cx| {
+            cx.set_global(PageRegistry::new(store));
+            cx.set_global(crate::errors::LastError::default());
+        });
+        root
+    }
+
+    fn only_asset_link(root: &std::path::Path, alt: &str) -> String {
+        let names: Vec<String> = std::fs::read_dir(root.join("assets"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 1, "one file saved: {names:?}");
+        format!("![{alt}](../assets/{})", names[0])
+    }
+
+    fn copy_png(cx: &mut VisualTestContext) {
+        let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, b"png".to_vec());
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image)));
+    }
+
+    #[gpui::test]
+    fn pasting_an_image_mid_edit_links_it_at_the_caret(cx: &mut TestAppContext) {
+        let root = with_graph(cx);
+        let (page, ov, cx) = mount(cx, "- ab\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        copy_png(cx);
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter left");
+        cx.simulate_keystrokes(&format!("{}-v", crate::cmd_key()));
+        cx.run_until_parked();
+
+        let link = only_asset_link(root.path(), "image.png");
+        assert!(link.starts_with("![image.png](../assets/image_"), "{link}");
+        cx.read(|cx| {
+            assert_eq!(page.read(cx).outline().roots[0].text, format!("a{link}b"));
+        });
+    }
+
+    #[gpui::test]
+    fn pasting_an_image_onto_a_viewed_block_adds_a_bullet(cx: &mut TestAppContext) {
+        let root = with_graph(cx);
+        let (page, ov, cx) = mount(cx, "- a\n- b\n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        copy_png(cx);
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes(&format!("{}-v", crate::cmd_key()));
+        cx.run_until_parked();
+
+        let link = only_asset_link(root.path(), "image.png");
+        cx.read(|cx| {
+            assert_eq!(
+                page.read(cx).outline().serialize(),
+                format!("- a\n- {link}\n- b\n")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn pasting_a_copied_image_file_copies_it_into_assets(cx: &mut TestAppContext) {
+        let root = with_graph(cx);
+        let src = root.path().join("shot.jpg");
+        std::fs::write(&src, b"jpg").unwrap();
+        let (page, ov, cx) = mount(cx, "- \n");
+        let a = cx.read(|cx| page.read(cx).outline().roots[0].id);
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem {
+                entries: vec![
+                    gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(
+                        [src.clone()].into_iter().collect(),
+                    )),
+                    "shot.jpg".to_string().into(),
+                ],
+            });
+        });
+
+        focus_block(cx, &ov, a);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_keystrokes(&format!("{}-v", crate::cmd_key()));
+        cx.run_until_parked();
+
+        let link = only_asset_link(root.path(), "shot.jpg");
+        cx.read(|cx| assert_eq!(page.read(cx).outline().roots[0].text, link));
+        assert!(src.exists(), "the original stays where it was");
     }
 
     /// Multi-line plain text keeps its line breaks instead of being joined

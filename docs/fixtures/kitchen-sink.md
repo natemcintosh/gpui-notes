@@ -45,6 +45,9 @@ tags:: fixture, qa
 
   This is a second paragraph after a blank line.
 - A long paragraph has to wrap at the window edge rather than run off it or collapse into a narrow column. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua, with **bold**, *italic*, `code` and a [[kitchen-sink]] link along the way.
+- An image renders as wide as the block, but never wider than the file, under this line:
+  ![kitchen-sink.png](../assets/kitchen-sink.png)
+  A missing file shows its alt text, muted: ![missing.png](../assets/missing.png)
 - Unicode: café, naïve, 日本語, emoji 🎉.
 -
 - The bullet above is an empty block, saved as a bare `-`.

@@ -8,6 +8,7 @@ To check it by eye, open it as a page in a throwaway notes root:
 
 ```sh
 root=$(mktemp -d) && mkdir "$root/pages" && cp docs/fixtures/kitchen-sink.md "$root/pages/" \
+  && cp -R docs/fixtures/assets "$root/" \
   && GPUI_NOTES_ROOT="$root" cargo run --release
 ```
 

@@ -16,18 +16,20 @@
 //! block that had to wrap collapsed into a one-character-wide column.
 
 use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    canvas, div, prelude::FluentBuilder, px, Action, AnyElement, App, ElementId, FontStyle,
-    FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, Rgba,
-    SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledText, TextLayout,
+    canvas, div, img, prelude::FluentBuilder, px, Action, AnyElement, App, ElementId, FontStyle,
+    FontWeight, ImgResourceLoader, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    Pixels, Point, Resource, Rgba, SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledText, TextLayout,
     TextRun, TextStyle, UnderlineStyle, Window,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::goto_word::{self, JumpSource};
-use crate::{calc, syntax};
+use crate::registry::PageRegistry;
+use crate::{assets, calc, syntax};
 
 /// Compatibility re-export for existing block-render callers. New code should
 /// import [`crate::theme`] directly.
@@ -52,6 +54,12 @@ pub enum InlineNode {
         children: Vec<InlineNode>,
     },
     Extension(ExtensionNode),
+    /// `![alt](url)` naming a local file `img` can display
+    /// (`assets::is_image_link`); other image links stay their alt text.
+    Image {
+        url: SharedString,
+        alt: String,
+    },
     SoftBreak,
     HardBreak,
 }
@@ -184,6 +192,10 @@ pub fn lower(text: &str, extensions: &[&dyn InlineExtension]) -> Vec<BlockNode> 
                     inline_stack.push(Vec::new());
                     inline_ctx.push(InlineCtx::Link(SharedString::from(dest_url.into_string())));
                 }
+                Tag::Image { dest_url, .. } if assets::is_image_link(&dest_url) => {
+                    inline_stack.push(Vec::new());
+                    inline_ctx.push(InlineCtx::Image(SharedString::from(dest_url.into_string())));
+                }
                 // Lists and items: outline owns bullet structure; ignore.
                 // Other unsupported tags fall through to be rendered as their text children.
                 _ => {}
@@ -237,6 +249,16 @@ pub fn lower(text: &str, extensions: &[&dyn InlineExtension]) -> Vec<BlockNode> 
                     };
                     push_inline(&mut inline_stack, InlineNode::Link { url, children });
                 }
+                // Only an image `Tag::Image` accepted pushed a context; the
+                // others' alt text has already gone into the enclosing run.
+                TagEnd::Image if matches!(inline_ctx.last(), Some(InlineCtx::Image(_))) => {
+                    let children = inline_stack.pop().unwrap_or_default();
+                    let Some(InlineCtx::Image(url)) = inline_ctx.pop() else {
+                        unreachable!("checked by the guard");
+                    };
+                    let alt = plain_text(&children);
+                    push_inline(&mut inline_stack, InlineNode::Image { url, alt });
+                }
                 _ => {}
             },
             Event::Text(s) => {
@@ -284,6 +306,22 @@ enum InlineCtx {
     Paragraph,
     Heading(u8),
     Link(SharedString),
+    Image(SharedString),
+}
+
+/// The text of `nodes` with all styling dropped, for an image's alt text.
+fn plain_text(nodes: &[InlineNode]) -> String {
+    let mut out = String::new();
+    for node in nodes {
+        match node {
+            InlineNode::Text { text, .. } | InlineNode::Code(text) => out.push_str(text),
+            InlineNode::Link { children, .. } => out.push_str(&plain_text(children)),
+            InlineNode::Extension(node) => out.push_str(&node.source),
+            InlineNode::Image { alt, .. } => out.push_str(alt),
+            InlineNode::SoftBreak | InlineNode::HardBreak => out.push(' '),
+        }
+    }
+    out
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
@@ -394,6 +432,9 @@ pub fn render_block(
         paragraph_counter: 0,
         extensions,
         jump,
+        notes_root: cx
+            .try_global::<PageRegistry>()
+            .map(|registry| registry.root().to_path_buf()),
     };
     let mut root = div().flex().flex_col().gap_1().text_color(theme::fg());
     for block in blocks {
@@ -414,6 +455,8 @@ struct RenderCtx<'a> {
     paragraph_counter: usize,
     extensions: &'a [&'a dyn InlineExtension],
     jump: Option<JumpSource>,
+    /// Where image links resolve; without a graph they show their alt text.
+    notes_root: Option<PathBuf>,
 }
 
 fn render_block_node(
@@ -695,6 +738,11 @@ impl Paragraph {
                     self.push(&node.source, style, |_| {});
                 }
             },
+            // Only an image nested in a link lands here; `render_paragraph`
+            // pulls the rest out onto rows of their own.
+            InlineNode::Image { alt, .. } => {
+                self.push(&alt, style, |_| {});
+            }
             InlineNode::SoftBreak => {
                 self.push(" ", style, |_| {});
             }
@@ -715,7 +763,105 @@ fn target_at(
     targets.iter().position(|(range, _)| range.contains(&ix))
 }
 
+/// A paragraph's text, with each image it holds on a row of its own: an
+/// image can't sit inside shaped text, so it splits the text around it.
 fn render_paragraph(
+    nodes: Vec<InlineNode>,
+    ctx: &mut RenderCtx<'_>,
+    style: RunStyle,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    if !nodes
+        .iter()
+        .any(|node| matches!(node, InlineNode::Image { .. }))
+    {
+        return render_text(nodes, ctx, style, window, cx);
+    }
+    let mut column = div().flex().flex_col().gap_1().w_full();
+    let mut text = Vec::new();
+    for node in nodes {
+        if let InlineNode::Image { url, alt } = node {
+            let before = std::mem::take(&mut text);
+            if has_content(&before) {
+                column = column.child(render_text(before, ctx, style, window, cx));
+            }
+            column = column.child(render_image(&url, alt, ctx, style, window, cx));
+        } else {
+            text.push(node);
+        }
+    }
+    if has_content(&text) {
+        column = column.child(render_text(text, ctx, style, window, cx));
+    }
+    column.into_any_element()
+}
+
+/// Whether text left between images shows anything; the line break or
+/// space beside an image would otherwise become an empty row.
+fn has_content(nodes: &[InlineNode]) -> bool {
+    nodes.iter().any(|node| match node {
+        InlineNode::Text { text, .. } => !text.trim().is_empty(),
+        InlineNode::SoftBreak | InlineNode::HardBreak => false,
+        _ => true,
+    })
+}
+
+/// An image as wide as the block, never wider than the file itself, keeping
+/// its proportions. A missing or unreadable file shows its alt text.
+fn render_image(
+    url: &str,
+    alt: String,
+    ctx: &mut RenderCtx<'_>,
+    style: RunStyle,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let Some(root) = ctx.notes_root.as_deref() else {
+        return render_alt(alt, ctx, style, window, cx);
+    };
+    let resource = Resource::Path(assets::resolve(root, url).into());
+    match window.use_asset::<ImgResourceLoader>(&resource, cx) {
+        Some(Ok(image)) => {
+            let size = image.size(0);
+            #[allow(clippy::cast_precision_loss)] // Image sides are far below f32's exact range.
+            let (width, height) = (size.width.0 as f32, size.height.0.max(1) as f32);
+            // The width is the one that's set, so `aspect_ratio` derives the
+            // height from it; `img` alone would keep the file's own height.
+            div()
+                .debug_selector(|| "md-image".into())
+                .w_full()
+                .max_w(px(width))
+                .aspect_ratio(width / height)
+                .child(img(image).size_full())
+                .into_any_element()
+        }
+        // Still loading: `use_asset` redraws the view once it's done.
+        None => div().into_any_element(),
+        Some(Err(_)) => render_alt(alt, ctx, style, window, cx),
+    }
+}
+
+fn render_alt(
+    alt: String,
+    ctx: &mut RenderCtx<'_>,
+    style: RunStyle,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let muted = RunStyle {
+        color: Some(theme::fg_muted()),
+        ..style
+    };
+    let alt = InlineNode::Text {
+        text: alt,
+        style: Style::default(),
+    };
+    render_text(vec![alt], ctx, muted, window, cx)
+}
+
+/// Text as one shaped element, with its clickable ranges.
+fn render_text(
     nodes: Vec<InlineNode>,
     ctx: &mut RenderCtx<'_>,
     style: RunStyle,
@@ -821,6 +967,39 @@ mod tests {
                 strikethrough: false,
             },
         }
+    }
+
+    fn image(url: &'static str, alt: &str) -> InlineNode {
+        InlineNode::Image {
+            url: url.into(),
+            alt: alt.into(),
+        }
+    }
+
+    #[test]
+    fn a_local_image_link_lowers_to_an_image() {
+        let inlines = paragraph(lower_no_ext("see ![shot *1*](../assets/a.png) here"));
+        assert_eq!(
+            inlines,
+            vec![
+                plain("see "),
+                image("../assets/a.png", "shot 1"),
+                plain(" here")
+            ]
+        );
+    }
+
+    /// PDFs and web images aren't displayed yet, so they stay their alt text.
+    #[test]
+    fn other_image_links_stay_their_alt_text() {
+        assert_eq!(
+            paragraph(lower_no_ext("![nobbs.pdf](../assets/nobbs.pdf)")),
+            vec![plain("nobbs.pdf")]
+        );
+        assert_eq!(
+            paragraph(lower_no_ext("![cat](https://example.com/cat.png)")),
+            vec![plain("cat")]
+        );
     }
 
     #[test]
