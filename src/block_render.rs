@@ -22,8 +22,8 @@ use std::rc::Rc;
 use gpui::{
     canvas, div, img, prelude::FluentBuilder, px, Action, AnyElement, App, ElementId, FontStyle,
     FontWeight, ImgResourceLoader, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Pixels, Point, Resource, Rgba, SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledText, TextLayout,
-    TextRun, TextStyle, UnderlineStyle, Window,
+    Pixels, Point, Resource, Rgba, SharedString, StatefulInteractiveElement, StrikethroughStyle,
+    Styled, StyledText, TextLayout, TextRun, TextStyle, UnderlineStyle, Window,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 

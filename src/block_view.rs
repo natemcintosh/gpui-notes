@@ -14,8 +14,8 @@
 
 use gpui::{
     actions, anchored, deferred, div, prelude::*, px, AnyElement, App, AppContext, Context, Corner,
-    ElementId, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton,
-    EntityInputHandler, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    ElementId, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, IntoElement,
+    KeyBinding, MouseButton, ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
 
 use crate::assets::{self, ImagePaste};
@@ -1427,7 +1427,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("assets")).unwrap();
         std::fs::copy(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/docs/fixtures/assets/kitchen-sink.png"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/docs/fixtures/assets/kitchen-sink.png"
+            ),
             root.path().join("assets/shot.png"),
         )
         .unwrap();

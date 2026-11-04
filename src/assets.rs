@@ -252,7 +252,10 @@ mod tests {
         );
         let first = save(root.path(), &[PastedImage::Data(png(b"c"))], 5).unwrap();
         assert_eq!(first, "![image.png](../assets/image_5_2.png)");
-        assert_eq!(fs::read(root.path().join("assets/image_5_0.png")).unwrap(), b"a");
+        assert_eq!(
+            fs::read(root.path().join("assets/image_5_0.png")).unwrap(),
+            b"a"
+        );
     }
 
     #[test]
@@ -277,15 +280,16 @@ mod tests {
     }
 
     fn files(paths: &[&str]) -> ClipboardEntry {
-        ClipboardEntry::ExternalPaths(ExternalPaths(
-            paths.iter().map(PathBuf::from).collect(),
-        ))
+        ClipboardEntry::ExternalPaths(ExternalPaths(paths.iter().map(PathBuf::from).collect()))
     }
 
     #[test]
     fn only_displayable_files_count() {
         let item = ClipboardItem {
-            entries: vec![files(&["/a/doc.pdf", "/a/shot.JPG"]), "doc.pdf".to_string().into()],
+            entries: vec![
+                files(&["/a/doc.pdf", "/a/shot.JPG"]),
+                "doc.pdf".to_string().into(),
+            ],
         };
         let images = clipboard_images(&item);
         assert!(matches!(&images[..], [PastedImage::File(p)] if p.ends_with("shot.JPG")));
@@ -298,7 +302,10 @@ mod tests {
 
     #[test]
     fn image_data_with_text_beside_it_pastes_as_text() {
-        assert_eq!(clipboard_images(&ClipboardItem::new_image(&png(b"x"))).len(), 1);
+        assert_eq!(
+            clipboard_images(&ClipboardItem::new_image(&png(b"x"))).len(),
+            1
+        );
         let both = ClipboardItem {
             entries: vec!["cells".to_string().into(), png(b"x").into()],
         };
