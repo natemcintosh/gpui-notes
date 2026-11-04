@@ -6,7 +6,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 use gpui::{App, ClipboardEntry, ClipboardItem, Image, ImageFormat, Img};
@@ -128,15 +128,39 @@ pub fn save(root: &Path, images: &[PastedImage], millis: i64) -> io::Result<Stri
     Ok(links.join("\n"))
 }
 
-/// Whether a markdown image link points at a local file `img` can display.
-/// Anything else (a PDF, a web URL) keeps rendering as its alt text.
+/// Whether a markdown image link points at a file inside the graph that
+/// `img` can display. Anything else (a PDF, a web URL, a path outside the
+/// graph) keeps rendering as its alt text.
 #[must_use]
 pub fn is_image_link(url: &str) -> bool {
-    !url.contains("://") && is_displayable(Path::new(url))
+    !url.contains("://") && stays_in_graph(url) && is_displayable(Path::new(url))
 }
 
-/// The file an image link names. Relative links resolve against `pages/`,
-/// which stands in for `journals/`: both are one level below the root.
+/// Whether `url`, resolved from `pages/`, stays inside the graph: relative,
+/// and never climbing above the root. Otherwise a note from someone else
+/// could have the app read any file, or on Windows connect to the server a
+/// `\\server\share` path names and send it the user's credentials. Checked
+/// on the text alone, since this runs on every render.
+fn stays_in_graph(url: &str) -> bool {
+    // Inside `pages/`, one level below the root.
+    let mut depth = 1usize;
+    for component in Path::new(url).components() {
+        match component {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir => match depth.checked_sub(1) {
+                Some(up) => depth = up,
+                None => return false,
+            },
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
+}
+
+/// The file an image link names, for a link `is_image_link` accepted. Links
+/// resolve against `pages/`, which stands in for `journals/`: both are one
+/// level below the root.
 #[must_use]
 pub fn resolve(root: &Path, url: &str) -> PathBuf {
     root.join("pages").join(url)
@@ -288,7 +312,19 @@ mod tests {
     #[case("../assets/nobbs_1_0.pdf", false)]
     #[case("https://example.com/cat.png", false)]
     #[case("../assets/noext", false)]
+    #[case("assets/../../assets/a.png", true)]
+    #[case("../../outside.png", false)]
+    #[case("../assets/../../outside.png", false)]
+    #[case("/Users/me/secret.png", false)]
     fn image_links(#[case] url: &str, #[case] expected: bool) {
         assert_eq!(is_image_link(url), expected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_and_share_paths_are_not_image_links() {
+        assert!(!is_image_link(r"\\server\share\x.png"));
+        assert!(!is_image_link(r"C:\x.png"));
+        assert!(!is_image_link(r"..\..\x.png"));
     }
 }
