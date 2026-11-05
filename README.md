@@ -36,10 +36,10 @@ cargo install --locked --git https://github.com/natemcintosh/gpui-notes gpui-not
 
 The Linux binaries need:
 
-- **A Wayland session.** X11 is not supported: only GPUI's Wayland backend is compiled in, and under X11 the app starts with no window and no error message.
+- **A Wayland or X11 session.** Both GPUI backends are compiled in, and the backend is picked at runtime from `WAYLAND_DISPLAY`/`DISPLAY`: Wayland wins when both are set.
 - **glibc 2.39 or newer** (Ubuntu 24.04, Fedora 40, Debian 13 or later), because the binaries are built on Ubuntu 24.04. Older systems fail at launch with `GLIBC_2.39 not found`; build from source there instead.
 - **A Vulkan driver** (`libvulkan.so.1` plus Mesa's or your GPU vendor's driver), or EGL as a fallback. These are loaded at runtime, so `ldd` won't list them.
-- **`libxkbcommon` and `libwayland-client`**, which any Wayland desktop already has.
+- **`libxkbcommon` and `libwayland-client`** on Wayland, **`libxkbcommon` and `libxkbcommon-x11`** on X11 — whichever desktop you run already has them.
 
 Fonts are read straight from the system font directories, so the fontconfig library isn't needed at runtime.
 
@@ -94,6 +94,6 @@ To keep builds reproducible, we **pin both crates to a specific `rev`** in `Carg
 
 - Never depend on the floating `main` branch. Always use `rev = "..."`.
 - Both `gpui` and `gpui_platform` must share the same `rev`, or Cargo will pull two copies of the Zed workspace.
-- `gpui_platform` is declared per-target so each OS gets the right backend features: `runtime_shaders` + `font-kit` on macOS, `wayland` on Linux/FreeBSD, none on Windows. The `font-kit` feature is **required on macOS** — without it `gpui_macos` falls back to a `NoopTextSystem` and text shapes but never paints (cursor still renders, so it looks like a styling bug).
+- `gpui_platform` is declared per-target so each OS gets the right backend features: `runtime_shaders` + `font-kit` on macOS, `wayland` + `x11` on Linux/FreeBSD, none on Windows. The `font-kit` feature is **required on macOS** — without it `gpui_macos` falls back to a `NoopTextSystem` and text shapes but never paints (cursor still renders, so it looks like a styling bug).
 - To bump: pick a new commit from `zed-industries/zed`, update both `rev` values, run `cargo update -p gpui -p gpui_platform`, then `cargo check`. Expect to fix API breakage; check the relevant example in `zed/crates/gpui/examples/` for the current idiomatic usage.
 - Commit the resulting `Cargo.lock` change alongside the `Cargo.toml` bump.

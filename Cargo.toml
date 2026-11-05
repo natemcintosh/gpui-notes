@@ -32,7 +32,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3", features = ["wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3", features = ["wayland", "x11"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3" }
