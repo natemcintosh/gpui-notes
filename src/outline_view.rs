@@ -278,8 +278,7 @@ impl OutlineView {
     /// become its siblings, outside this view.
     fn pinned_blocks(&self, cx: &App) -> Vec<BlockId> {
         self.scope_root(self.page.read(cx).outline())
-            .map(|root| root.children.iter().map(|c| c.id).collect())
-            .unwrap_or_default()
+            .map_or_default(|root| root.children.iter().map(|c| c.id).collect())
     }
 
     /// The block a page view is zoomed in on, if any.
@@ -1212,8 +1211,7 @@ impl OutlineView {
     fn selected_ids_for_test(&self, cx: &App) -> Vec<BlockId> {
         let flat = self.visible_rows(self.page.read(cx).outline());
         self.selected_rows(&flat)
-            .map(|rows| flat[rows].iter().map(|&(_, id)| id).collect())
-            .unwrap_or_default()
+            .map_or_default(|rows| flat[rows].iter().map(|&(_, id)| id).collect())
     }
 
     #[must_use]

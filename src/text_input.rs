@@ -696,8 +696,7 @@ impl TextInput {
         let word = &self.content[range.clone()];
         let suggestions = cx
             .try_global::<SpellChecker>()
-            .map(|checker| checker.suggest(word))
-            .unwrap_or_default();
+            .map_or_default(|checker| checker.suggest(word));
         self.spell_menu = Some(SpellMenu {
             word: word.to_string().into(),
             range,

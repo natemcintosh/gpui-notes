@@ -304,9 +304,8 @@ impl SearchView {
         let input = cx.new(|cx| TextInput::new(cx, "Search all notes…"));
         let sub = cx.subscribe(&input, |this, _input, event, cx| match event {
             TextInputEvent::Changed(query) => {
-                this.results = Query::parse(query)
-                    .map(|query| this.corpus.search(&query))
-                    .unwrap_or_default();
+                this.results =
+                    Query::parse(query).map_or_default(|query| this.corpus.search(&query));
                 this.selected = 0;
                 cx.notify();
             }
