@@ -893,6 +893,7 @@ fn main() {
         // entry, so the back stack starts empty.
         journal::open_journals(cx).expect("open journals");
 
+        theme::set(cx.window_appearance().into(), cx);
         let bounds = Bounds::centered(None, size(px(640.0), px(420.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -902,6 +903,19 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
+                // Follow the desktop's light/dark switch, overriding a manual
+                // toggle. gpui also fires this for unrelated window-control
+                // changes, so act only when the appearance really changed.
+                let mut last = window.appearance();
+                window
+                    .observe_window_appearance(move |window, cx| {
+                        let appearance = window.appearance();
+                        if appearance != last {
+                            last = appearance;
+                            theme::set(appearance.into(), cx);
+                        }
+                    })
+                    .detach();
                 let root = cx.new(RootView::new);
                 root.update(cx, |view, cx| view.park_focus(window, cx));
                 cx.activate(true);
