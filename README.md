@@ -56,7 +56,7 @@ That build includes both backends and picks one at startup: Wayland if `WAYLAND_
 - **`libxcb` and `libxkbcommon-x11` are required in every session, Wayland included.** The binary links them directly, so without them it won't start at all (`error while loading shared libraries`). Most desktops already have them.
 - **Building needs their development packages:** `libxcb1-dev` and `libxkbcommon-x11-dev` on Debian/Ubuntu, `libxcb-devel` and `libxkbcommon-x11-devel` on Fedora.
 
-X11 is community-supported: CI doesn't build the `x11` feature and the maintainer runs Wayland, so X11-specific bugs (input methods, clipboard, scaling) may go unnoticed.
+X11 is community-supported. CI builds the `x11` feature and runs the tests with it, but the tests are headless and never open an X11 window, and the maintainer runs Wayland, so X11-specific bugs (input methods, clipboard, scaling) may go unnoticed.
 
 Upgrading replaces only the binary. Your notes and settings are kept, because neither is stored next to the binary.
 

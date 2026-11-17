@@ -10,9 +10,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Every entry is listed under `include` so the x11 one becomes its own
+        # job. Next to an `os: [...]` list it would instead add `features` to
+        # the existing ubuntu job.
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          # The opt-in `x11` feature (see README "X11 (opt-in)").
+          - os: ubuntu-latest
+            features: x11
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      # Empty for the default jobs; `--features ""` enables nothing.
+      FEATURES: ${{ matrix.features }}
     steps:
       - uses: actions/checkout@v6
 
@@ -28,15 +39,20 @@ jobs:
             libwayland-dev \
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
+            libxcb1-dev \
             libfontconfig1-dev \
             libfreetype-dev \
             pkg-config
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The matrix isn't part of the cache key, so without this both
+          # ubuntu jobs would share (and overwrite) one cache.
+          key: ${{ matrix.features }}
 
       - uses: taiki-e/install-action@nextest
 
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings -W clippy::pedantic
-      - run: cargo build
-      - run: cargo nextest run
+      - run: cargo clippy --all-targets --features "$FEATURES" -- -D warnings -W clippy::pedantic
+      - run: cargo build --features "$FEATURES"
+      - run: cargo nextest run --features "$FEATURES"
