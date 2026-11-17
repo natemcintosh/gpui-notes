@@ -88,27 +88,26 @@ const SELECTION_CONTEXT: &str = "OutlineView && !BlockView";
 const EXTEND_CONTEXT: &str = "OutlineView && !TextInput";
 
 pub fn bind_keys(cx: &mut App) {
-    let cmd = crate::cmd_key();
     cx.bind_keys([
         KeyBinding::new("up", FocusUp, Some(BLOCK_CONTEXT)),
         KeyBinding::new("down", FocusDown, Some(BLOCK_CONTEXT)),
         KeyBinding::new("tab", IndentBlock, Some(BLOCK_CONTEXT)),
         KeyBinding::new("shift-tab", OutdentBlock, Some(BLOCK_CONTEXT)),
-        KeyBinding::new(&format!("{cmd}-shift-up"), MoveBlockUp, Some(BLOCK_CONTEXT)),
+        KeyBinding::new(crate::cmd!("shift-up"), MoveBlockUp, Some(BLOCK_CONTEXT)),
         KeyBinding::new(
-            &format!("{cmd}-shift-down"),
+            crate::cmd!("shift-down"),
             MoveBlockDown,
             Some(BLOCK_CONTEXT),
         ),
-        KeyBinding::new(&format!("{cmd}-enter"), ToggleCollapse, Some(BLOCK_CONTEXT)),
+        KeyBinding::new(crate::cmd!("enter"), ToggleCollapse, Some(BLOCK_CONTEXT)),
         KeyBinding::new("backspace", DeleteBlock, Some(BLOCK_CONTEXT)),
         KeyBinding::new("delete", DeleteBlock, Some(BLOCK_CONTEXT)),
         // Undo/redo work mid-edit too: the editor ends, the page steps, and
         // editing resumes on the block the step touched.
-        KeyBinding::new(&format!("{cmd}-z"), Undo, Some("BlockView")),
-        KeyBinding::new(&format!("{cmd}-shift-z"), Redo, Some("BlockView")),
-        KeyBinding::new(&format!("{cmd}-z"), Undo, Some(SELECTION_CONTEXT)),
-        KeyBinding::new(&format!("{cmd}-shift-z"), Redo, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(crate::cmd!("z"), Undo, Some("BlockView")),
+        KeyBinding::new(crate::cmd!("shift-z"), Redo, Some("BlockView")),
+        KeyBinding::new(crate::cmd!("z"), Undo, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(crate::cmd!("shift-z"), Redo, Some(SELECTION_CONTEXT)),
         // Mid-edit, Tab indents only from the very start of the block (the
         // handler checks the caret); elsewhere it does nothing.
         KeyBinding::new("tab", IndentBlock, Some(EDITING_CONTEXT)),
@@ -116,12 +115,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", ClearBlockSelection, Some("OutlineView")),
         KeyBinding::new("shift-up", ExtendSelectionUp, Some(EXTEND_CONTEXT)),
         KeyBinding::new("shift-down", ExtendSelectionDown, Some(EXTEND_CONTEXT)),
-        KeyBinding::new(&format!("{cmd}-c"), CopyBlocks, Some(SELECTION_CONTEXT)),
-        KeyBinding::new(&format!("{cmd}-c"), CopyBlocks, Some(BLOCK_CONTEXT)),
-        KeyBinding::new(&format!("{cmd}-x"), CutBlocks, Some(SELECTION_CONTEXT)),
-        KeyBinding::new(&format!("{cmd}-x"), CutBlocks, Some(BLOCK_CONTEXT)),
-        KeyBinding::new(&format!("{cmd}-v"), PasteBlocks, Some(SELECTION_CONTEXT)),
-        KeyBinding::new(&format!("{cmd}-v"), PasteBlocks, Some(BLOCK_CONTEXT)),
+        KeyBinding::new(crate::cmd!("c"), CopyBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(crate::cmd!("c"), CopyBlocks, Some(BLOCK_CONTEXT)),
+        KeyBinding::new(crate::cmd!("x"), CutBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(crate::cmd!("x"), CutBlocks, Some(BLOCK_CONTEXT)),
+        KeyBinding::new(crate::cmd!("v"), PasteBlocks, Some(SELECTION_CONTEXT)),
+        KeyBinding::new(crate::cmd!("v"), PasteBlocks, Some(BLOCK_CONTEXT)),
         KeyBinding::new("backspace", DeleteBlocks, Some(SELECTION_CONTEXT)),
         KeyBinding::new("delete", DeleteBlocks, Some(SELECTION_CONTEXT)),
         KeyBinding::new("tab", IndentBlocks, Some(SELECTION_CONTEXT)),
@@ -1966,7 +1965,7 @@ mod tests {
             // rendered_frame focus path. Without this, the next focus
             // change can't be detected as a blur — the focus listener
             // compares against the rendered_frame's path.
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         cx.run_until_parked();
         cx.read(|cx| {
@@ -1979,7 +1978,7 @@ mod tests {
         cx.update(|window, cx| {
             let other = ov.update(cx, |o, cx| o.get_or_create(second_id, window, cx));
             window.focus(&other.focus_handle(cx), cx);
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         cx.run_until_parked();
 

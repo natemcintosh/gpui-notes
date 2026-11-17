@@ -13,7 +13,7 @@
 //! state to drift out of sync and every save path sees in-flight edits (#38).
 
 use gpui::{
-    actions, anchored, deferred, div, prelude::*, px, AnyElement, App, AppContext, Context, Corner,
+    actions, anchored, deferred, div, prelude::*, px, Anchor, AnyElement, App, AppContext, Context,
     ElementId, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyBinding, MouseButton, ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
@@ -664,7 +664,7 @@ impl BlockView {
         Some(
             deferred(
                 anchored()
-                    .anchor(Corner::TopLeft)
+                    .anchor(Anchor::TopLeft)
                     .snap_to_window_with_margin(px(8.0))
                     .when_some(caret, |el, caret| el.position(caret.bottom_left()))
                     .child(list),

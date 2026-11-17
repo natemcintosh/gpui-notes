@@ -1,8 +1,9 @@
 #![allow(clippy::unreadable_literal)]
 
 /// The platform's primary modifier for keybindings: `cmd` on macOS, `ctrl`
-/// elsewhere. Every platform-specific `bind_keys` site goes through this;
-/// shortcut UI renders the registered keystrokes themselves at runtime.
+/// elsewhere. Every platform-specific `bind_keys` site goes through this, via
+/// [`cmd!`]; shortcut UI renders the registered keystrokes themselves at
+/// runtime.
 #[must_use]
 pub fn cmd_key() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -10,6 +11,21 @@ pub fn cmd_key() -> &'static str {
     } else {
         "ctrl"
     }
+}
+
+/// [`cmd_key`] joined to the rest of a keystroke at compile time:
+/// `cmd!("shift-z")` is `"cmd-shift-z"` on macOS and `"ctrl-shift-z"`
+/// elsewhere. `KeyBinding::new` takes a `&'static str`, so bindings can't
+/// use a runtime `format!`.
+#[macro_export]
+macro_rules! cmd {
+    ($keys:literal) => {
+        if cfg!(target_os = "macos") {
+            concat!("cmd-", $keys)
+        } else {
+            concat!("ctrl-", $keys)
+        }
+    };
 }
 
 pub mod assets;
