@@ -36,7 +36,7 @@ cargo install --locked --git https://github.com/natemcintosh/gpui-notes gpui-not
 
 The Linux binaries need:
 
-- **A Wayland session.** Only GPUI's Wayland backend is compiled in by default, and under X11 the app starts with no window and no error message. For X11, build with the `x11` feature (see below).
+- **A Wayland session.** Only GPUI's Wayland backend is compiled in by default, and under X11 the app starts with no window and no error message. For X11, use the `x11` build (see below).
 - **glibc 2.39 or newer** (Ubuntu 24.04, Fedora 40, Debian 13 or later), because the binaries are built on Ubuntu 24.04. Older systems fail at launch with `GLIBC_2.39 not found`; build from source there instead.
 - **A Vulkan driver** (`libvulkan.so.1` plus Mesa's or your GPU vendor's driver), or EGL as a fallback. These are loaded at runtime, so `ldd` won't list them.
 - **`libxkbcommon` and `libwayland-client`**, which any Wayland desktop already has.
@@ -45,7 +45,7 @@ Fonts are read straight from the system font directories, so the fontconfig libr
 
 #### X11 (opt-in)
 
-X11 support is behind the `x11` Cargo feature. There is no prebuilt binary for it, so build from source:
+X11 support is behind the `x11` Cargo feature. `cargo binstall` always installs the default Wayland-only build, so either download the x11 build from the [releases page](https://github.com/natemcintosh/gpui-notes/releases) (`gpui-notes-<target>-x11-v<version>.tar.gz`, for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`) and put the `gpui-notes` binary on your `PATH`, or build from source:
 
 ```sh
 cargo install --locked --features x11 --git https://github.com/natemcintosh/gpui-notes gpui-notes
