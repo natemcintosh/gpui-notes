@@ -9,7 +9,7 @@ use gpui::{
     ParentElement, Render, SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions,
 };
 use gpui_notes::block_view;
-use gpui_notes::cmd_key;
+use gpui_notes::cmd;
 use gpui_notes::errors::{self, LastError};
 use gpui_notes::goto_word::{self, GotoWord, Labels, Step};
 use gpui_notes::history::{self, NavHistory, NavTarget, OpenTarget};
@@ -815,25 +815,24 @@ fn main() {
         page_picker::bind_keys(cx);
         search::bind_keys(cx);
         goto_word::bind_keys(cx);
-        let cmd = cmd_key();
         cx.bind_keys([
-            KeyBinding::new(&format!("{cmd}-s"), SavePage, Some("RootView")),
-            KeyBinding::new(&format!("{cmd}-p"), NextPage, Some("RootView")),
-            KeyBinding::new(&format!("{cmd}-."), JumpToToday, Some("RootView")),
-            KeyBinding::new(&format!("{cmd}-o"), OpenPagePicker, Some("RootView")),
+            KeyBinding::new(cmd!("s"), SavePage, Some("RootView")),
+            KeyBinding::new(cmd!("p"), NextPage, Some("RootView")),
+            KeyBinding::new(cmd!("."), JumpToToday, Some("RootView")),
+            KeyBinding::new(cmd!("o"), OpenPagePicker, Some("RootView")),
             KeyBinding::new("escape", CloseOverlay, Some("RootView")),
             // GPUI matches predicates against the whole focus path, so the
             // explicit negation preserves literal `?` input (#45).
             KeyBinding::new("?", ToggleShortcuts, Some("RootView && !TextInput")),
-            KeyBinding::new(&format!("{cmd}-/"), ToggleShortcuts, None),
-            KeyBinding::new(&format!("{cmd}-q"), Quit, None),
+            KeyBinding::new(cmd!("/"), ToggleShortcuts, None),
+            KeyBinding::new(cmd!("q"), Quit, None),
             // `!TextInput` keeps a block edit from being navigated out from
             // under the user, and on macOS leaves alt-arrow free for
             // `WordLeft`/`WordRight` (see `text_input::bind_keys`).
             KeyBinding::new("alt-left", NavigateBack, Some("RootView && !TextInput")),
             KeyBinding::new("alt-right", NavigateForward, Some("RootView && !TextInput")),
-            KeyBinding::new(&format!("{cmd}-shift-t"), ToggleTheme, Some("RootView")),
-            KeyBinding::new(&format!("{cmd}-shift-f"), OpenSearch, Some("RootView")),
+            KeyBinding::new(cmd!("shift-t"), ToggleTheme, Some("RootView")),
+            KeyBinding::new(cmd!("shift-f"), OpenSearch, Some("RootView")),
         ]);
         // macOS apps conventionally hide with cmd-h (and hide everything
         // else with cmd-alt-h); there is no such convention on Linux, where
@@ -2160,11 +2159,12 @@ mod tests {
         );
 
         let viewport = cx.update(|window, _| window.viewport_size());
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: point(viewport.width / 2., viewport.height / 2.),
             delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
 
@@ -2193,12 +2193,13 @@ mod tests {
             cx.simulate_keystrokes(open);
             cx.run_until_parked();
             let viewport = cx.update(|window, _| window.viewport_size());
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 // Inside the overlay, which hangs from the top centre.
                 position: point(viewport.width / 2., px(120.)),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
                 modifiers: Modifiers::none(),
                 touch_phase: gpui::TouchPhase::Moved,
+                source: gpui::ScrollSource::Pointer,
             });
             cx.run_until_parked();
             assert_eq!(

@@ -1,4 +1,4 @@
-// Ported and trimmed from Zed's `crates/gpui/examples/input.rs` at rev ec9be5c3.
+// Ported and trimmed from Zed's `crates/gpui/examples/input.rs` at rev a701d985.
 // When bumping the pinned gpui rev (see Cargo.toml), diff against that file
 // first — the IME and Element APIs drift frequently on HEAD.
 
@@ -1193,13 +1193,6 @@ struct PrepaintState {
     selection: Vec<PaintQuad>,
 }
 
-impl IntoElement for TextElement {
-    type Element = Self;
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for TextElement {
     type RequestLayoutState = Rc<ShapeRequest>;
     type PrepaintState = PrepaintState;
@@ -1580,8 +1573,6 @@ pub fn emoji_font_fallbacks() -> FontFallbacks {
 /// Register the default keybindings on the `TextInput` context. Call once at
 /// startup (see `main.rs`).
 pub fn bind_keys(cx: &mut App) {
-    let cmd = crate::cmd_key();
-
     // Register the primary native motions before their aliases so the
     // shortcut overlay presents the most familiar spelling first.
     cx.bind_keys([
@@ -1655,12 +1646,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Submit, Some("TextInput")),
         KeyBinding::new("shift-enter", SubmitNow, Some("TextInput")),
         KeyBinding::new("escape", Cancel, Some("TextInput")),
-        KeyBinding::new(&format!("{cmd}-a"), SelectAll, Some("TextInput")),
-        KeyBinding::new(&format!("{cmd}-c"), Copy, Some("TextInput")),
-        KeyBinding::new(&format!("{cmd}-v"), Paste, Some("TextInput")),
-        KeyBinding::new(&format!("{cmd}-x"), Cut, Some("TextInput")),
-        KeyBinding::new(&format!("{cmd}-b"), Bold, Some("TextInput")),
-        KeyBinding::new(&format!("{cmd}-i"), Italic, Some("TextInput")),
+        KeyBinding::new(crate::cmd!("a"), SelectAll, Some("TextInput")),
+        KeyBinding::new(crate::cmd!("c"), Copy, Some("TextInput")),
+        KeyBinding::new(crate::cmd!("v"), Paste, Some("TextInput")),
+        KeyBinding::new(crate::cmd!("x"), Cut, Some("TextInput")),
+        KeyBinding::new(crate::cmd!("b"), Bold, Some("TextInput")),
+        KeyBinding::new(crate::cmd!("i"), Italic, Some("TextInput")),
     ]);
 }
 
@@ -2171,7 +2162,7 @@ mod tests {
         vcx.update(|window, cx| {
             window.activate_window();
             window.focus(&input.focus_handle(cx), cx);
-            window.draw(cx).clear();
+            window.draw(cx).clear(cx);
         });
         vcx.run_until_parked();
         (input, vcx)

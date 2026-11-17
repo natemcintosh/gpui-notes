@@ -183,6 +183,7 @@ fn extension(format: ImageFormat) -> &'static str {
         ImageFormat::Bmp => "bmp",
         ImageFormat::Tiff => "tiff",
         ImageFormat::Ico => "ico",
+        ImageFormat::Pnm => "pnm",
     }
 }
 

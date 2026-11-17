@@ -28,6 +28,7 @@ pub struct ShortcutHint {
 pub fn for_focused(window: &Window, cx: &App) -> Vec<ShortcutHint> {
     let contexts = window.context_stack();
     let focused = window.focused(cx);
+    let os = cx.platform_info().os;
     let available_actions = window.available_actions(cx);
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
@@ -64,7 +65,7 @@ pub fn for_focused(window: &Window, cx: &App) -> Vec<ShortcutHint> {
             let keystroke = binding
                 .keystrokes()
                 .iter()
-                .map(ToString::to_string)
+                .map(|keystroke| keystroke.display(os).to_string())
                 .collect::<Vec<_>>()
                 .join(" ");
 
