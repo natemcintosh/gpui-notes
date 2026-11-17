@@ -378,8 +378,7 @@ impl BlockView {
     /// don't seed it still get the "New page" row.
     fn completion_names(cx: &App) -> Vec<SharedString> {
         cx.try_global::<LinkIndex>()
-            .map(LinkIndex::page_names)
-            .unwrap_or_default()
+            .map_or_default(LinkIndex::page_names)
     }
 
     /// Dismisses the popup. Returns whether there was one to dismiss, which is

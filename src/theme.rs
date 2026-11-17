@@ -4,11 +4,13 @@
 //! through view implementations. Callers use semantic names rather than raw
 //! RGB values; each name reads from the active [`Theme`]'s palette, so
 //! switching themes (`toggle`) changes every view on its next render.
+//! The app follows the desktop's light/dark preference (see `main`); a
+//! manual toggle holds until the desktop preference next changes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-use gpui::{px, rgba, App, Pixels, Rgba, SharedString, Window};
+use gpui::{px, rgba, App, Pixels, Rgba, SharedString, Window, WindowAppearance};
 
 /// Widest the note column grows; wider windows centre it. Matches Logseq's
 /// `--ls-main-content-max-width`.
@@ -114,7 +116,7 @@ fn first_installed(candidates: &[&'static str], installed: &[String]) -> Option<
 }
 
 /// The two built-in colour themes, both from Ethan Schoonover's Solarized
-/// palette. The app starts in [`Theme::SolarizedDark`].
+/// palette. The app starts in whichever matches the desktop's preference.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Theme {
     #[default]
@@ -136,6 +138,16 @@ impl Theme {
         match self {
             Self::SolarizedDark => &SOLARIZED_DARK,
             Self::SolarizedLight => &SOLARIZED_LIGHT,
+        }
+    }
+}
+
+/// The theme matching the desktop's light/dark preference.
+impl From<WindowAppearance> for Theme {
+    fn from(appearance: WindowAppearance) -> Self {
+        match appearance {
+            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::SolarizedLight,
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::SolarizedDark,
         }
     }
 }
@@ -507,6 +519,18 @@ pub fn transparent() -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_appearance_picks_matching_theme() {
+        for (appearance, theme) in [
+            (WindowAppearance::Light, Theme::SolarizedLight),
+            (WindowAppearance::VibrantLight, Theme::SolarizedLight),
+            (WindowAppearance::Dark, Theme::SolarizedDark),
+            (WindowAppearance::VibrantDark, Theme::SolarizedDark),
+        ] {
+            assert_eq!(Theme::from(appearance), theme);
+        }
+    }
 
     #[test]
     fn picks_first_installed_candidate() {
