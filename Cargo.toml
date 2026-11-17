@@ -34,6 +34,12 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3", features = ["wayland"] }
 
+[features]
+# Opt-in X11 backend for Linux/FreeBSD. Off by default because it makes the
+# binary link libxcb and libxkbcommon-x11 even under Wayland. See README
+# "Linux requirements".
+x11 = ["gpui_platform/x11"]
+
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "ec9be5c3" }
 

@@ -1,7 +1,8 @@
 # Pushing a `v*` tag (see `just release`) creates a GitHub release and attaches
 # a prebuilt binary per target, named to match `[package.metadata.binstall]`
 # in Cargo.toml: `gpui-notes-<target>-v<version>.tar.gz` (`.zip` on Windows),
-# binary at the root.
+# binary at the root. Linux targets also get an `x11` feature build, named
+# `gpui-notes-<target>-x11-v<version>.tar.gz`.
 name: Release
 
 on:
@@ -55,6 +56,15 @@ jobs:
           # binstall override in Cargo.toml.
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+          # The opt-in `x11` feature (see README "X11 (opt-in)"), named
+          # `gpui-notes-<target>-x11-v<version>.tar.gz`. That doesn't match
+          # binstall's pkg-url, so binstall keeps installing the default build.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: x11
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            features: x11
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -70,18 +80,23 @@ jobs:
             libwayland-dev \
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
+            libxcb1-dev \
             libfontconfig1-dev \
             libfreetype-dev \
             pkg-config
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          # The matrix isn't part of the cache key, so without the features
+          # the default and x11 builds of a target would share one cache.
+          key: ${{ matrix.target }}-${{ matrix.features }}
 
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: gpui-notes
           target: ${{ matrix.target }}
-          archive: $bin-$target-$tag
+          features: ${{ matrix.features }}
+          # `-<features>` after the target for feature builds, nothing otherwise.
+          archive: $bin-$target${{ matrix.features && format('-{0}', matrix.features) || '' }}-$tag
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
