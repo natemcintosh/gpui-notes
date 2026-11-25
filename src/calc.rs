@@ -41,7 +41,7 @@ pub fn format_number(n: f64) -> String {
 #[derive(Default)]
 struct Scope {
     vars: HashMap<String, f64>,
-    /// Every preceding line that produced a value, for `sum`/`total`/`avg`.
+    /// Every preceding line that produced a value, for `sum`/`avg`.
     results: Vec<f64>,
 }
 
@@ -65,14 +65,17 @@ impl Scope {
         }
     }
 
+    /// A variable the user assigned shadows the aggregate of the same name.
     fn lookup(&self, name: &str) -> Option<f64> {
+        if let Some(&n) = self.vars.get(name) {
+            return Some(n);
+        }
         match name {
-            "sum" | "total" => Some(self.results.iter().sum()),
+            "sum" => Some(self.results.iter().sum()),
             #[allow(clippy::cast_precision_loss)]
             "avg" => (!self.results.is_empty())
                 .then(|| self.results.iter().sum::<f64>() / self.results.len() as f64),
-            "last" => self.results.last().copied(),
-            _ => self.vars.get(name).copied(),
+            _ => None,
         }
     }
 }
@@ -501,6 +504,8 @@ mod tests {
     #[case("1 / 0", "division by zero")]
     #[case("1 % 0", "division by zero")]
     #[case("nope", "unknown name `nope`")]
+    #[case("total", "unknown name `total`")]
+    #[case("last", "unknown name `last`")]
     #[case("(1 + 2", "unbalanced parens")]
     #[case("1 +", "unexpected end of line")]
     #[case("1 2", "unexpected `2`")]
@@ -519,24 +524,31 @@ mod tests {
     }
 
     #[test]
-    fn sum_total_avg_and_last_see_preceding_results() {
+    fn sum_and_avg_see_preceding_results() {
         // Each aggregate is itself a result line, so it feeds the next one:
-        // sum = 1+2+3, total = 1+2+3+6, avg = (1+2+3+6+12)/5, last = avg.
-        let shown: Vec<String> = eval_block("1\n2\n3\nsum\ntotal\navg\nlast")
+        // sum = 1+2+3, avg = (1+2+3+6)/4.
+        let shown: Vec<String> = eval_block("1\n2\n3\nsum\navg")
             .iter()
             .map(display)
             .collect();
-        assert_eq!(shown, ["1", "2", "3", "6", "12", "4.8", "4.8"]);
+        assert_eq!(shown, ["1", "2", "3", "6", "3"]);
     }
 
     #[test]
-    fn aggregates_of_nothing_are_unknown_names() {
+    fn an_assigned_variable_shadows_the_aggregate_of_the_same_name() {
+        let shown: Vec<String> =
+            eval_block("p1 = 8.7 - 7.5\np2 = 10.5\nsum = 7\nrem = sum - p1\nend = p2 + rem")
+                .iter()
+                .map(display)
+                .collect();
+        assert_eq!(shown, ["1.2", "10.5", "7", "5.8", "16.3"]);
+    }
+
+    #[test]
+    fn avg_of_nothing_is_an_unknown_name() {
         assert_eq!(
-            eval_block("avg\nlast"),
-            vec![
-                Outcome::Error("unknown name `avg`".into()),
-                Outcome::Error("unknown name `last`".into()),
-            ]
+            eval_block("avg"),
+            vec![Outcome::Error("unknown name `avg`".into())]
         );
     }
 
@@ -617,7 +629,7 @@ mod tests {
         use crate::outline::Outline;
 
         let outline = Outline::parse(
-            "- Trip\n  - ```calc\n    flights = 420\n    hotel = 3 * 180\n    total\n    ```\n",
+            "- Trip\n  - ```calc\n    flights = 420\n    hotel = 3 * 180\n    sum\n    ```\n",
         );
         let blocks = lower(&outline.roots[0].children[0].text, &[]);
         let [BlockNode::CodeBlock { lang, text }] = &blocks[..] else {
