@@ -29,6 +29,7 @@ macro_rules! cmd {
 }
 
 pub mod assets;
+pub mod autocorrect;
 pub mod autoscroll;
 pub mod block_render;
 pub mod block_view;

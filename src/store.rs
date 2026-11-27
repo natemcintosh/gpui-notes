@@ -44,9 +44,9 @@ impl NotesStore {
     /// if `config.toml` can't be read or parsed, or if the home directory
     /// or data directory cannot be determined.
     pub fn default_root() -> io::Result<PathBuf> {
-        let config = match config::config_path() {
-            Some(path) if !cfg!(debug_assertions) => Config::load(&path)?,
-            _ => Config::default(),
+        let config = match config::active_config_path() {
+            Some(path) => Config::load(&path)?,
+            None => Config::default(),
         };
         resolve_root(
             std::env::var_os("GPUI_NOTES_ROOT").map(PathBuf::from),
@@ -337,6 +337,7 @@ mod tests {
     fn config(notes_root: &str) -> Config {
         Config {
             notes_root: Some(notes_root.into()),
+            ..Config::default()
         }
     }
 

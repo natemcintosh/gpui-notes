@@ -145,11 +145,10 @@ static SKIPPED: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// The byte ranges of the words in `text` that `is_correct` rejects. Words
-/// inside code fences and the spans in [`SKIPPED`] aren't checked, nor are
-/// words containing a digit. Pure, so it can be tested without a dictionary.
+/// in [`non_prose_ranges`] aren't checked, nor are words containing a digit.
+/// Pure, so it can be tested without a dictionary.
 pub fn misspelled_ranges(text: &str, is_correct: impl Fn(&str) -> bool) -> Vec<Range<usize>> {
-    let mut skipped: Vec<Range<usize>> = SKIPPED.find_iter(text).map(|m| m.range()).collect();
-    skipped.extend(fenced_ranges(text));
+    let skipped = non_prose_ranges(text);
     text.unicode_word_indices()
         .filter_map(|(start, word)| {
             // `_` joins words in Unicode segmentation, so `_emphasis_` is
@@ -166,6 +165,15 @@ pub fn misspelled_ranges(text: &str, is_correct: impl Fn(&str) -> bool) -> Vec<R
             (!skip && !is_correct(word)).then_some(range)
         })
         .collect()
+}
+
+/// The byte ranges of `text` that aren't prose, which spell check and
+/// auto-correct leave alone: code fences and the spans in [`SKIPPED`].
+#[must_use]
+pub fn non_prose_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = SKIPPED.find_iter(text).map(|m| m.range()).collect();
+    ranges.extend(fenced_ranges(text));
+    ranges
 }
 
 /// The lines from each code fence's opening line through its closing line

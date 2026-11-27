@@ -8,8 +8,10 @@ use gpui::{
     FocusHandle, Focusable, IntoElement, KeyBinding, Keystroke, MouseButton, NavigationDirection,
     ParentElement, Render, SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions,
 };
+use gpui_notes::autocorrect::{self, Autocorrect, AutocorrectEvent, AutocorrectView};
 use gpui_notes::block_view;
 use gpui_notes::cmd;
+use gpui_notes::config;
 use gpui_notes::errors::{self, LastError};
 use gpui_notes::goto_word::{self, GotoWord, Labels, Step};
 use gpui_notes::history::{self, NavHistory, NavTarget, OpenTarget};
@@ -40,6 +42,7 @@ actions!(
         CloseOverlay,
         OpenPagePicker,
         OpenSearch,
+        OpenAutocorrect,
         ToggleShortcuts,
         NavigateBack,
         NavigateForward,
@@ -54,10 +57,11 @@ actions!(
 /// enum keeps overlay invariants (only one open at a time) unrepresentable as
 /// invalid states, and gives transition tests a single field to assert on.
 ///
-/// `PagePicker`, `Search` and `ShortcutsHelp` are absolute-positioned overlays. The
-/// enum collapses them into the same axis so that opening any one always
-/// dismisses the others. `goto_word`'s labels are one too: they sit over the
-/// page, and nothing else can open while they intercept every keystroke.
+/// `PagePicker`, `Search`, `Autocorrect` and `ShortcutsHelp` are
+/// absolute-positioned overlays. The enum collapses them into the same axis
+/// so that opening any one always dismisses the others. `goto_word`'s labels
+/// are one too: they sit over the page, and nothing else can open while they
+/// intercept every keystroke.
 pub enum OverlayMode {
     None,
     PagePicker {
@@ -66,6 +70,10 @@ pub enum OverlayMode {
     },
     Search {
         entity: Entity<SearchView>,
+        _sub: Subscription,
+    },
+    Autocorrect {
+        entity: Entity<AutocorrectView>,
         _sub: Subscription,
     },
     ShortcutsHelp {
@@ -107,6 +115,16 @@ impl OverlayMode {
     #[must_use]
     pub fn is_shortcuts(&self) -> bool {
         matches!(self, Self::ShortcutsHelp { .. })
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn autocorrect(&self) -> Option<&Entity<AutocorrectView>> {
+        if let Self::Autocorrect { entity, .. } = self {
+            Some(entity)
+        } else {
+            None
+        }
     }
 
     #[cfg(test)]
@@ -174,6 +192,9 @@ impl RootView {
             }
             OverlayMode::Search { entity, .. } => {
                 entity.update(cx, |search, cx| search.focus_input(window, cx));
+            }
+            OverlayMode::Autocorrect { entity, .. } => {
+                entity.update(cx, |view, cx| view.focus_input(window, cx));
             }
             OverlayMode::ShortcutsHelp { .. } => {
                 window.focus(&self.focus_handle, cx);
@@ -445,27 +466,53 @@ impl RootView {
                     .text_color(theme::fg_muted())
                     .child(location),
             )
-            .child(
-                div()
-                    .id(ElementId::Name(SharedString::from("show-shortcuts")))
-                    .px_2()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .text_color(theme::control_fg())
-                    .hover(|style| {
-                        style
-                            .bg(theme::row_hover())
-                            .text_color(theme::control_hover_fg())
-                    })
-                    .child("?")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.toggle_shortcuts(&ToggleShortcuts, window, cx);
-                        }),
-                    ),
-            )
+            .child(Self::header_button(
+                "open-autocorrect",
+                "auto-correct",
+                cx,
+                |this, window, cx| {
+                    this.open_autocorrect(&OpenAutocorrect, window, cx);
+                },
+            ))
+            .child(Self::header_button(
+                "show-shortcuts",
+                "?",
+                cx,
+                |this, window, cx| {
+                    this.toggle_shortcuts(&ToggleShortcuts, window, cx);
+                },
+            ))
             .into_any_element()
+    }
+
+    fn header_button(
+        id: &'static str,
+        label: &'static str,
+        cx: &mut Context<Self>,
+        on_press: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .px_2()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(theme::control_fg())
+            .hover(|style| {
+                style
+                    .bg(theme::row_hover())
+                    .text_color(theme::control_hover_fg())
+            })
+            .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    on_press(this, window, cx);
+                    // Keeps the root's `track_focus` from taking focus back
+                    // from whatever `park_focus` just focused.
+                    window.prevent_default();
+                }),
+            )
     }
 
     /// The dismissible error line shown under the header while a `LastError`
@@ -603,6 +650,31 @@ impl RootView {
         cx.notify();
     }
 
+    fn open_autocorrect(
+        &mut self,
+        _: &OpenAutocorrect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.overlay, OverlayMode::Autocorrect { .. }) {
+            return;
+        }
+        let view = cx.new(|cx| AutocorrectView::new(window, cx));
+        let sub = cx.subscribe_in(
+            &view,
+            window,
+            |this, _view, event: &AutocorrectEvent, window, cx| match event {
+                AutocorrectEvent::Dismissed => this.dismiss_overlay(window, cx),
+            },
+        );
+        self.overlay = OverlayMode::Autocorrect {
+            entity: view,
+            _sub: sub,
+        };
+        self.park_focus(window, cx);
+        cx.notify();
+    }
+
     /// Opens the hit's note, then focuses the matched block in place of the
     /// first one `park_focus` would pick.
     fn handle_search_selection(
@@ -631,6 +703,7 @@ impl RootView {
         let (focus_target, block_mode) = match &self.overlay {
             OverlayMode::PagePicker { .. } => ("page picker input", "not applicable"),
             OverlayMode::Search { .. } => ("search input", "not applicable"),
+            OverlayMode::Autocorrect { .. } => ("auto-correct input", "not applicable"),
             OverlayMode::ShortcutsHelp { .. } => ("root", "not applicable"),
             OverlayMode::JumpCollecting | OverlayMode::JumpLabels { .. } => {
                 ("block", "jump labels")
@@ -686,6 +759,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::close_overlay))
             .on_action(cx.listener(Self::open_page_picker))
             .on_action(cx.listener(Self::open_search))
+            .on_action(cx.listener(Self::open_autocorrect))
             .on_action(cx.listener(Self::toggle_shortcuts))
             .on_action(cx.listener(Self::navigate_back))
             .on_action(cx.listener(Self::navigate_forward))
@@ -743,6 +817,7 @@ impl Render for RootView {
         let overlay_child: Option<gpui::AnyElement> = match &self.overlay {
             OverlayMode::PagePicker { entity, .. } => Some(entity.clone().into_any_element()),
             OverlayMode::Search { entity, .. } => Some(entity.clone().into_any_element()),
+            OverlayMode::Autocorrect { entity, .. } => Some(entity.clone().into_any_element()),
             OverlayMode::ShortcutsHelp { hints } => {
                 Some(ShortcutOverlay::new(hints.clone()).into_any_element())
             }
@@ -805,6 +880,22 @@ fn set_dock_icon() {
     }
 }
 
+/// Sets the editor's per-machine globals: the spell checker with the
+/// personal dictionary, and the auto-correct rules. Unreadable files are
+/// reported, and the app starts without them.
+fn load_editor_settings(cx: &mut App) {
+    let mut spell_checker = SpellChecker::new(spellcheck::personal_dictionary_path());
+    if let Err(e) = spell_checker.load_personal_words() {
+        errors::report(format!("couldn't read the personal dictionary: {e}"), cx);
+    }
+    cx.set_global(spell_checker);
+    let mut autocorrect = Autocorrect::new(config::active_config_path());
+    if let Err(e) = autocorrect.load() {
+        errors::report(format!("couldn't read the auto-correct rules: {e}"), cx);
+    }
+    cx.set_global(autocorrect);
+}
+
 fn main() {
     application().run(|cx: &mut App| {
         #[cfg(target_os = "macos")]
@@ -815,11 +906,13 @@ fn main() {
         page_picker::bind_keys(cx);
         search::bind_keys(cx);
         goto_word::bind_keys(cx);
+        autocorrect::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new(cmd!("s"), SavePage, Some("RootView")),
             KeyBinding::new(cmd!("p"), NextPage, Some("RootView")),
             KeyBinding::new(cmd!("."), JumpToToday, Some("RootView")),
             KeyBinding::new(cmd!("o"), OpenPagePicker, Some("RootView")),
+            KeyBinding::new(cmd!(","), OpenAutocorrect, Some("RootView")),
             KeyBinding::new("escape", CloseOverlay, Some("RootView")),
             // GPUI matches predicates against the whole focus path, so the
             // explicit negation preserves literal `?` input (#45).
@@ -851,6 +944,8 @@ fn main() {
         #[cfg(target_os = "macos")]
         cx.set_menus([
             gpui::Menu::new("GPUI Notes").items([
+                gpui::MenuItem::action("Auto-correct…", OpenAutocorrect),
+                gpui::MenuItem::separator(),
                 gpui::MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
                 gpui::MenuItem::separator(),
                 gpui::MenuItem::action("Hide GPUI Notes", Hide),
@@ -881,11 +976,7 @@ fn main() {
                 cx,
             );
         }
-        let mut spell_checker = SpellChecker::new(spellcheck::personal_dictionary_path());
-        if let Err(e) = spell_checker.load_personal_words() {
-            errors::report(format!("couldn't read the personal dictionary: {e}"), cx);
-        }
-        cx.set_global(spell_checker);
+        load_editor_settings(cx);
         cx.set_global(NavHistory::default());
         save_all_on_quit(cx);
         // Deliberately not `navigate_to`: the first page is not a history
@@ -932,6 +1023,7 @@ mod tests {
     use gpui_notes::block_view::BlockMode;
     use gpui_notes::outline::BlockId;
     use gpui_notes::registry::set_current_page;
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     fn mount_root<'a>(
@@ -946,11 +1038,13 @@ mod tests {
             page_picker::bind_keys(cx);
             search::bind_keys(cx);
             goto_word::bind_keys(cx);
+            autocorrect::bind_keys(cx);
             cx.bind_keys([
                 KeyBinding::new("ctrl-s", SavePage, Some("RootView")),
                 KeyBinding::new("ctrl-p", NextPage, Some("RootView")),
                 KeyBinding::new("ctrl-.", JumpToToday, Some("RootView")),
                 KeyBinding::new("ctrl-o", OpenPagePicker, Some("RootView")),
+                KeyBinding::new("ctrl-,", OpenAutocorrect, Some("RootView")),
                 KeyBinding::new("escape", CloseOverlay, Some("RootView")),
                 KeyBinding::new("?", ToggleShortcuts, Some("RootView && !TextInput")),
                 KeyBinding::new("ctrl-/", ToggleShortcuts, None),
@@ -967,6 +1061,7 @@ mod tests {
             cx.set_global(CurrentPage::default());
             cx.set_global(LastError::default());
             cx.set_global(NavHistory::default());
+            cx.set_global(Autocorrect::new(None));
             save_all_on_quit(cx);
             // Setup, not navigation: matches `main`'s startup, back stack empty.
             set_current_page(&NoteSource::Page("Home".into()), cx).unwrap();
@@ -1456,6 +1551,49 @@ mod tests {
         assert_root_in_focus_path(cx, &root);
 
         assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+    }
+
+    /// The header button opens the auto-correct editor. Typing a typo, tab,
+    /// its replacement and Enter adds a rule; clicking the rule loads it to
+    /// change it; `×` removes it; Escape closes the editor.
+    #[gpui::test]
+    fn autocorrect_editor_adds_changes_and_removes_rules(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, cx) = mount_root(cx, &tmp);
+        let rules =
+            |cx: &mut VisualTestContext| cx.read(|cx| cx.global::<Autocorrect>().rules().clone());
+        let rule = |typo: &str, replacement: &str| {
+            BTreeMap::from([(typo.to_owned(), replacement.to_owned())])
+        };
+        let click = |cx: &mut VisualTestContext, selector: &'static str| {
+            let bounds = cx.debug_bounds(selector).expect(selector);
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+        };
+
+        click(cx, "open-autocorrect");
+        assert!(cx.read(|cx| root.read(cx).overlay().autocorrect().is_some()));
+
+        cx.simulate_input("teh");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_input("the");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(rules(cx), rule("teh", "the"));
+
+        click(cx, "autocorrect-rule-0");
+        cx.simulate_input("y");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(rules(cx), rule("teh", "they"));
+
+        click(cx, "autocorrect-remove-0");
+        assert_eq!(rules(cx), BTreeMap::new());
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.read(|cx| root.read(cx).overlay().is_none()));
+        assert_root_in_focus_path(cx, &root);
     }
 
     /// `None` → `ShortcutsHelp` via `ctrl-/`.

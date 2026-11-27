@@ -15,6 +15,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::autocorrect::{self, Autocorrect};
 use crate::spellcheck::SpellChecker;
 use crate::{autoscroll, errors, theme};
 
@@ -618,9 +619,25 @@ impl TextInput {
         self.apply_edit(content, selection, cx);
     }
 
-    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
+    /// Enter also finishes a word, so it corrects one before an empty
+    /// selection first. The queued `Changed` reaches subscribers before
+    /// `Submitted`, so the block editor splits the corrected text.
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+        if self.markdown && self.selection.is_empty() {
+            if let Some((content, caret)) = self.autocorrected(self.selection.head, "\n", cx) {
+                self.apply_edit(content, caret..caret, cx);
+            }
+        }
         cx.emit(TextInputEvent::Submitted);
+    }
+
+    /// The content with the `Autocorrect` rule that ends at `caret` applied,
+    /// and the caret after it, when typing `typed` there finishes a word.
+    fn autocorrected(&self, caret: usize, typed: &str, cx: &App) -> Option<(String, usize)> {
+        if !autocorrect::ends_word(typed) {
+            return None;
+        }
+        cx.try_global::<Autocorrect>()?.apply(&self.content, caret)
     }
 
     #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
@@ -1039,27 +1056,25 @@ impl EntityInputHandler for TextInput {
     ) {
         // A typed character arrives with no explicit range and no IME
         // composition in progress.
-        if self.markdown
-            && range_utf16.is_none()
-            && self.marked_range.is_none()
-            && !self.selection.is_empty()
-        {
+        let typed = self.markdown && range_utf16.is_none() && self.marked_range.is_none();
+        if typed && !self.selection.is_empty() {
             if let Some((open, close)) = surround_pair(new_text) {
                 self.surround_selection(open, close, cx);
                 return;
             }
         }
-        if self.markdown
-            && range_utf16.is_none()
-            && self.marked_range.is_none()
-            && self.selection.is_empty()
-        {
-            if let Some((content, selection)) =
-                apply_auto_pair(&self.content, self.selection.head, new_text)
-            {
-                self.apply_edit(content, selection, cx);
-                return;
-            }
+        if typed && self.selection.is_empty() {
+            // One edit for the correction and the character, so a closer
+            // that is stepped over (`(teh|)` + `)`) still changes the text.
+            let caret = self.selection.head;
+            let corrected = self.autocorrected(caret, new_text, cx);
+            let (content, caret) = corrected
+                .as_ref()
+                .map_or((self.content.as_ref(), caret), |(c, caret)| (c, *caret));
+            let (content, selection) = apply_auto_pair(content, caret, new_text)
+                .unwrap_or_else(|| apply_replace(content, caret..caret, new_text));
+            self.apply_edit(content, selection, cx);
+            return;
         }
         let range = range_utf16
             .as_ref()
@@ -2262,6 +2277,54 @@ mod tests {
         cx.simulate_input("(");
         cx.run_until_parked();
         assert_buffer(cx, &input, "(", 1..1);
+    }
+
+    fn set_teh_rule(cx: &mut TestAppContext) {
+        let mut autocorrect = Autocorrect::new(None);
+        autocorrect.set("teh", Some("the")).unwrap();
+        cx.set_global(autocorrect);
+    }
+
+    /// A space, a stepped-over closer and Enter each finish a word and
+    /// correct it. The last `Changed` before `Submitted` carries the
+    /// correction, which is what the block editor saves and splits.
+    #[gpui::test]
+    fn finishing_a_word_autocorrects_it(cx: &mut TestAppContext) {
+        set_teh_rule(cx);
+        let (input, cx) = mount_wrapped_input(cx, "");
+        let events = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _sub = cx.update(|_, cx| {
+            let events = events.clone();
+            cx.subscribe(&input, move |_, event: &TextInputEvent, _| {
+                events.borrow_mut().push(format!("{event:?}"));
+            })
+        });
+
+        cx.simulate_input("teh ");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "the ", 4..4);
+
+        cx.simulate_input("(teh)");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "the (the)", 9..9);
+
+        cx.simulate_input("teh");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "the (the)the", 12..12);
+        assert_eq!(
+            events.borrow()[events.borrow().len() - 2..],
+            [r#"Changed("the (the)the")"#, "Submitted"]
+        );
+    }
+
+    #[gpui::test]
+    fn plain_input_does_not_autocorrect(cx: &mut TestAppContext) {
+        set_teh_rule(cx);
+        let (input, cx) = mount_input(cx, "");
+        cx.simulate_input("teh ");
+        cx.run_until_parked();
+        assert_buffer(cx, &input, "teh ", 4..4);
     }
 
     #[rstest]

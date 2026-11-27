@@ -77,6 +77,19 @@ notes_root = "~/logseq"
 
 The same directory also holds `dictionary.txt`, the words added with "Add to dictionary".
 
+### Auto-correct
+
+Auto-correct does nothing until you add rules. Each rule replaces a typo once you finish the word (type a space, punctuation or Enter after it). Matching is case-sensitive, and code, links and URLs are left alone. Add rules under `[autocorrect]` in `config.toml`, one `typo = "replacement"` per line (quote keys that contain symbols):
+
+```toml
+[autocorrect]
+teh = "the"
+adn = "and"
+"->" = "→"
+```
+
+Or edit them in the app: press `ctrl-,` (`cmd-,` on macOS) or click **auto-correct** in the header. Type the typo, press Tab, type the replacement and press Enter. Click a rule to change it, or `×` to remove it. The app saves each change to `config.toml` and keeps your comments and other settings. It reads the file only at startup, so restart it after editing the file by hand. As with `notes_root`, only release builds read and save the rules.
+
 ## Releasing
 
 `just release patch` (or `minor`, `major`) bumps the version in `Cargo.toml` (e.g. 0.2.1 => 0.2.2), commits, tags `v0.2.2` and pushes. Pushing the tag runs `.github/workflows/release.yml`, which creates the GitHub release and uploads one `gpui-notes-<target>-v<version>.tar.gz` (`.zip` on Windows) per target (plus a `.sha256`). Those names are what `[package.metadata.binstall]` in `Cargo.toml` expects, so change both together.

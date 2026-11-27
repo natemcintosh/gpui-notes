@@ -2078,6 +2078,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit 0.25.11+spec-1.1.0",
  "two-face",
  "unicode-segmentation",
  "winresource",
@@ -5524,6 +5525,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.1",
 ]
 
